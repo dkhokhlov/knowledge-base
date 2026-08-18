@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+
+# Local logs / scratch
+*.log
+
+# Claude Code local index cache
+.claude/
+.codebase-index/
+
+# Persistent data bind-mount tree (moved to RAID + symlinked back by the user)
+/data/
+
+# Personal overrides + generated secrets. The tracked .env IS the config of
+# record (no secrets), so .env is committed. .env.local holds WEBUI_SECRET_KEY
+# and GRAPHITI_API_TOKEN.
+.env.local
+.env.*.local
+
+.opencode/index/

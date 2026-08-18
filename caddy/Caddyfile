@@ -1,0 +1,21 @@
+# Gate the Graphiti MCP HTTP endpoint with a single shared bearer token.
+# /health is ungated for probes; all other paths require the token.
+# The token is read from the container env via {$GRAPHITI_API_TOKEN}, so it
+# never appears in this file.
+:8000 {
+	@health path /health
+	handle @health {
+		reverse_proxy graphiti-mcp:8000
+	}
+
+	# Reject requests whose Authorization header does not exactly match the token.
+	@unauth not header Authorization "Bearer {$GRAPHITI_API_TOKEN}"
+	handle @unauth {
+		respond "Unauthorized" 401
+	}
+
+	# Authenticated: forward to the internal graphiti-mcp service.
+	handle {
+		reverse_proxy graphiti-mcp:8000
+	}
+}
