@@ -22,17 +22,42 @@ the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
 ## Architecture
 
 ```
-+------------------------------------------------------------------------------+
-|Host Ollama :11434  <--- host-gateway --->  kbnet (bridge)                    |
-|                                                neo4j (internal)              |
-|                                                graphiti-mcp (internal)       |
-|0.0.0.0 exposed:                               graphiti-gateway               |
-|  :3000 open-webui (HTTP + REST + /docs)       open-webui                     |
-|  :8000 graphiti-gateway (/mcp/ bearer-gated)                                 |
-|        \__ /health ungated                                                   |
-+------------------------------------------------------------------------------+
+      +-------------+         +-------------+                     +-------------+
+      | User        |         | Agent       |                     | Agent       |
+      | (browser)   |         | (REST)      |                     | (MCP)       |
+      +-------------+         +-------------+                     +-------------+
+             | HTTP                  | REST /api/*                       | MCP /mcp/
+             |                       | Bearer OWUI key                   | Bearer token
++------------v-----------------------v-----------------------------------v-----------------+
+| Docker host  (kbnet bridge)                                                              |
+|  +--------------------------------------------------+    +----------------------------+  |
+|  | Open WebUI  :3000  (HTTP + REST)                 |    | Caddy gateway :8000        |  |
+|  |                                                  |    | bearer-token gate          |  |
+|  |  +-------------+   +--------------------------+  |    | /health ungated            |  |
+|  |  | Chat UI     |   | Knowledge base           |  |    +----------------------------+  |
+|  |  | (RAG chat)  |<->| (indexed                 |  |                  v                 |
+|  |  |             |   |  documents)              |  |    +----------------+   +---------+|
+|  |  +------+------+   |                          |  |    | graphiti-mcp   |   |Neo4j    ||
+|  |         |          |                          |  |    | (internal)     |-->|(graph)  ||
+|  |         |          |                          |  |    | LLM + embedder |   |internal ||
+|  |         |          +------------+-------------+  |    |                |   |         ||
+|  |         |                       |                |    +--------+-------+   +---------+|
+|  |         |                       |                |             |                      |
+|  |         |                       |                |             |                      |
+|  +---------+-----------------------+----------------+             |                      |
+|            |                       |                              |                      |
+|  +---------v-----------------------v------------------------------v-------------------+  |
+|  | Ollama  :11434  (host, via host-gateway)                                           |  |
+|  | qwen2.5:14b (chat LLM)    nomic-embed-text (embeddings)                            |  |
+|  |                                                                                    |  |
+|  +------------------------------------------------------------------------------------+  |
++------------------------------------------------------------------------------------------+
 ```
 
+- A user with a browser reaches [Open WebUI][open-webui] over HTTP (`:3000`).
+- An agent uses Open WebUI over REST (`:3000/api/*`, Bearer OWUI API key) and Graphiti over [MCP][mcp] (`:8000/mcp/`, Bearer `GRAPHITI_API_TOKEN`).
+- Inside [Open WebUI][open-webui]: the Chat UI (RAG chat) reads from the Knowledge base (indexed documents); both reach [Ollama][ollama] for the chat LLM and embeddings.
+- [Graphiti MCP][graphiti] reaches [Ollama][ollama] for its LLM + embedder and [Neo4j][neo4j] for the graph store.
 - Only `:3000` ([Open WebUI][open-webui]) and `:8000` (graphiti gateway) bind to 0.0.0.0.
 - [Neo4j][neo4j] and graphiti-mcp are container-network only (no host ports).
 - [Ollama][ollama] is external on the Docker host (reached via host-gateway); not published by this stack.
