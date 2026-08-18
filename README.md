@@ -284,8 +284,3 @@ Caveats:
 - Open WebUI exposes `/docs` and `/openapi.json` only in `ENV=dev`.
   - `ENV=dev` also raises log verbosity. Acceptable for an internal/LAN deployment.
 - `SEMAPHORE_LIMIT=3` is conservative for one local Ollama. Raise it if the host Ollama has capacity.
-
-## License
-
-- MIT — see `LICENSE`.
-- Copyright (c) 2026 Dmitri Khokhlov <dkhokhlov@gmail.com>.
