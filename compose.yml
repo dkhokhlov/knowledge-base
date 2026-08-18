@@ -66,7 +66,8 @@ services:
     volumes:
       - ./graphiti/config.yaml:/app/mcp/config/config.yaml:ro
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8000/health"]
+      # curl, not wget: the zepai/knowledge-graph-mcp image has no wget.
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -81,6 +82,12 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # caddy:2-alpine ships /usr/bin/caddy with the cap_net_bind_service file
+    # capability. cap_drop:ALL clears the bounding set, so the kernel refuses
+    # to exec the binary ("operation not permitted"). Add NET_BIND_SERVICE back
+    # so exec succeeds; it is unused (we bind :8000, an unprivileged port).
+    cap_add:
+      - NET_BIND_SERVICE
     depends_on:
       graphiti-mcp:
         condition: service_healthy
@@ -138,7 +145,8 @@ services:
     volumes:
       - ${DATA_ROOT:-./data}/openwebui:/app/backend/data
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      # curl, not wget: the open-webui image has no wget.
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/health"]
       interval: 15s
       timeout: 5s
       retries: 10

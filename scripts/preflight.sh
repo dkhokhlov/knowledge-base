@@ -25,17 +25,18 @@ ok "./data tree exists"
 set -a; . ./.env; set +a
 
 OLLAMA="${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
-# Probe the host Ollama directly (host side, not via the container).
-TAGS="$(curl -sf --connect-timeout 3 http://localhost:11434/api/tags 2>/dev/null)" \
-  || fail "host Ollama not reachable at http://localhost:11434 (is it running?)"
-ok "host Ollama reachable"
+# Probe the configured Ollama from the host side (it must be reachable from
+# the host AND from the containers; compose points both services at $OLLAMA).
+TAGS="$(curl -sf --connect-timeout 3 "${OLLAMA}/api/tags" 2>/dev/null)" \
+  || fail "Ollama not reachable at ${OLLAMA} (is it running? check OLLAMA_BASE_URL in .env)"
+ok "Ollama reachable at ${OLLAMA}"
 
 MODEL_NAME="${MODEL_NAME:-qwen2.5:14b}"
 echo "$TAGS" | grep -q "\"${MODEL_NAME}\"" \
   || fail "model '${MODEL_NAME}' not pulled in host Ollama (run: make pull-models)"
 ok "Ollama has LLM model '${MODEL_NAME}'"
-echo "$TAGS" | grep -q '"nomic-embed-text"' \
-  || fail "model 'nomic-embed-text' not pulled in host Ollama (run: make pull-models)"
+echo "$TAGS" | grep -qE '"nomic-embed-text(:|")' \
+  || fail "model 'nomic-embed-text' not pulled in Ollama (run: make pull-models)"
 ok "Ollama has embedder 'nomic-embed-text'"
 
 printf '\nPreflight OK. Next: make start && make health\n'

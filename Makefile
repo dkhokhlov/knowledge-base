@@ -51,9 +51,9 @@ config: ## Render effective compose config (secrets redacted)
 health: ## Probe graphiti /health and Open WebUI /health
 	@set -a; . ./.env; set +a; \
 	curl -sf http://localhost:$$GRAPHITI_HOST_PORT/health >/dev/null \
-	  && echo "graphiti-mcp healthy" || (echo "graphiti-mcp DOWN"; exit 1); \
+	  && echo "graphiti-mcp healthy" || { echo "graphiti-mcp DOWN"; exit 1; }; \
 	curl -sf http://localhost:$$OPENWEBUI_HOST_PORT/health >/dev/null \
-	  && echo "open-webui healthy" || (echo "open-webui DOWN"; exit 1)
+	  && echo "open-webui healthy" || { echo "open-webui DOWN"; exit 1; }
 
 shell-owui: ## Shell into the Open WebUI container
 	@docker exec -it kb-openwebui sh
