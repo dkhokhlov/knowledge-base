@@ -8,7 +8,7 @@ COMPOSE  := docker compose
 DATA_DIR := ./data
 
 .PHONY: help bootstrap preflight pull pull-models start stop restart logs ps config \
-        health shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
+        health test shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -54,6 +54,11 @@ health: ## Probe graphiti /health and Open WebUI /health
 	  && echo "graphiti-mcp healthy" || { echo "graphiti-mcp DOWN"; exit 1; }; \
 	curl -sf http://localhost:$$OPENWEBUI_HOST_PORT/health >/dev/null \
 	  && echo "open-webui healthy" || { echo "open-webui DOWN"; exit 1; }
+
+test: ## Run system integration tests against the running stack (run: make start)
+	@status=0; for t in tests/test_*.sh; do [ -e "$$t" ] || continue; \
+	  echo; echo "=== $$t ==="; bash "$$t" || status=1; \
+	done; exit $$status
 
 shell-owui: ## Shell into the Open WebUI container
 	@docker exec -it kb-openwebui sh

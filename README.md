@@ -408,6 +408,35 @@ export GRAPHITI_API_TOKEN=<token>
   ```
 - `DATA_ROOT=./data` resolves through the symlink, so no `.env` edit is needed.
 
+## Tests
+
+System integration tests in `tests/` exercise the running stack over HTTP. They
+need the stack up (`make start && make health`) and two extra keys in `.env.local`
+(see `.env.local.example`):
+
+- `OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` — an existing [Open WebUI][open-webui]
+  user (e.g. the admin). `test_03` signs in to get a JWT.
+
+`GRAPHITI_API_TOKEN` (already in `.env.local`) authenticates the MCP tests.
+
+Run the suite:
+
+```
+make test
+```
+
+| Script | Checks | Auth |
+|---|---|---|
+| `tests/test_01_health.sh` | `/health` endpoints, dev-mode `/openapi.json`, Neo4j not published, MCP gate rejects no-token | none |
+| `tests/test_02_mcp.sh` | MCP `initialize` + session, `notifications/initialized`, `tools/list` (9 tools), `get_episodes` (graphiti → Neo4j read) | `GRAPHITI_API_TOKEN` |
+| `tests/test_03_openwebui_rest.sh` | `signin` → JWT, chat completion → [Ollama][ollama] `MODEL_NAME` | `OPENWEBUI_TEST_USER/PASSWORD` |
+
+Notes:
+
+- The tests are read-only except `test_03`, which sends one chat completion (stateless; no data written).
+- Each script sources `tests/lib.sh` (env loader, pass/fail counters, stack-up guard) and exits non-zero on any failure.
+- `make test` runs all scripts and exits non-zero if any fail.
+
 ## Make targets
 
 | target | action |
@@ -424,6 +453,7 @@ export GRAPHITI_API_TOKEN=<token>
 | `ps` | container status (with health) |
 | `config` | render effective compose config (secrets redacted) |
 | `health` | probe graphiti and Open WebUI `/health` |
+| `test` | run system integration tests against the running stack |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clear` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
 | `clear-all` | `down --volumes` + delete `./data` + delete `.env.local` |
