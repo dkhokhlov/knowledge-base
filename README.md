@@ -127,6 +127,34 @@ host-gateway and is not published by this stack.
 **Neo4j.** Auth is on (`NEO4J_AUTH=neo4j/password`). It is not exposed to the
 host. Set a stronger `NEO4J_PASSWORD` in `.env` for any non-local deployment.
 
+**Open WebUI feature lockdown.** To reduce attack surface, Open WebUI ships
+with the optional execution surfaces disabled by default (see `.env`):
+- Tools and Skills: no workspace access and no importing, so users cannot
+  upload/run arbitrary Python functions. `USER_PERMISSIONS_WORKSPACE_TOOLS_*`
+  and `USER_PERMISSIONS_WORKSPACE_SKILLS_*` are `False`.
+- Direct tool/MCP servers: `USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS=False`.
+- Web search: `ENABLE_WEB_SEARCH=False` and
+  `USER_PERMISSIONS_FEATURES_WEB_SEARCH=False`.
+- OpenAI passthrough proxy: `ENABLE_OPENAI_API=False` — Open WebUI talks to
+  Ollama only, no external OpenAI-compatible upstream.
+- Community sharing and evaluation arenas: `ENABLE_COMMUNITY_SHARING=False`,
+  `ENABLE_EVALUATION_ARENA_MODELS=False`.
+
+These are *default* user permissions for a fresh install. An admin can still
+grant Tools/Skills access to a user or group via the UI if a use case needs it.
+The OpenAI-compatible agent REST API (`/api/chat/completions` etc.) is unaffected
+by `ENABLE_OPENAI_API` — that flag only controls the external OpenAI *upstream*
+model source, not Open WebUI's own API.
+
+**Container hardening.** No service runs `privileged`. All four set
+`security_opt: no-new-privileges:true`. The Caddy gateway and graphiti-mcp also
+`cap_drop: ALL` (they have no host-owned bind-mount writes). Neo4j and Open WebUI
+keep default capabilities because their entrypoints need `CAP_CHOWN` /
+`DAC_OVERRIDE` to write to the host-owned `./data` bind mounts — dropping all
+caps would break startup. To harden those two further, `chown` their `./data`
+subdirs to the container user's UID and then add `cap_drop: ALL` (validate with
+`make start` first).
+
 **Dev-mode docs.** `ENV=dev` exposes `/docs` (Swagger UI) and `/openapi.json`
 (schema) without auth. Both are read-only and do not mutate state or expose
 credentials. If `:3000` is reachable from an untrusted network, put it behind a
