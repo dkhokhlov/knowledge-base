@@ -275,7 +275,7 @@ Caveats:
 - `clear-all` wipes data and the generated secret.
 - `clear-all` keeps `.env`, `graphiti/config.yaml`, and `caddy/Caddyfile`.
 
-## Notes and risks
+## Notes
 
 - Embedding dimensions must be 768 for `nomic-embed-text`.
   - Change `EMBEDDER_MODEL` and `EMBEDDER_DIMENSIONS` together if you swap models.
