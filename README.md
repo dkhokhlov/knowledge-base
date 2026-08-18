@@ -472,6 +472,104 @@ Notes:
   - `ENV=dev` also raises log verbosity. Acceptable for an internal/LAN deployment.
 - `SEMAPHORE_LIMIT=3` is conservative for one local [Ollama][ollama]. Raise it if the host Ollama has capacity.
 
+## Glyph render-width specimen (diagnostic)
+
+Diagnostic table to find glyphs that render wider than one cell on GitHub
+(emoji-font substitution or font fallback) while reading fine in a plain text
+file. The validator's width model treats every glyph below as one cell;
+GitHub may not. This specimen is empirical — the renderer is the reader's eyes
+on GitHub. Arrowheads are grouped by size (big / medium / small / dingbat) so a
+small arrowhead that stays one cell can replace a big one that drifts.
+
+**Block A — isolation.** Each line draws the right `│` at the same column. The
+`control` line is ASCII only. On GitHub, a one-cell glyph's right `│` lines up
+with the `control` line; a two-cell glyph's right `│` shifts right. Lined up =
+safe; shifted = blacklist candidate.
+
+```text
+U+25B6  │▶         │
+U+25C0  │◀         │
+U+25BA  │►         │
+U+25C4  │◄         │
+U+25BC  │▼         │
+U+25B2  │▲         │
+U+25B7  │▷         │
+U+25C1  │◁         │
+U+25BD  │▽         │
+U+25B3  │△         │
+U+25B8  │▸         │
+U+25C2  │◂         │
+U+25BE  │▾         │
+U+25B4  │▴         │
+U+25B9  │▹         │
+U+25C3  │◃         │
+U+25BF  │▿         │
+U+25B5  │▵         │
+U+2192  │→         │
+U+2190  │←         │
+U+2194  │↔         │
+U+2195  │↕         │
+U+2794  │➔         │
+U+279D  │➝         │
+U+27A1  │➡         │
+U+2B05  │⬅         │
+U+2714  │✔         │
+U+2611  │☑         │
+U+2713  │✓         │
+U+2717  │✗         │
+U+2605  │★         │
+U+2606  │☆         │
+U+25AA  │▪         │
+U+25AB  │▫         │
+U+25A0  │■         │
+U+25A1  │□         │
+U+25FB  │◻         │
+U+25FC  │◼         │
+U+00A9  │©         │
+U+00AE  │®         │
+U+2122  │™         │
+U+2212  │−         │
+U+2013  │–         │
+U+2014  │—         │
+U+2022  │•         │
+control │ref       │
+```
+
+**Block B — real-world impact.** Each arrowhead sits only on the middle line;
+the right box's top and bottom borders carry no arrow. If the arrow renders two
+cells, the right box body shifts versus its border (the `Knowledge base` defect
+in miniature). Order top to bottom: `▶ ► → ▸ ▹ ➔`, then a `─` control.
+
+```text
+┌──┐     ┌──┐
+│A │────▶│B │
+└──┘     └──┘
+
+┌──┐     ┌──┐
+│A │────►│B │
+└──┘     └──┘
+
+┌──┐     ┌──┐
+│A │────→│B │
+└──┘     └──┘
+
+┌──┐     ┌──┐
+│A │────▸│B │
+└──┘     └──┘
+
+┌──┐     ┌──┐
+│A │────▹│B │
+└──┘     └──┘
+
+┌──┐     ┌──┐
+│A │────➔│B │
+└──┘     └──┘
+
+┌──┐     ┌──┐
+│A │─────│B │
+└──┘     └──┘
+```
+
 [graphiti]: https://github.com/getzep/graphiti
 [open-webui]: https://github.com/open-webui/open-webui
 [neo4j]: https://neo4j.com/
