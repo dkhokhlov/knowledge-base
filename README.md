@@ -39,7 +39,7 @@ the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
 │  │  │             │   │  documents)              │  │                  │                 │
 │  │  └──────┬──────┘   │                          │  │    ┌─────────────▼──┐   ┌─────────┐│
 │  │         │          │                          │  │    │ graphiti-mcp   │   │Neo4j    ││
-│  │         │          │                          │  │    │ (internal)     ┤──▶│(graph)  ││
+│  │         │          │                          │  │    │ (internal)     ├──▶│(graph)  ││
 │  │         │          └────────────┬─────────────┘  │    │ LLM + embedder │   │internal ││
 │  │         │                       │                │    │                │   │         ││
 │  │         │                       │                │    └────────┬───────┘   └─────────┘│
