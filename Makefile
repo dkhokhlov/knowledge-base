@@ -7,7 +7,7 @@
 COMPOSE  := docker compose
 DATA_DIR := ./data
 
-.PHONY: help bootstrap preflight pull start stop restart logs ps config \
+.PHONY: help bootstrap preflight pull pull-models start stop restart logs ps config \
         health shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
 
 help: ## Show this help
@@ -21,6 +21,11 @@ preflight: ## Read-only checks: docker, secrets, Ollama, required models
 
 pull: ## Pull all images
 	@$(COMPOSE) pull
+
+pull-models: ## Pull Ollama models (MODEL_NAME + nomic-embed-text) on the host
+	@set -a; . ./.env; set +a; \
+	echo "Pulling LLM model: $$MODEL_NAME"; ollama pull $$MODEL_NAME; \
+	echo "Pulling embedder: nomic-embed-text"; ollama pull nomic-embed-text
 
 start: ## Start the stack detached (run `make bootstrap` first)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }

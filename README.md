@@ -26,8 +26,10 @@ the Docker host and supplies the chat LLM and `nomic-embed-text` embeddings.
 
 - Docker >= 20.10 with the Compose plugin (`docker compose`).
 - Ollama running on the Docker host. Pull the models you will use:
-  - `ollama pull <MODEL_NAME>`   (default `qwen2.5:14b`; set in `.env`)
-  - `ollama pull nomic-embed-text`
+  ```
+  make pull-models        # pulls MODEL_NAME (default qwen2.5:14b) + nomic-embed-text
+  ```
+  (equivalent to `ollama pull <MODEL_NAME>` and `ollama pull nomic-embed-text`)
 
 ## Quick start
 
@@ -203,6 +205,7 @@ make start
 | `bootstrap` | create `.env.local` (generate `WEBUI_SECRET_KEY`) and `./data` dirs |
 | `preflight` | read-only checks: docker, secrets set, Ollama, models |
 | `pull` | pull images |
+| `pull-models` | pull Ollama models (`MODEL_NAME` + `nomic-embed-text`) on the host |
 | `start` | `docker compose up -d` |
 | `stop` | `docker compose stop` (keeps containers and data) |
 | `restart` | stop then start |

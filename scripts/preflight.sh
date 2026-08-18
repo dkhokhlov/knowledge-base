@@ -32,10 +32,10 @@ ok "host Ollama reachable"
 
 MODEL_NAME="${MODEL_NAME:-qwen2.5:14b}"
 echo "$TAGS" | grep -q "\"${MODEL_NAME}\"" \
-  || fail "model '${MODEL_NAME}' not pulled in host Ollama (run: ollama pull ${MODEL_NAME})"
+  || fail "model '${MODEL_NAME}' not pulled in host Ollama (run: make pull-models)"
 ok "Ollama has LLM model '${MODEL_NAME}'"
 echo "$TAGS" | grep -q '"nomic-embed-text"' \
-  || fail "model 'nomic-embed-text' not pulled in host Ollama (run: ollama pull nomic-embed-text)"
+  || fail "model 'nomic-embed-text' not pulled in host Ollama (run: make pull-models)"
 ok "Ollama has embedder 'nomic-embed-text'"
 
 printf '\nPreflight OK. Next: make start && make health\n'
