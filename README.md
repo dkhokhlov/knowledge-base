@@ -24,6 +24,7 @@ the chat LLM and `nomic-embed-text` embeddings.
 
 - Only `:3000` (Open WebUI) and `:8000` (graphiti gateway) bind to 0.0.0.0.
 - Neo4j and graphiti-mcp are container-network only (no host ports).
+- Ollama is external on the Docker host (reached via host-gateway); not published by this stack.
 - The Caddy gateway checks `Authorization: Bearer <GRAPHITI_API_TOKEN>` on `/mcp/`.
 
 ## Prerequisites
@@ -99,12 +100,6 @@ the chat LLM and `nomic-embed-text` embeddings.
 
 ## Security
 
-### Attack surface
-
-- Only `:3000` (Open WebUI) and `:8000` (Caddy gateway) bind to `0.0.0.0`.
-- Neo4j and graphiti-mcp have no host ports; reachable only on the `kbnet` bridge network.
-- Ollama is reached through the host-gateway and is not published by this stack.
-
 ### Open WebUI (`:3000`)
 
 - `WEBUI_AUTH=true`: every UI and REST call needs a session or a Bearer API key.
@@ -149,7 +144,7 @@ the chat LLM and `nomic-embed-text` embeddings.
 
 ### Open WebUI feature lockdown
 
-Defaults locked in `.env` to reduce attack surface:
+Defaults locked in `.env` to reduce exposure:
 
 - Tools and Skills: no workspace access and no importing.
   - Users cannot upload/run arbitrary Python functions.
