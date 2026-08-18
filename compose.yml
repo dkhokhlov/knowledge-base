@@ -142,8 +142,18 @@ services:
       - ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-False}
       - ENABLE_COMMUNITY_SHARING=${ENABLE_COMMUNITY_SHARING:-False}
       - ENABLE_EVALUATION_ARENA_MODELS=${ENABLE_EVALUATION_ARENA_MODELS:-False}
+      # --- Phone-home / outbound hardening (defaults in .env) ---
+      - ENABLE_VERSION_UPDATE_CHECK=${ENABLE_VERSION_UPDATE_CHECK:-False}
+      - ENABLE_OTEL=${ENABLE_OTEL:-False}
+      - WEBUI_FAVICON_URL=${WEBUI_FAVICON_URL:-/static/favicon.png}
     volumes:
       - ${DATA_ROOT:-./data}/openwebui:/app/backend/data
+      # Mount the custom favicon over the build SOURCE (not the served path): the
+      # Open WebUI startup sync copies FRONTEND_BUILD_DIR/static/* into STATIC_DIR
+      # on every start, so mounting the source lets the sync copy our icon in
+      # cleanly. :ro avoids log noise (the sync never writes back here).
+      - ./docs/xgensilicon.png:/app/build/static/favicon.png:ro
+      - ./docs/xgensilicon.ico:/app/build/static/favicon.ico:ro
     healthcheck:
       # curl, not wget: the open-webui image has no wget.
       test: ["CMD", "curl", "-fs", "http://localhost:8080/health"]

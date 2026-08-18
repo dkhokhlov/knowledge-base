@@ -213,6 +213,33 @@ Caveats:
 - `ENABLE_OPENAI_API=False` does NOT affect the agent REST API (`/api/chat/completions` etc.).
   - That flag only controls the external OpenAI *upstream* model source, not Open WebUI's own API.
 
+### Phone-home / outbound hardening
+
+No host mods; all of this is compose + `.env`. Verified against the upstream
+code via DeepWiki.
+
+| Service | Default outbound | What it sends | Disabled by |
+|---|---|---|---|
+| [Graphiti][graphiti] | `us.i.posthog.com` | anonymous init telemetry | `GRAPHITI_TELEMETRY_ENABLED=false` (compose.yml) |
+| [Open WebUI][open-webui] | `api.github.com` | release update check | `ENABLE_VERSION_UPDATE_CHECK=False` |
+| [Open WebUI][open-webui] | `openwebui.com` | favicon fetch (browser `<link>`) | `WEBUI_FAVICON_URL=/static/favicon.png` + mounted `./docs/xgensilicon.{png,ico}` |
+| [Open WebUI][open-webui] | `localhost:4317` | OpenTelemetry exporter (off by default) | `ENABLE_OTEL=False` |
+
+Notes:
+
+- The favicon is bind-mounted over the Open WebUI build **source**
+  (`/app/build/static/favicon.{png,ico}`), not the served path. Open WebUI re-syncs
+  `FRONTEND_BUILD_DIR/static/*` into `STATIC_DIR` on every start, so mounting the
+  source lets that sync copy our icon in with no log noise. The served paths are
+  `/static/favicon.png` (modern browsers) and `/static/favicon.ico` (legacy).
+- [HuggingFace][huggingface] (`huggingface.co`) is left **reachable**. It is a
+  functional tokenizer/embedder download (tiktoken `cl100k_base`), not telemetry.
+  Block it only for a full airgap (set `HF_HUB_OFFLINE=1` and test token counting).
+- This is an **allowlist of known defaults**, not a firewall. To also catch
+  future/unknown outbound domains, add a DNS sinkhole (`dns: ["0.0.0.0"]`) to the
+  `openwebui` and `graphiti-mcp` services and pin `mini4` in `extra_hosts` — but
+  that is out of scope for this minimal hardening.
+
 ### Container hardening
 
 - No service runs `privileged`.
@@ -423,5 +450,6 @@ export GRAPHITI_API_TOKEN=<token>
 [docker]: https://www.docker.com/
 [docker-compose]: https://docs.docker.com/compose/
 [mcp]: https://modelcontextprotocol.io/
+[huggingface]: https://huggingface.co/
 [nomic-embed-text]: https://huggingface.co/nomic-ai/nomic-embed-text
 [qwen2]: https://ollama.com/library/qwen2.5
