@@ -29,10 +29,15 @@ pull-models: ## Pull Ollama models (MODEL_NAME + nomic-embed-text) on the host
 
 start: ## Start the stack detached (run `make bootstrap` first)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
-	@grep -qE '^WEBUI_SECRET_KEY=.+$$' .env.local \
-	  && grep -qE '^GRAPHITI_API_TOKEN=.+$$' .env.local \
-	  || { echo "MISSING secret — set WEBUI_SECRET_KEY and GRAPHITI_API_TOKEN in .env.local (see make bootstrap)"; exit 1; }
-	@$(COMPOSE) up -d
+	@unset WEBUI_SECRET_KEY GRAPHITI_API_TOKEN; \
+	  . ./.env.local 2>/dev/null || { echo "MISSING secret — run: make bootstrap"; exit 1; }; \
+	  [ -n "$${WEBUI_SECRET_KEY:-}" ] && [ -n "$${GRAPHITI_API_TOKEN:-}" ] \
+	    || { echo "MISSING secret — run: make bootstrap"; exit 1; }
+	@set -a; . ./.env; set +a; \
+	case "$$OLLAMA_BASE_URL" in \
+	  *'<ollama-host>'*) echo "REFUSING start: OLLAMA_BASE_URL is still the '<ollama-host>' placeholder — edit .env (cp .env.example .env, set the real Ollama host)"; exit 1;; \
+	esac; \
+	$(COMPOSE) up -d
 
 stop: ## Stop the stack (keeps containers + data)
 	@$(COMPOSE) stop

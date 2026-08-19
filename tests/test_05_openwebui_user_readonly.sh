@@ -104,15 +104,41 @@ mk=$(grep -oE 'MARKER=(True|False)' /tmp/kbrouser.out | cut -d= -f2)
 cat /tmp/kbrouser.out; rm -f /tmp/kbrouser.out
 if [ "${hits:-0}" -gt 0 ] && [ "$mk" = "True" ]; then pass "user search -> ${hits} hit(s), marker found"; else fail "user search -> hits=${hits:-0} marker=${mk}"; finish; exit 1; fi
 
-# --- 4. user key is DENIED write (file/add) and delete -----------------------
-section "user key: write denied (file/add + delete)"
+# --- 4. user key is DENIED write (file/add + delete) -----------------------
+# Proves the KB-write access control — NOT a coincidental 404 from a bogus id.
+# OWUI knowledge.py file/{id}/add: the KB write-access check runs FIRST and
+# raises HTTP 400 ACCESS_PROHIBITED for a non-owner/non-admin without write
+# access, BEFORE the file lookup. So:
+#   - authz works  -> 400 (KB-write denied). Expected.
+#   - authz broken (agent has write) -> the real $FID is found, then the
+#     file-read check raises 403 (agent has no file-read grant), or 200 if
+#     file-read is also broken. Either way code != 400 -> this fails.
+# A bogus file_id would 400 on "file not found" even with broken authz (a
+# false pass), so we use the real uploaded $FID and assert the specific 400,
+# plus an unchanged KB file_count (no mutation).
+section "user key: write denied (file/add 400 ACCESS_PROHIBITED + KB unchanged)"
+count_before=$(curl -s "$O/api/v1/knowledge/${KB_ID}" "${A[@]}" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("file_count",0))' 2>/dev/null)
 code_add=$(curl -s -o /tmp/kbrouser_add.out -w '%{http_code}' -X POST "$O/api/v1/knowledge/${KB_ID}/file/add" "${U[@]}" \
-  -H 'Content-Type: application/json' -d '{"file_id":"00000000-0000-0000-0000-000000000000"}')
+  -H 'Content-Type: application/json' -d "{\"file_id\":\"${FID}\"}")
 body_add=$(cat /tmp/kbrouser_add.out 2>/dev/null); rm -f /tmp/kbrouser_add.out
-if [ "${code_add:-0}" -ge 400 ]; then pass "file/add denied (http=${code_add})"; else fail "file/add SUCCEEDED (http=${code_add}) — write not scoped!"; finish; exit 1; fi
+count_after=$(curl -s "$O/api/v1/knowledge/${KB_ID}" "${A[@]}" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("file_count",0))' 2>/dev/null)
+if [ "${code_add:-0}" -eq 400 ] && [ "${count_before:-0}" -eq "${count_after:-0}" ]; then
+  pass "file/add denied (http=400 ACCESS_PROHIBITED; KB file_count ${count_before} unchanged)"
+else
+  fail "file/add: code=${code_add} file_count ${count_before}->${count_after} (expected 400 + unchanged — KB-write authz broken?)"; finish; exit 1
+fi
 
+# delete: no body id, so >=400 is the genuine KB-write denial (400
+# ACCESS_PROHIBITED). Also confirm the KB still exists (no mutation).
 code_del=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$O/api/v1/knowledge/${KB_ID}/delete" "${U[@]}")
-if [ "${code_del:-0}" -ge 400 ]; then pass "delete denied (http=${code_del})"; else fail "delete SUCCEEDED (http=${code_del}) — delete not scoped!"; finish; exit 1; fi
+exists_after=$(curl -s -o /dev/null -w '%{http_code}' "$O/api/v1/knowledge/${KB_ID}" "${A[@]}")
+if [ "${code_del:-0}" -ge 400 ] && [ "${exists_after:-0}" -eq 200 ]; then
+  pass "delete denied (http=${code_del}; KB still exists http=${exists_after})"
+else
+  fail "delete: code=${code_del} exists_after=${exists_after} (expected denial + KB still present — delete authz broken?)"; finish; exit 1
+fi
 
 # --- 5. contrast: admin key has write_access on the same KB ------------------
 section "contrast: admin key has write access"
@@ -133,7 +159,7 @@ if [ "$awa" = "True" ]; then pass "admin key -> write_access=True (contrast)"; e
 # grounding is broken (e.g. someone reverts to a `knowledge` field), the marker
 # is absent and this fails.
 section "user key: RAG chat grounded on KB (model grant + files:collection)"
-CHAT_MODEL="${MODEL_NAME:-qwen2.5:14b}"
+CHAT_MODEL="${OPENWEBUI_MODEL:-${MODEL_NAME:-gemma4:12b}}"
 rag_body=$(python3 -c 'import sys,json;print(json.dumps({"model":sys.argv[1],"stream":False,"files":[{"type":"collection","id":sys.argv[2]}],"messages":[{"role":"user","content":"What is the exact regression marker string mentioned in the document? Return only the marker value."}]}))' "$CHAT_MODEL" "$KB_ID")
 rag_code=$(curl -s -o /tmp/kbrouser_rag.out -w '%{http_code}' -X POST "$O/api/chat/completions" "${U[@]}" \
   -H 'Content-Type: application/json' -d "$rag_body")

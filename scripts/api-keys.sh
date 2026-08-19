@@ -34,7 +34,7 @@ set -a
 set +a
 
 python3 - <<'PY'
-import os, json, secrets, urllib.request, urllib.error, sys
+import os, json, secrets, tempfile, time, urllib.request, urllib.error, sys
 
 O = "http://localhost:%s" % os.environ.get("OPENWEBUI_HOST_PORT", "3000")
 ADMIN_USER = os.environ.get("OPENWEBUI_TEST_USER", "")
@@ -57,10 +57,15 @@ def req(method, path, token=None, body=None):
         headers["Authorization"] = "Bearer " + token
     r = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(r) as resp:
+        with urllib.request.urlopen(r, timeout=15) as resp:
             return resp.status, resp.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+    except urllib.error.URLError as e:
+        # Transport error (connection refused, timeout, DNS). Return a non-200
+        # code so callers fail gracefully instead of raising past a finally
+        # block (e.g. the temp-signup restore below).
+        return 0, "URLError: %s" % e
 
 def jget(method, path, token=None, body=None):
     code, txt = req(method, path, token, body)
@@ -119,22 +124,23 @@ else:
 # --- 3b. grant '*' read on the chat model so the agent user can RAG chat -----
 # Without a model access grant, a non-admin user sees 0 models and
 # /api/chat/completions returns "Model not found". Same '*' pattern as KB grants.
-MODEL = os.environ.get("MODEL_NAME", "qwen2.5:14b")
+# Grant the chat model the agent actually requests: OPENWEBUI_MODEL (read by the
+# kb skill wrapper), falling back to MODEL_NAME (the stack's chat LLM), then the
+# built-in default. .env keeps OPENWEBUI_MODEL in sync with MODEL_NAME.
+CHAT_MODEL = os.environ.get("OPENWEBUI_MODEL") or os.environ.get("MODEL_NAME") or "gemma4:12b"
 code, ml, _ = jget("GET", "/api/models", admin_jwt)
 mids = []
 if code == 200 and isinstance(ml, dict):
     mids = [m.get("id") for m in (ml.get("data") or []) if isinstance(m, dict)]
-if MODEL not in mids:
-    out("WARN  chat model %s not found in admin's model list; skipped model grant (RAG chat will fail until it is available)" % MODEL)
-else:
-    grant = {"resource_type": "model", "resource_id": MODEL,
-             "principal_type": "user", "principal_id": "*", "permission": "read"}
-    code, md, txt = jget("POST", "/api/v1/models/model/access/update", admin_jwt,
-                         {"id": MODEL, "name": MODEL, "access_grants": [grant]})
-    if code != 200:
-        out("WARN  model access grant -> %s %s (RAG chat may fail for non-admin users)" % (code, txt[:160]))
-    else:
-        out("OK    granted '*' read on chat model %s (agent can RAG chat)" % MODEL)
+if CHAT_MODEL not in mids:
+    sys.exit("FAIL  chat model %s not found in admin's model list (run: make pull-models); not granting — agent RAG chat would fail" % CHAT_MODEL)
+grant = {"resource_type": "model", "resource_id": CHAT_MODEL,
+         "principal_type": "user", "principal_id": "*", "permission": "read"}
+code, md, txt = jget("POST", "/api/v1/models/model/access/update", admin_jwt,
+                     {"id": CHAT_MODEL, "name": CHAT_MODEL, "access_grants": [grant]})
+if code != 200:
+    sys.exit("FAIL  model access grant on %s -> %s %s (agent RAG chat would fail)" % (CHAT_MODEL, code, txt[:160]))
+out("OK    granted '*' read on chat model %s (agent can RAG chat)" % CHAT_MODEL)
 
 # --- 4. ensure the non-admin agent user exists -------------------------------
 agent_pass = os.environ.get("OPENWEBUI_USER_PASSWORD", "")
@@ -156,12 +162,26 @@ else:
         sys.exit("FAIL  temp-enable signup -> %s %s" % (code, txt[:200]))
     code, sd, txt = jget("POST", "/api/v1/auths/signup", None,
                          {"name": AGENT_NAME, "email": AGENT_USER, "password": agent_pass})
-    # Restore signup/role regardless of signup outcome.
+    # Restore signup/role regardless of signup outcome, retrying transport
+    # errors (a URLError here must not leave signup enabled), then verify it
+    # actually took effect.
     cfg2["ENABLE_SIGNUP"] = snap_signup
     cfg2["DEFAULT_USER_ROLE"] = snap_role
-    rcode, _, rtxt = jget("POST", "/api/v1/auths/admin/config", admin_jwt, cfg2)
-    if rcode != 200:
-        sys.exit("FAIL  restore signup config -> %s %s" % (rcode, rtxt[:200]))
+    last_err = ""
+    for attempt in range(3):
+        rcode, _, rtxt = jget("POST", "/api/v1/auths/admin/config", admin_jwt, cfg2)
+        if rcode == 200:
+            break
+        last_err = "%s %s" % (rcode, (rtxt or "")[:160])
+        time.sleep(1 + attempt)
+    else:
+        sys.exit("FAIL  restore signup config after retries: %s (signup may still be ENABLED — check the admin UI)" % last_err)
+    vcode, vcfg, _ = jget("GET", "/api/v1/auths/admin/config", admin_jwt)
+    if vcode != 200 or not isinstance(vcfg, dict) \
+       or vcfg.get("ENABLE_SIGNUP") != snap_signup \
+       or vcfg.get("DEFAULT_USER_ROLE") != snap_role:
+        sys.exit("FAIL  signup config did not restore to ENABLE_SIGNUP=%s DEFAULT_USER_ROLE=%s (got %s) — check the admin UI"
+                 % (snap_signup, snap_role, vcfg))
     if code != 200 or not sd:
         sys.exit("FAIL  signup %s -> %s %s" % (AGENT_USER, code, txt[:200]))
     agent_jwt = sd.get("token", "")
@@ -170,24 +190,31 @@ else:
     out("OK    created agent user %s (signup re-enabled then restored)" % AGENT_USER)
 
 # --- 5. get-or-generate API keys ---------------------------------------------
-def key_for(jwt, label, existing):
-    """Return a working API key. Keep `existing` if it still authenticates and
-    FORCE is not set; otherwise generate (rotates/replaces)."""
+def key_for(jwt, label, existing, expect_email, expect_role=None):
+    """Return a working API key for the account that owns `jwt`. Keep `existing`
+    only if it authenticates AND belongs to the expected account (and role, if
+    given); otherwise generate a fresh key for this account (rotates/replaces).
+    This prevents a valid admin key sitting in the non-admin slot from being
+    kept as the read-scoped agent key."""
     if existing and not FORCE:
         code, d, _ = jget("GET", "/api/v1/auths/", existing)
-        if code == 200:
+        if code == 200 and d \
+           and (d.get("email") or "").casefold() == (expect_email or "").casefold() \
+           and (expect_role is None or d.get("role") == expect_role):
             return existing, "kept"
+        out("WARN  existing %s key did not match expected account/role; regenerating" % label)
     code, d, txt = jget("POST", "/api/v1/auths/api_key", jwt)
     if code != 200 or not d:
         sys.exit("FAIL  generate %s api key -> %s %s" % (label, code, txt[:200]))
     return d.get("api_key", ""), "generated"
 
 admin_existing = os.environ.get("OPENWEBUI_ADMIN_API_KEY", "")
-admin_key, admin_act = key_for(admin_jwt, "admin", admin_existing)
+admin_key, admin_act = key_for(admin_jwt, "admin", admin_existing, expect_email=ADMIN_USER)
 out("OK    %s ADMIN api key (%s)" % (admin_act, admin_key[:10] + "..."))
 
 user_existing = os.environ.get("OPENWEBUI_USER_API_KEY", "")
-user_key, user_act = key_for(agent_jwt, "agent", user_existing)
+user_key, user_act = key_for(agent_jwt, "agent", user_existing,
+                             expect_email=AGENT_USER, expect_role="user")
 out("OK    %s USER  api key (%s)" % (user_act, user_key[:10] + "..."))
 
 # --- 6. upsert .env.local (chmod 0600 preserved) -----------------------------
@@ -214,9 +241,20 @@ for ln in lines:
 for k, v in new_vals.items():
     if k not in seen:
         out_lines.append("%s=%s" % (k, v))
-with open(env_path, "w") as f:
-    f.write("\n".join(out_lines) + "\n")
-os.chmod(env_path, 0o600)
+# Write to a temp file then atomically replace, so a crash or disk-full
+# mid-write cannot truncate .env.local or leave it partially written.
+tmp_fd, tmp_path = tempfile.mkstemp(dir=".", prefix=".env.local.", suffix=".tmp")
+try:
+    with os.fdopen(tmp_fd, "w") as f:
+        f.write("\n".join(out_lines) + "\n")
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, env_path)
+except Exception:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    raise
 
 out("")
 out("Wrote to .env.local (chmod 0600):")
