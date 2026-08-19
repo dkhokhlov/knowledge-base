@@ -51,7 +51,7 @@ if [ "$code" = "200" ]; then
   pass "embedding URL reachable from container: ${emb_url} (model=${emb_model})"
 else
   fail "embedding URL UNREACHABLE from container: ${emb_url} -> HTTP ${code}"
-  fail "regression: persisted rag.ollama.base_url is stale. Fix: POST /api/v1/retrieval/embedding/update with ollama_config.url=<OLLAMA_BASE_URL>, or wipe ./data/openwebui and 'make start'."
+  fail "regression: persisted rag.ollama.base_url is stale. Fix: make rag-config (syncs it to .env OLLAMA_BASE_URL), or wipe ./data/openwebui and 'make start'."
   finish; exit 1
 fi
 

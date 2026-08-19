@@ -59,23 +59,70 @@ Give a clear, direct answer to the user query, grounded only in the context, wit
 </context>
 """
 
+REQUEST_TIMEOUT = 15
+
 def call(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(O + path, data=data, headers=H, method=method)
     try:
-        with urllib.request.urlopen(req) as r:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+    except urllib.error.URLError as e:
+        # Transport error (connection refused, timeout, DNS). Return a non-200
+        # code so callers fail cleanly instead of raising past a partial update.
+        return 0, "URLError: %s" % e
+
+def parse_json(text, label):
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError) as e:
+        sys.exit("FAIL  %s returned invalid JSON: %s" % (label, e))
 
 st, txt = call("POST", "/api/v1/retrieval/config/update", {"RAG_TEMPLATE": NEW})
 if st != 200:
     sys.exit("FAIL  update RAG_TEMPLATE -> HTTP %s: %s" % (st, txt[:200]))
 
 st, txt = call("GET", "/api/v1/retrieval/config")
-d = json.loads(txt)
+d = parse_json(txt, "GET /api/v1/retrieval/config")
 if d.get("RAG_TEMPLATE") != NEW:
     sys.exit("FAIL  RAG_TEMPLATE did not stick")
 print("OK    strict-grounding RAG_TEMPLATE set (len=%d)" % len(d["RAG_TEMPLATE"]))
 print("      merge sanity: TOP_K=%s CHUNK_SIZE=%s" % (d.get("TOP_K"), d.get("CHUNK_SIZE")))
+
+# --- sync rag.ollama.base_url to .env OLLAMA_BASE_URL ------------------------
+# Open WebUI persists rag.ollama.base_url in webui.db on first boot and ignores
+# later .env changes, so the embedder can drift to a stale host while chat works
+# (file upload then "process/status=failed", RAG search returns 0 hits). Reconcile
+# via the embedding API: GET the current config, change only the ollama URL, POST
+# it back. /embedding/update REPLACES the whole config, so we preserve
+# engine/model/batch/async/concurrent/key from the GET. Idempotent.
+OLLAMA_URL = (os.environ.get("OLLAMA_BASE_URL") or "http://host.docker.internal:11434").rstrip("/")
+
+st, txt = call("GET", "/api/v1/retrieval/embedding")
+if st != 200:
+    sys.exit("FAIL  get embedding config -> HTTP %s: %s" % (st, txt[:200]))
+emb = parse_json(txt, "GET /api/v1/retrieval/embedding")
+oc = emb.get("ollama_config") or {}
+cur_url = (oc.get("url") or "").rstrip("/")
+if cur_url == OLLAMA_URL:
+    print("OK    rag.ollama.base_url already in sync: %s" % OLLAMA_URL)
+else:
+    payload = {
+        "RAG_EMBEDDING_ENGINE": emb.get("RAG_EMBEDDING_ENGINE", "ollama"),
+        "RAG_EMBEDDING_MODEL": emb.get("RAG_EMBEDDING_MODEL", os.environ.get("RAG_EMBEDDING_MODEL", "nomic-embed-text")),
+        "RAG_EMBEDDING_BATCH_SIZE": emb.get("RAG_EMBEDDING_BATCH_SIZE", 1),
+        "ENABLE_ASYNC_EMBEDDING": emb.get("ENABLE_ASYNC_EMBEDDING", True),
+        "RAG_EMBEDDING_CONCURRENT_REQUESTS": emb.get("RAG_EMBEDDING_CONCURRENT_REQUESTS", 0),
+        "ollama_config": {"url": OLLAMA_URL, "key": oc.get("key", "")},
+    }
+    st, txt = call("POST", "/api/v1/retrieval/embedding/update", payload)
+    if st != 200:
+        sys.exit("FAIL  update rag.ollama.base_url -> HTTP %s: %s" % (st, txt[:200]))
+    st, txt = call("GET", "/api/v1/retrieval/embedding")
+    new_url = ((parse_json(txt, "GET /api/v1/retrieval/embedding").get("ollama_config") or {}).get("url") or "").rstrip("/")
+    if new_url != OLLAMA_URL:
+        sys.exit("FAIL  rag.ollama.base_url did not sync: got %s expected %s" % (new_url, OLLAMA_URL))
+    print("OK    synced rag.ollama.base_url: %s -> %s" % (cur_url or "<unset>", OLLAMA_URL))
 PY
