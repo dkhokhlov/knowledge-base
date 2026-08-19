@@ -454,10 +454,11 @@ make test
 | `tests/test_02_mcp.sh` | MCP `initialize` + session, `notifications/initialized`, `tools/list` (9 tools), `get_episodes` (graphiti → Neo4j read) | `GRAPHITI_API_TOKEN` |
 | `tests/test_03_openwebui_rest.sh` | `signin` → JWT, chat completion → [Ollama][ollama] `MODEL_NAME` | `OPENWEBUI_TEST_USER/PASSWORD` |
 | `tests/test_04_openwebui_rag.sh` | RAG embedding URL reachable from container; upload → embed → bind → `/api/v1/retrieval/query/collection` returns the indexed doc | `OPENWEBUI_TEST_USER/PASSWORD` |
+| `tests/test_05_openwebui_user_readonly.sh` | Agent (`OPENWEBUI_USER_API_KEY`) is role=user; reads + searches a `*`-granted KB (`write_access=False`); denied `file/add` and `delete`; admin key contrast has write access | `OPENWEBUI_ADMIN_API_KEY`, `OPENWEBUI_USER_API_KEY` |
 
 Notes:
 
-- The tests are read-only except `test_03` (one stateless chat completion) and `test_04` (creates a KB + file, then deletes both on exit).
+- The tests are read-only except `test_03` (one stateless chat completion), `test_04` (creates a KB + file, then deletes both on exit), and `test_05` (admin creates a temp KB + file + `*` read grant, then deletes all three on exit).
 - Each script sources `tests/lib.sh` (env loader, pass/fail counters, stack-up guard) and exits non-zero on any failure.
 - `make test` runs all scripts and exits non-zero if any fail.
 
