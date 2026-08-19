@@ -8,7 +8,7 @@ COMPOSE  := docker compose
 DATA_DIR := ./data
 
 .PHONY: help bootstrap preflight pull pull-models start stop restart logs ps config \
-        health test api-keys shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
+        health test api-keys rag-config shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -65,6 +65,11 @@ api-keys: ## Provision admin + agent-user API keys into .env.local (run after `m
 	@grep -qE '^OPENWEBUI_TEST_USER=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_TEST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
 	@./scripts/api-keys.sh
+
+rag-config: ## Set the strict-grounding RAG template in Open WebUI (run after `make api-keys`)
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
+	@./scripts/rag-config.sh
 
 shell-owui: ## Shell into the Open WebUI container
 	@docker exec -it kb-openwebui sh

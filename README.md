@@ -118,7 +118,27 @@ the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
    - Enables API keys stack-wide and creates a dedicated non-admin user `agent@local.test`.
    - Writes `OPENWEBUI_ADMIN_API_KEY` (full admin — keep private) and `OPENWEBUI_USER_API_KEY` (read-scoped — hand to agents) into `.env.local`. See [API keys & agent access](#api-keys--agent-access).
    - Idempotent; set `FORCE=1` to rotate the keys.
-9. (Optional) Close signup after bootstrap:
+   - Env vars the `kb` skill reads (if installed) — all already in `.env` / `.env.local`:
+
+     | Var | Source | Purpose | Required |
+     |---|---|---|---|
+     | `OPENWEBUI_HOST_PORT` | `.env` | base URL `http://localhost:<port>` | yes |
+     | `OPENWEBUI_USER_API_KEY` | `.env.local` | read-scoped agent key | yes |
+     | `OPENWEBUI_MODEL` | `.env` | chat model for RAG | yes |
+
+     Keep `OPENWEBUI_MODEL` in sync with `MODEL_NAME` (the skill does not read `MODEL_NAME`). Point the wrapper at both env files:
+     ```
+     python3 ~/.claude/skills/kb/scripts/owui.py --env-file .env --env-file .env.local kbs
+     ```
+9. Set the strict-grounding RAG template:
+   ```
+   make rag-config
+   ```
+   - Re-run after a DB reset/rebuild (`make clear-all` reverts it to the image default). See [RAG governance](#rag-governance).
+
+Provisioning sequence: `make start` → (admin signs up in UI) → `make api-keys` → `make rag-config`.
+
+10. (Optional) Close signup after bootstrap:
    - Set `ENABLE_SIGNUP=false` in `.env`.
    - Run `make restart`.
 
@@ -323,6 +343,17 @@ Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs
     -H "Content-Type: application/json" \
     -d '{"file_id":"<file-id>"}'
   ```
+- `kb` skill (read-scoped agent): a zero-dependency CLI wrapper (`scripts/owui.py`) that handles auth and flattens the Chroma nested-array search response. Reads `OPENWEBUI_HOST_PORT` + `OPENWEBUI_USER_API_KEY` + `OPENWEBUI_MODEL` from `.env` / `.env.local` via `--env-file`.
+- Best way to trigger the skill in Claude:
+
+  | Trigger | Example phrasing | Deterministic? |
+  |---|---|---|
+  | Slash command | `/kb` then the request | yes |
+  | Natural — search | "search the KB for X" / "search the knowledge base for X" | by description match |
+  | Natural — RAG chat | "ask the KB: \<question\>" / "ask the knowledge base: \<question\>" | by description match |
+  | Natural — list | "list my KBs" / "list my knowledge bases" | by description match |
+
+  The slash command is the most reliable; natural phrasing triggers automatically when it matches the skill description. Both "KB" and "knowledge base" phrasings are recognized.
 
 ### Graphiti MCP (HTTP)
 
@@ -426,7 +457,8 @@ export GRAPHITI_API_TOKEN=<token>
 - The KB owner (with the `sharing.knowledge` permission) or an admin grants a KB to user groups: Workspace -> Knowledge.
 - An agent using a user's API key inherits that user's permissions: the user's own files + KBs shared with the user's groups. It cannot see other users' private docs.
 - An admin API key bypasses access control. Give agents a dedicated low-priv user's key, not an admin key.
-- To let an agent RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB id in the `knowledge` field of `/api/chat/completions`.
+- To let an agent RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field of `/api/chat/completions` as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds.
+- `make rag-config` sets a **strict-grounding RAG template** in Open WebUI (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse with "The indexed documents do not contain this information." when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate (wrong vendor, invented file names). Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks.
 
 ## Persistent data and moving to RAID
 
@@ -463,7 +495,7 @@ make test
 | `tests/test_02_mcp.sh` | MCP `initialize` + session, `notifications/initialized`, `tools/list` (9 tools), `get_episodes` (graphiti → Neo4j read) | `GRAPHITI_API_TOKEN` |
 | `tests/test_03_openwebui_rest.sh` | `signin` → JWT, chat completion → [Ollama][ollama] `MODEL_NAME` | `OPENWEBUI_TEST_USER/PASSWORD` |
 | `tests/test_04_openwebui_rag.sh` | RAG embedding URL reachable from container; upload → embed → bind → `/api/v1/retrieval/query/collection` returns the indexed doc | `OPENWEBUI_TEST_USER/PASSWORD` |
-| `tests/test_05_openwebui_user_readonly.sh` | Agent (`OPENWEBUI_USER_API_KEY`) is role=user; reads + searches a `*`-granted KB (`write_access=False`); denied `file/add` and `delete`; admin key contrast has write access | `OPENWEBUI_ADMIN_API_KEY`, `OPENWEBUI_USER_API_KEY` |
+| `tests/test_05_openwebui_user_readonly.sh` | Agent (`OPENWEBUI_USER_API_KEY`) is role=user; reads + searches a `*`-granted KB (`write_access=False`); denied `file/add` and `delete`; admin key contrast has write access; RAG chat grounded via `files:[{type:collection,id}]` — unique marker present in the answer (catches a `knowledge`-field regression) | `OPENWEBUI_ADMIN_API_KEY`, `OPENWEBUI_USER_API_KEY` |
 
 Notes:
 
@@ -488,6 +520,7 @@ Notes:
 | `config` | render effective compose config (secrets redacted) |
 | `health` | probe graphiti and Open WebUI `/health` |
 | `test` | run system integration tests against the running stack |
+| `rag-config` | set the strict-grounding RAG template in Open WebUI (run after `make api-keys`; re-run after a DB reset) |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clear` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
 | `clear-all` | `down --volumes` + delete `./data` + delete `.env.local` |

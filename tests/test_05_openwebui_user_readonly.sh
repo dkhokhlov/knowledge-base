@@ -120,13 +120,21 @@ awa=$(curl -s "$O/api/v1/knowledge/${KB_ID}" "${A[@]}" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("write_access"))' 2>/dev/null)
 if [ "$awa" = "True" ]; then pass "admin key -> write_access=True (contrast)"; else fail "admin key -> write_access=${awa:-?} (expected True)"; fi
 
-# --- 6. user key can RAG chat grounded on the KB (guards the model grant) -----
-# A non-admin user needs a '*' read grant on the chat model to see it; without
-# that grant (made by `make api-keys`), /api/chat/completions returns
-# "Model not found". This section exercises that grant end-to-end.
-section "user key: RAG chat grounded on KB (model grant)"
+# --- 6. user key can RAG chat GROUNDED on the KB (model grant + grounding) -----
+# Two things must work for a grounded agent RAG chat:
+#   (a) the agent user has '*' read on the chat model (granted by make api-keys);
+#       without it /api/chat/completions returns "Model not found".
+#   (b) the KB is attached via the top-level `files` field as a collection item
+#       ({"type":"collection","id":<kb-id>}). A `knowledge` field is silently
+#       ignored and `metadata.knowledge` is discarded server-side, so the chat
+#       would answer from training data only (confabulate).
+# This test catches a grounding regression: it asks for the unique marker string
+# ($MARKER), which the model cannot know unless the KB chunks are injected. If
+# grounding is broken (e.g. someone reverts to a `knowledge` field), the marker
+# is absent and this fails.
+section "user key: RAG chat grounded on KB (model grant + files:collection)"
 CHAT_MODEL="${MODEL_NAME:-qwen2.5:14b}"
-rag_body=$(python3 -c 'import sys,json;print(json.dumps({"model":sys.argv[1],"stream":False,"knowledge":[sys.argv[2]],"messages":[{"role":"user","content":"What resistor changes resistance under mechanical strain? Answer in one short sentence."}]}))' "$CHAT_MODEL" "$KB_ID")
+rag_body=$(python3 -c 'import sys,json;print(json.dumps({"model":sys.argv[1],"stream":False,"files":[{"type":"collection","id":sys.argv[2]}],"messages":[{"role":"user","content":"What is the exact regression marker string mentioned in the document? Return only the marker value."}]}))' "$CHAT_MODEL" "$KB_ID")
 rag_code=$(curl -s -o /tmp/kbrouser_rag.out -w '%{http_code}' -X POST "$O/api/chat/completions" "${U[@]}" \
   -H 'Content-Type: application/json' -d "$rag_body")
 rag_body_out=$(cat /tmp/kbrouser_rag.out 2>/dev/null); rm -f /tmp/kbrouser_rag.out
@@ -135,10 +143,11 @@ if [ "${rag_code:-0}" -ne 200 ]; then
   fail "RAG chat -> http=${rag_code} (expected 200; model grant missing?): $(printf '%s' "$rag_body_out" | head -c 160)"
   finish; exit 1
 fi
-if [ -n "$rag_content" ]; then
-  pass "RAG chat -> http=200, answer: $(printf '%s' "$rag_content" | head -c 80)"
+if printf '%s' "$rag_content" | grep -qF "$MARKER"; then
+  pass "RAG chat grounded -> marker '$MARKER' present in answer"
 else
-  fail "RAG chat -> http=200 but empty content"; finish; exit 1
+  fail "RAG chat NOT grounded -> marker absent (http=200, answer: $(printf '%s' "$rag_content" | head -c 120))"
+  finish; exit 1
 fi
 
 finish
