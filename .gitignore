@@ -23,9 +23,11 @@ __pycache__/
 # Persistent data bind-mount tree (moved to RAID + symlinked back by the user)
 /data/
 
-# Personal overrides + generated secrets. The tracked .env IS the config of
-# record (no secrets), so .env is committed. .env.local holds WEBUI_SECRET_KEY
-# and GRAPHITI_API_TOKEN.
+# Deployment config + secrets are all gitignored. .env.example is the tracked
+# template (no secrets; <ollama-host> placeholder). `make bootstrap` copies it
+# to .env. .env holds the live config incl. OLLAMA_BASE_URL (host-specific).
+# .env.local holds WEBUI_SECRET_KEY and GRAPHITI_API_TOKEN (generated).
+.env
 .env.local
 .env.*.local
 

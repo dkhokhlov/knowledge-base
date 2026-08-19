@@ -7,7 +7,7 @@
 [![Ollama](https://img.shields.io/badge/Ollama-host_LLM-000000)](https://ollama.com/)
 [![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-8b5cf6)](https://modelcontextprotocol.io/)
 [![embed](https://img.shields.io/badge/embed-nomic--embed--text-brightgreen)](https://huggingface.co/nomic-ai/nomic-embed-text)
-[![LLM](https://img.shields.io/badge/LLM-qwen2.5_14b-blueviolet)](https://ollama.com/library/qwen2.5)
+[![LLM](https://img.shields.io/badge/LLM-gemma4_12b-blueviolet)](https://ollama.com/library/gemma4)
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED)](https://docs.docker.com/compose/)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
 
@@ -18,6 +18,21 @@ the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
 - **[Open WebUI][open-webui]** — document chat with RAG and user/group access control; REST API for agents.
 - **[Neo4j][neo4j]** — graph store for [Graphiti][graphiti] (internal only).
 - **[Caddy][caddy] gateway** — bearer-token gate in front of Graphiti MCP.
+
+## Contents
+
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Ollama host service](#ollama-host-service)
+- [Exposed endpoints](#exposed-endpoints)
+- [Security](#security)
+- [Agents](#agents)
+- [Persistent data and moving to RAID](#persistent-data-and-moving-to-raid)
+- [Tests](#tests)
+- [Make targets](#make-targets)
+- [Notes](#notes)
 
 ## Architecture
 
@@ -49,7 +64,7 @@ the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
 │            │                       │                              │                      │
 │  ┌─────────▼───────────────────────▼──────────────────────────────▼───────────────────┐  │
 │  │ Ollama  :11434  (host, via host-gateway)                                           │  │
-│  │ qwen2.5:14b (chat LLM)    nomic-embed-text (embeddings                             │  │
+│  │ gemma4:12b (chat LLM)     nomic-embed-text (embeddings                             │  │
 │  │                                                                                    │  │
 │  └────────────────────────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
@@ -67,12 +82,12 @@ the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
 ## Prerequisites
 
 - [Docker][docker] >= 20.10 with the [Compose][docker-compose] plugin (`docker compose`).
-- [Ollama][ollama] reachable from the containers. Set `OLLAMA_BASE_URL` in `.env`:
+- [Ollama][ollama] reachable from the containers. Set `OLLAMA_BASE_URL` in `.env` (`.env` is gitignored; `make bootstrap` creates it from `.env.example`, or `cp .env.example .env`):
   - `http://host.docker.internal:11434` if Ollama runs on the Docker host.
-  - `http://<ollama-host>:11434` if Ollama is a remote host on the LAN (here `mini4`).
+  - `http://<ollama-host>:11434` if Ollama is a remote host on the LAN.
 - Pull the models you will use:
   ```
-  make pull-models        # pulls MODEL_NAME (default qwen2.5:14b) + nomic-embed-text
+  make pull-models        # pulls MODEL_NAME (default gemma4:12b) + nomic-embed-text
   ```
   Equivalent to `ollama pull <MODEL_NAME>` and `ollama pull nomic-embed-text`.
 
@@ -86,6 +101,8 @@ the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
    - Locks `.env.local` to `0600`.
    - Creates `./data/{neo4j/data,neo4j/logs,openwebui}`.
    - Prints `GRAPHITI_API_TOKEN` to the terminal.
+   - Creates `.env` from `.env.example` (gitignored) if it does not exist.
+   - Set `OLLAMA_BASE_URL` in `.env` to your Ollama host (see [Prerequisites](#prerequisites)) before `make start`.
 2. Copy the printed `GRAPHITI_API_TOKEN` into your [MCP][mcp] clients (sent as `Authorization: Bearer <token>`).
    - `WEBUI_SECRET_KEY` is internal to [Open WebUI][open-webui]; no action needed.
    - It is a random JWT signing key, needed before `make start` (Open WebUI will not boot without it).
@@ -144,7 +161,7 @@ Provisioning sequence: `make start` → (admin signs up in UI) → `make api-key
 
 ## Configuration
 
-- `.env` — the config of record. Committed, no secrets. Edit here:
+- `.env` — gitignored, copied from `.env.example` (the tracked template). No secrets; set `OLLAMA_BASE_URL` to your Ollama host here:
   - ports, image tags, model names, Neo4j memory, tunables, `OLLAMA_BASE_URL`.
 - `OLLAMA_BASE_URL` — where [Graphiti MCP][graphiti] and [Open WebUI][open-webui] reach [Ollama][ollama].
   - [Graphiti][graphiti] reads it fresh on every start (compose interpolates `OPENAI_API_URL`).
@@ -161,6 +178,39 @@ Provisioning sequence: `make start` → (admin signs up in UI) → `make api-key
   - Mounted read-only into the container.
 - `caddy/Caddyfile` — bearer-token gate:
   - Token read from [Caddy][caddy]'s env, so the Caddyfile is safe to commit.
+
+## Ollama host service
+
+Ollama runs on the Docker host as a systemd unit
+(`/etc/systemd/system/ollama.service`). The stack reaches it at
+`OLLAMA_BASE_URL=http://<ollama-host>:11434` (see `.env` and
+[Prerequisites](#prerequisites)). Unit env params:
+
+| Env var | Value | Purpose |
+|---|---|---|
+| `OLLAMA_HOST` | `0.0.0.0` | Listen on all interfaces (LAN-reachable). |
+| `OLLAMA_KEEP_ALIVE` | `15m` | Keep models loaded for 15 min after the last request. |
+| `OLLAMA_FLASH_ATTENTION` | `1` | Enable flash-attention KV paths (lower memory, faster). |
+| `OLLAMA_KV_CACHE_TYPE` | `q8_0` | 8-bit KV cache — halves KV memory vs fp16. |
+| `OLLAMA_NUM_PARALLEL` | `12` | Up to 12 concurrent requests per loaded model. |
+| `OLLAMA_NUM_GPU_LAYERS` | `999` | Offload all layers to GPU (model fits in VRAM). |
+| `OLLAMA_CONTEXT_LENGTH` | `32000` | Max context per request (clamps the model native 262144). |
+| `OLLAMA_DEBUG` | `1` | Verbose logs. |
+| `OLLAMA_MAX_LOADED_MODELS` | (commented) | Optional cap on loaded models; disabled. |
+
+Effective state (`ollama ps`, `gemma4:12b` active):
+
+| Model | Size | Processor | Context |
+|---|---|---|---|
+| `gemma4:12b` | 17 GB | 100% GPU | 32000 |
+| `nomic-embed-text:latest` | 323 MB | 100% GPU | 2048 |
+
+Host: a CUDA GPU host with enough VRAM for the chat model weights plus the 12-slot KV cache.
+
+Notes:
+- `gemma4:12b` (11.9B, Q4_K_M, ~7.6 GB weights) + 8-bit flash-attention KV cache keeps the 12-slot, 32k-context buffer in VRAM, so the model stays 100% on GPU (no CPU offload).
+- `OLLAMA_CONTEXT_LENGTH=32000` clamps the model native context (262144) per request.
+- Keep `MODEL_NAME` in `.env` inside this VRAM budget; a larger model spills to CPU (50/50 split) and slows RAG.
 
 ## Exposed endpoints
 
@@ -208,7 +258,7 @@ Provisioning sequence: `make start` → (admin signs up in UI) → `make api-key
 
 ### Secrets handling
 
-- `.env` is committed and holds no secrets (ports, tags, model names, tunables).
+- `.env` is gitignored (copy from `.env.example`) and holds no secrets (ports, tags, model names, tunables) — except `OLLAMA_BASE_URL`, which is deployment-specific.
 - `.env.local` is gitignored (`chmod 0600`) and holds:
   - `WEBUI_SECRET_KEY` (generated by `make bootstrap`).
   - `GRAPHITI_API_TOKEN` (generated by `make bootstrap`, printed to the terminal).
@@ -271,7 +321,7 @@ Notes:
   Block it only for a full airgap (set `HF_HUB_OFFLINE=1` and test token counting).
 - This is an **allowlist of known defaults**, not a firewall. To also catch
   future/unknown outbound domains, add a DNS sinkhole (`dns: ["0.0.0.0"]`) to the
-  `openwebui` and `graphiti-mcp` services and pin `mini4` in `extra_hosts` — but
+  `openwebui` and `graphiti-mcp` services and pin the Ollama host in `extra_hosts` — but
   that is out of scope for this minimal hardening.
 
 ### Container hardening
@@ -323,12 +373,12 @@ Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs
   - `OPENWEBUI_USER_API_KEY` (read-scoped, non-admin) — use this for agents.
   - `OPENWEBUI_ADMIN_API_KEY` (full admin) — admin tooling only.
   - Or sign in to get a JWT: `POST /api/v1/auths/signin` returns `token`; use it as the Bearer (same effect as an API key for that user).
-- Chat (OpenAI-compatible) with [`qwen2.5:14b`][qwen2]:
+- Chat (OpenAI-compatible) with [`gemma4:12b`][gemma4]:
   ```
   curl -s http://localhost:3000/api/chat/completions \
     -H "Authorization: Bearer <OWUI API key>" \
     -H "Content-Type: application/json" \
-    -d '{"model":"qwen2.5:14b","stream":false,"messages":[{"role":"user","content":"Say hello."}]}'
+    -d '{"model":"gemma4:12b","stream":false,"messages":[{"role":"user","content":"Say hello."}]}'
   ```
 - Upload a file (returns an id):
   ```
@@ -549,4 +599,4 @@ Notes:
 [mcp]: https://modelcontextprotocol.io/
 [huggingface]: https://huggingface.co/
 [nomic-embed-text]: https://huggingface.co/nomic-ai/nomic-embed-text
-[qwen2]: https://ollama.com/library/qwen2.5
+[gemma4]: https://ollama.com/library/gemma4

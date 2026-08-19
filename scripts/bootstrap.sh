@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
-# Create .env.local (gitignored), generate both secrets (WEBUI_SECRET_KEY and
-# GRAPHITI_API_TOKEN), lock the file to 0600, ensure the ./data bind-mount tree
-# exists, and print the GRAPHITI_API_TOKEN so it can be copied into MCP clients.
+# Create .env (from .env.example, if missing) and .env.local (gitignored),
+# generate both secrets (WEBUI_SECRET_KEY and GRAPHITI_API_TOKEN), lock .env.local
+# to 0600, ensure the ./data bind-mount tree exists, and print the
+# GRAPHITI_API_TOKEN so it can be copied into MCP clients.
 # Idempotent: existing non-empty values are kept.
 set -eu
 
 cd "$(dirname "$0")/.."
+
+if [ ! -f .env ]; then
+  if [ ! -f .env.example ]; then
+    printf 'FAIL  .env.example missing (cannot scaffold .env)\n' >&2
+    exit 1
+  fi
+  cp .env.example .env
+  printf '  created .env from .env.example — set OLLAMA_BASE_URL before `make start`\n'
+fi
 
 gen_hex() {
   openssl rand -hex 32 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(32))'
