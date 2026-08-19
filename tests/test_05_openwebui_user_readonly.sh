@@ -120,4 +120,25 @@ awa=$(curl -s "$O/api/v1/knowledge/${KB_ID}" "${A[@]}" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("write_access"))' 2>/dev/null)
 if [ "$awa" = "True" ]; then pass "admin key -> write_access=True (contrast)"; else fail "admin key -> write_access=${awa:-?} (expected True)"; fi
 
+# --- 6. user key can RAG chat grounded on the KB (guards the model grant) -----
+# A non-admin user needs a '*' read grant on the chat model to see it; without
+# that grant (made by `make api-keys`), /api/chat/completions returns
+# "Model not found". This section exercises that grant end-to-end.
+section "user key: RAG chat grounded on KB (model grant)"
+CHAT_MODEL="${MODEL_NAME:-qwen2.5:14b}"
+rag_body=$(python3 -c 'import sys,json;print(json.dumps({"model":sys.argv[1],"stream":False,"knowledge":[sys.argv[2]],"messages":[{"role":"user","content":"What resistor changes resistance under mechanical strain? Answer in one short sentence."}]}))' "$CHAT_MODEL" "$KB_ID")
+rag_code=$(curl -s -o /tmp/kbrouser_rag.out -w '%{http_code}' -X POST "$O/api/chat/completions" "${U[@]}" \
+  -H 'Content-Type: application/json' -d "$rag_body")
+rag_body_out=$(cat /tmp/kbrouser_rag.out 2>/dev/null); rm -f /tmp/kbrouser_rag.out
+rag_content=$(printf '%s' "$rag_body_out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("choices",[{}])[0].get("message",{}).get("content") or "").strip())' 2>/dev/null)
+if [ "${rag_code:-0}" -ne 200 ]; then
+  fail "RAG chat -> http=${rag_code} (expected 200; model grant missing?): $(printf '%s' "$rag_body_out" | head -c 160)"
+  finish; exit 1
+fi
+if [ -n "$rag_content" ]; then
+  pass "RAG chat -> http=200, answer: $(printf '%s' "$rag_content" | head -c 80)"
+else
+  fail "RAG chat -> http=200 but empty content"; finish; exit 1
+fi
+
 finish

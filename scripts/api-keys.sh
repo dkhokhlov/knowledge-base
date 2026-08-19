@@ -116,6 +116,26 @@ if not feat.get("api_keys"):
 else:
     out("OK    features.api_keys already enabled")
 
+# --- 3b. grant '*' read on the chat model so the agent user can RAG chat -----
+# Without a model access grant, a non-admin user sees 0 models and
+# /api/chat/completions returns "Model not found". Same '*' pattern as KB grants.
+MODEL = os.environ.get("MODEL_NAME", "qwen2.5:14b")
+code, ml, _ = jget("GET", "/api/models", admin_jwt)
+mids = []
+if code == 200 and isinstance(ml, dict):
+    mids = [m.get("id") for m in (ml.get("data") or []) if isinstance(m, dict)]
+if MODEL not in mids:
+    out("WARN  chat model %s not found in admin's model list; skipped model grant (RAG chat will fail until it is available)" % MODEL)
+else:
+    grant = {"resource_type": "model", "resource_id": MODEL,
+             "principal_type": "user", "principal_id": "*", "permission": "read"}
+    code, md, txt = jget("POST", "/api/v1/models/model/access/update", admin_jwt,
+                         {"id": MODEL, "name": MODEL, "access_grants": [grant]})
+    if code != 200:
+        out("WARN  model access grant -> %s %s (RAG chat may fail for non-admin users)" % (code, txt[:160]))
+    else:
+        out("OK    granted '*' read on chat model %s (agent can RAG chat)" % MODEL)
+
 # --- 4. ensure the non-admin agent user exists -------------------------------
 agent_pass = os.environ.get("OPENWEBUI_USER_PASSWORD", "")
 agent_jwt = signin(AGENT_USER, agent_pass) if agent_pass else ""

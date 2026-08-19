@@ -415,6 +415,7 @@ export GRAPHITI_API_TOKEN=<token>
 
 - The agent user is a dedicated non-admin account created by `make api-keys`. It has the same **read** scope as the admin only where KBs grant `*` (public read); it cannot write to KBs it does not own.
 - Give agents the `OPENWEBUI_USER_API_KEY`. An agent cannot damage indexed documents: binding a file (`/api/v1/knowledge/{id}/file/add`), removing files, and deleting a KB are denied for KBs the agent does not own.
+- `make api-keys` also grants `*` read on the chat model (`MODEL_NAME`) so the agent user can do RAG chat (`/api/chat/completions`). Without it, a non-admin user sees 0 models and chat returns `Model not found`.
 - Prerequisites flipped by `make api-keys` (and set in `.env` for fresh first boots): `ENABLE_API_KEYS=true` and `USER_PERMISSIONS_FEATURES_API_KEYS=true`.
 - Idempotent; `FORCE=1 make api-keys` rotates (replaces) the keys. The admin API key is also persisted in `webui.db`; rotating via this script invalidates any prior key.
 - This is mechanism A (read-scoped non-admin user). For a hard API-layer read-only lock on every key, see the `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` / `API_KEYS_ALLOWED_ENDPOINTS` admin config (Settings -> Admin -> API Key Endpoint Restrictions) — note it is global and also restricts the admin key.
