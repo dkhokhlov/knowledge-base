@@ -8,7 +8,7 @@ COMPOSE  := docker compose
 DATA_DIR := ./data
 
 .PHONY: help bootstrap preflight pull pull-models start stop restart logs ps config \
-        health test shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
+        health test api-keys shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -59,6 +59,12 @@ test: ## Run system integration tests against the running stack (run: make start
 	@status=0; for t in tests/test_*.sh; do [ -e "$$t" ] || continue; \
 	  echo; echo "=== $$t ==="; bash "$$t" || status=1; \
 	done; exit $$status
+
+api-keys: ## Provision admin + agent-user API keys into .env.local (run after `make start` + admin signup)
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_TEST_USER=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_TEST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
+	@./scripts/api-keys.sh
 
 shell-owui: ## Shell into the Open WebUI container
 	@docker exec -it kb-openwebui sh

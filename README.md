@@ -109,8 +109,15 @@ the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
    ```
 7. Open `http://<your-host-ip>:3000` and register the first user.
    - The first user becomes the admin.
+   - Set `OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` in `.env.local` to this admin account (used by `make test` and `make api-keys`).
    - Later signups need admin approval (`DEFAULT_USER_ROLE=pending`).
-8. (Admin) Generate an API key for agent use: Settings -> Account -> API Keys.
+8. Provision two REST API keys (admin + a read-scoped agent user) into `.env.local`:
+   ```
+   make api-keys
+   ```
+   - Enables API keys stack-wide and creates a dedicated non-admin user `agent@local.test`.
+   - Writes `OPENWEBUI_ADMIN_API_KEY` (full admin — keep private) and `OPENWEBUI_USER_API_KEY` (read-scoped — hand to agents) into `.env.local`. See [API keys & agent access](#api-keys--agent-access).
+   - Idempotent; set `FORCE=1` to rotate the keys.
 9. (Optional) Close signup after bootstrap:
    - Set `ENABLE_SIGNUP=false` in `.env`.
    - Run `make restart`.
@@ -388,6 +395,21 @@ export GRAPHITI_API_TOKEN=<token>
   }
   ```
 - `oauth: false` stops Opencode from trying OAuth auto-detection.
+
+### API keys & agent access
+
+`make api-keys` provisions two REST API keys into `.env.local` (run after `make start` and admin signup):
+
+| Variable | Account | Access | Hand to agents? |
+|---|---|---|---|
+| `OPENWEBUI_ADMIN_API_KEY` | `admin@local.test` (admin) | Full — bypasses access control | **No** |
+| `OPENWEBUI_USER_API_KEY` | `agent@local.test` (user) | Read-scoped — sees KBs via their `*` read grants; cannot write to or delete the admin's KBs | **Yes** |
+
+- The agent user is a dedicated non-admin account created by `make api-keys`. It has the same **read** scope as the admin only where KBs grant `*` (public read); it cannot write to KBs it does not own.
+- Give agents the `OPENWEBUI_USER_API_KEY`. An agent cannot damage indexed documents: binding a file (`/api/v1/knowledge/{id}/file/add`), removing files, and deleting a KB are denied for KBs the agent does not own.
+- Prerequisites flipped by `make api-keys` (and set in `.env` for fresh first boots): `ENABLE_API_KEYS=true` and `USER_PERMISSIONS_FEATURES_API_KEYS=true`.
+- Idempotent; `FORCE=1 make api-keys` rotates (replaces) the keys. The admin API key is also persisted in `webui.db`; rotating via this script invalidates any prior key.
+- This is mechanism A (read-scoped non-admin user). For a hard API-layer read-only lock on every key, see the `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` / `API_KEYS_ALLOWED_ENDPOINTS` admin config (Settings -> Admin -> API Key Endpoint Restrictions) — note it is global and also restricts the admin key.
 
 ### RAG governance
 
