@@ -11,14 +11,17 @@
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED)](https://docs.docker.com/compose/)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
 
-Self-hosted knowledge base stack. [Ollama][ollama] runs on the [Docker][docker] host and supplies
-the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
+Self-hosted, agent-first knowledge stack combining two complementary knowledge bases in one system. [Open WebUI][open-webui] provides a document knowledge base: ingest curated documents into access-controlled collections, vector-search them, and generate LLM-grounded RAG answers. [Graphiti MCP][graphiti] provides a temporal fact memory over [Neo4j][neo4j]: each episode is time-stamped, and extracted facts and edges are time-bound — a fact is true over a time window and is invalidated, not deleted, when superseded. This preserves history so the graph represents current truth, what was true when, and how knowledge changed — beyond static vector retrieval of fixed text chunks.
 
-- **[Graphiti MCP][graphiti]** — temporal knowledge graph over [Neo4j][neo4j]; HTTP [MCP][mcp] server (internal only).
-- **[Open WebUI][open-webui]** — document chat with RAG + user/group access control; REST API for agents; **identity provider** for the kb-gateway.
+Documents provide grounded answers from a curated reference corpus. Fact memory replaces scattered, untrimmed README, notes, and tracker files across projects — where every context load pays a growing token tax and specific facts become hard to find — with one searchable temporal graph, so accumulated knowledge stays findable instead of bloating linearly with every addition. Agents use the stack through the stack-side `kb-gateway`, which authorizes per-account `KB_API_KEY` credentials with identity and role derived server-side, plus a thin zero-dependency CLI and the `/kb` skill. Humans can also use the Open WebUI web interface.
+
+- **[Graphiti MCP][graphiti]** — temporal fact memory over [Neo4j][neo4j]; HTTP [MCP][mcp] server (internal only).
+- **[Open WebUI][open-webui]** — document knowledge base with vector search, grounded RAG chat, and user/group access control; also the identity provider for the kb-gateway.
 - **[Neo4j][neo4j]** — graph store for [Graphiti][graphiti] (internal only).
-- **kb-gateway** — stack-side authorization + Graphiti MCP bridge + Neo4j group discovery + admin user provisioning (zero-dependency Python stdlib).
+- **kb-gateway** — stack-side authorization, per-account identity and role validation, Graphiti MCP bridge, live group discovery, and admin user provisioning (zero-dependency Python stdlib).
 - **[Caddy][caddy]** — public edge that proxies agents to the kb-gateway.
+
+[Ollama][ollama] supplies the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings; it is reached via `OLLAMA_BASE_URL` and can run on the [Docker][docker] host or a remote/LAN host.
 
 ## Documentation map
 
