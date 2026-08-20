@@ -203,6 +203,22 @@ Replace `<host>` in `KB_HOST` with the Docker host name/IP, or `localhost` if th
   ```
 - Authorization rules are in [Operating model](#operating-model): personal-only writes, read-all, owner/admin destructive. The `/kb` skill exposes these as natural-language triggers ("remember …", "what do we know about …", "forget …") plus the slash command.
 
+#### Performance
+
+Measured warm on mini4 (one 14B ctx-baked model loaded). The first call after idle adds model-load time (~30 s cold).
+
+| Operation | Endpoint | Median latency |
+|---|---|---|
+| add (queue -> 202, episode queued) | `POST /memory/add` | ~54 ms |
+| retrieve facts (search) | `POST /memory/search` | ~89 ms |
+| fetch raw episodes | `GET /memory/episodes?max=20` | ~57 ms |
+| add -> fact searchable (async extraction, warm model) | add + poll `/memory/search` | ~9 s |
+
+#### search vs episodes (facts vs raw)
+
+- `/memory/search` returns **facts** (`entity_edges`): each fact is a fact text with `valid_at` / `invalid_at`. It is Graphiti RAG — the query is embedded (`nomic-embed-text`), matched by vector similarity over nodes, then refined by graph traversal. The original `add` text is not returned.
+- `/memory/episodes` returns the raw **episodes**: the original `add` texts, verbatim, in order. No embedding, no LLM, no graph traversal.
+
 ### KB user provisioning (admin)
 
 An admin tells an agent **"create a new KB user alice\@example.com named Alice"**; the agent runs `kb_gateway.py ... user-create --email alice@example.com --name Alice`.
@@ -219,6 +235,20 @@ An admin tells an agent **"create a new KB user alice\@example.com named Alice"*
 - An agent using a user's API key inherits that user's permissions: the user's own files + KBs shared with the user's groups. It cannot see other users' private docs. An admin key bypasses access control — give agents a dedicated low-priv user's key, not an admin key.
 - To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field of `/api/chat/completions` as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds.
 - `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
+
+#### Performance
+
+Measured warm on mini4. RAG chat includes the LLM generation step, so it is the slower path.
+
+| Operation | Endpoint | Median latency |
+|---|---|---|
+| raw chunk retrieval | `POST /api/v1/retrieval/query/collection` | ~64 ms (first call ~328 ms) |
+| RAG chat (retrieval + grounded LLM) | `POST /api/chat/completions` (`files`) | ~1.5 s |
+
+#### RAG chat vs raw retrieval (chunks)
+
+- Raw retrieval (`/api/v1/retrieval/query/collection`) returns **chunks**: a Chroma-style object (`distances`, `documents`, `metadatas`, `ids`), top-k by vector similarity. No LLM runs.
+- RAG chat (`/api/chat/completions` with `files:[{"type":"collection","id":<kb-id>}]`) runs retrieval, injects the chunks as context, and returns a grounded LLM answer. The `make rag-config` strict template makes the model answer only from the retrieved chunks and refuse when the answer is absent.
 
 ## Security
 
