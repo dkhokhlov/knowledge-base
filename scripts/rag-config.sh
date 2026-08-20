@@ -29,7 +29,8 @@ set +a
 python3 - <<'PY'
 import os, json, urllib.request, urllib.error, sys
 
-O = "http://localhost:%s" % os.environ.get("OPENWEBUI_HOST_PORT", "3000")
+# OWUI is fronted by Caddy at the KB_HOST root; reach its /api/* there.
+O = os.environ.get("KB_HOST") or ("http://localhost:%s" % os.environ.get("KB_HOST_PORT", "3000"))
 AK = os.environ.get("OPENWEBUI_ADMIN_API_KEY", "")
 if not AK:
     sys.exit("FAIL  OPENWEBUI_ADMIN_API_KEY not set in .env.local (run: make api-keys)")

@@ -2,7 +2,7 @@
 # System integration test: admin-driven KB user provisioning via the kb-gateway
 # (POST /admin/users). Covers:
 #   (a) admin creates a user -> email + temp_password + kb_api_key + role=user
-#   (b) the returned key resolves to the new user (GET /mem/whoami)
+#   (b) the returned key resolves to the new user (GET /memory/whoami)
 #   (c) non-admin KB_API_KEY -> 403
 #   (d) duplicate email -> deterministic non-2xx (no second account)
 #   (e) partial-failure rollback: an isolated gateway with the test-only
@@ -16,8 +16,11 @@ load_env
 require_stack_up
 require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; }
 
-G="http://localhost:${GRAPHITI_HOST_PORT:-8000}"
-O="http://localhost:${OPENWEBUI_HOST_PORT:-3000}"
+# G = gateway (KB_HOST; /memory/* + /admin/users + /health via Caddy).
+# O = OWUI REST (KB_HOST root /api/* via Caddy catch-all) — used for cleanup.
+H="$(kb_host)"
+G="$H"
+O="$H"
 ADMIN_KEY="$OPENWEBUI_ADMIN_API_KEY"
 USER_KEY="$OPENWEBUI_USER_API_KEY"
 
@@ -68,7 +71,7 @@ CREATED_IDS+=("$newid")
 # --- (b) the returned key resolves to the new user -------------------------
 section "returned key resolves to the new user"
 if [ -n "$newkey" ]; then
-  who=$(curl -s "$G/mem/whoami" -H "Authorization: Bearer $newkey")
+  who=$(curl -s "$G/memory/whoami" -H "Authorization: Bearer $newkey")
   wemail=$(printf '%s' "$who" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("email",""))' 2>/dev/null)
   wrole=$(printf '%s' "$who" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("role",""))' 2>/dev/null)
   { [ "$wemail" = "$EMAIL_A" ] && [ "$wrole" = "user" ]; } \

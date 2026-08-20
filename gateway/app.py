@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""kb-gateway: stack-side authorization + Graphiti MCP bridge + admin user
+"""kb-gateway: stack-side authorization + Graphiti REST bridge + admin user
 provisioning. Zero-dependency (Python 3 stdlib only).
 
-Listens on :8010 (container-internal). Caddy (:8000, edge) is the public face.
+Listens on :8010 (container-internal). Caddy (:3000, edge) is the public face.
 All endpoints require `Authorization: Bearer <KB_API_KEY>` except /health.
 Identity + role are derived from the key via Open WebUI (tamper-proof); the
 caller cannot influence them. Writes are to the caller's own personal group;
@@ -18,7 +18,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import authorize
-import mcp
+import graphiti
 import neo4j
 import owui
 
@@ -39,31 +39,6 @@ class GatewayError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
-
-
-# --- helpers -----------------------------------------------------------------
-
-def tool_text(result):
-    """Extract a MCP tools/call result into a Python value. Graphiti returns
-    facts/episodes as JSON inside a text content block. A tool-level error
-    (isError=true) is raised as a 502."""
-    if isinstance(result, dict):
-        if result.get("isError"):
-            content = result.get("content") or []
-            txt = "".join(c.get("text", "") for c in content
-                          if isinstance(c, dict) and c.get("type") == "text")
-            raise GatewayError(502, "tool error: %s" % txt[:300])
-        content = result.get("content")
-        if isinstance(content, list):
-            txt = "".join(c.get("text", "") for c in content
-                          if isinstance(c, dict) and c.get("type") == "text")
-            if not txt:
-                return None
-            try:
-                return json.loads(txt)
-            except Exception:
-                return txt
-    return result
 
 
 # --- request handler ---------------------------------------------------------
@@ -149,9 +124,7 @@ class Handler(BaseHTTPRequestHandler):
             self._err(503, "identity service unavailable: %s" % e)
         except owui.OwuiConflict as e:
             self._err(409, str(e))
-        except mcp.McpToolError as e:
-            self._err(502, str(e))
-        except mcp.McpError as e:
+        except graphiti.GraphitiError as e:
             self._err(502, "graphiti unavailable: %s" % e)
         except neo4j.Neo4jError as e:
             self._err(502, "neo4j unavailable: %s" % e)
@@ -163,37 +136,36 @@ class Handler(BaseHTTPRequestHandler):
     def _route(self, method, path, qs):
         identity = None
         # Routes that need auth (everything except /health).
-        if path == "/mem/whoami" and method == "GET":
+        if path == "/memory/whoami" and method == "GET":
             identity = self._auth()
             return self._ok({"email": identity["email"], "id": identity["id"],
                              "role": identity["role"]})
-        if path == "/mem/groups" and method == "GET":
+        if path == "/memory/groups" and method == "GET":
             self._auth()
             return self._ok({"groups": neo4j.discover_groups()})
-        if path == "/mem/status" and method == "GET":
+        if path == "/memory/status" and method == "GET":
             self._auth()
-            return self._ok({"status": tool_text(mcp.call_tool("get_status", {}))})
-        if path == "/mem/episodes" and method == "GET":
+            return self._ok({"status": graphiti.status()})
+        if path == "/memory/episodes" and method == "GET":
             self._auth()
             max_eps = _qs_int(qs, "max", 10)
-            return self._ok({"episodes": tool_text(
-                mcp.call_tool("get_episodes", {"group_ids": neo4j.discover_groups(),
-                                                 "max_episodes": max_eps}))})
-        if path == "/mem/add" and method == "POST":
+            return self._ok({"episodes": graphiti.get_episodes(
+                neo4j.discover_groups(), max_eps)})
+        if path == "/memory/add" and method == "POST":
             identity = self._auth()
             return self._add(identity, self._read_body())
-        if path == "/mem/search" and method == "POST":
+        if path == "/memory/search" and method == "POST":
             self._auth()
             body = self._read_body()
             query = _req(body, "query")
             return self._search(query, body)
-        if path == "/mem/forget" and method == "POST":
+        if path == "/memory/forget" and method == "POST":
             identity = self._auth()
             return self._forget(identity, self._read_body())
-        if path == "/mem/delete-edge" and method == "POST":
+        if path == "/memory/delete-edge" and method == "POST":
             identity = self._auth()
             return self._delete_uuid(identity, self._read_body(), "edge")
-        if path == "/mem/delete-episode" and method == "POST":
+        if path == "/memory/delete-episode" and method == "POST":
             identity = self._auth()
             return self._delete_uuid(identity, self._read_body(), "episode")
         if path == "/admin/users" and method == "POST":
@@ -217,38 +189,39 @@ class Handler(BaseHTTPRequestHandler):
         group, err = authorize.resolve_add_group(identity, body.get("group"))
         if err:
             raise GatewayError(403, err)
-        args = {"name": name, "episode_body": text, "group_id": group,
-                "source": "text", "source_description": body.get("source_description") or ""}
-        mcp.call_tool("add_memory", args)
+        source_description = body.get("source_description") or ""
+        graphiti.add_memory(group, name, text, source_description)
         self._ok({"ok": True, "group": group})
 
     def _search(self, query, body):
         max_facts = int(body.get("k") or 10)
         groups = neo4j.discover_groups()
-        result = tool_text(mcp.call_tool("search_memory_facts",
-                                          {"query": query, "group_ids": groups,
-                                           "max_facts": max_facts}))
-        self._ok({"facts": result, "groups": groups})
+        facts = graphiti.search_facts(groups, query, max_facts)
+        self._ok({"facts": facts, "groups": groups})
 
     def _forget(self, identity, body):
-        group = (_req(body, "group") or "").strip()
+        # Charset-normalize at the boundary: client input may be `user:<email>`
+        # or the stored `user-<sanitized>`; both map to the one id used for the
+        # ownership check, the clear_group call, and the response.
+        group = authorize.graphiti_group_id((_req(body, "group") or "").strip())
         if not authorize.can_destruct(identity, group):
             raise GatewayError(403, "not permitted to clear group %r" % group)
-        mcp.call_tool("clear_graph", {"group_ids": [group]})
+        graphiti.clear_group(group)
         self._ok({"ok": True, "group": group})
 
     def _delete_uuid(self, identity, body, kind):
         uuid = _req(body, "uuid")
         if kind == "edge":
             target_group = neo4j.lookup_edge_group(uuid)
-            tool, args = "delete_entity_edge", {"uuid": uuid}
         else:
             target_group = neo4j.lookup_node_group(uuid)
-            tool, args = "delete_episode", {"uuid": uuid}
         ok, err = authorize.check_uuid_target_group(identity, target_group)
         if not ok:
             raise GatewayError(403, err)
-        mcp.call_tool(tool, args)
+        if kind == "edge":
+            graphiti.delete_edge(uuid)
+        else:
+            graphiti.delete_episode(uuid)
         self._ok({"ok": True, "uuid": uuid, "group": target_group})
 
     # -- admin: agent-driven user provisioning --

@@ -1,7 +1,12 @@
-# Custom Graphiti MCP config for the KnowledgeBase stack.
-# LLM and embedder both point at the host Ollama via its OpenAI-compatible /v1.
-# Mounted read-only at /app/mcp/config/config.yaml inside the graphiti-mcp
-# container (CONFIG_PATH=/app/mcp/config/config.yaml).
+# UNUSED by the current stack. This config was for the zepai/knowledge-graph-mcp
+# image, which has been replaced by the zepai/graphiti REST server. The REST
+# server reads its LLM/embedder config from env (set in compose.yml) and the
+# Ollama-compatible client is injected by graphiti/bootstrap.py. This file is
+# kept for reference only; it is NOT mounted into the container.
+#
+# Original purpose (MCP image): LLM and embedder both pointed at the host
+# Ollama via its OpenAI-compatible /v1. Mounted read-only at
+# /app/mcp/config/config.yaml inside the graphiti-mcp container.
 
 server:
   transport: "http"

@@ -1,4 +1,4 @@
-# KnowledgeBase stack: Graphiti MCP + Neo4j + Open WebUI. Ollama is external.
+# KnowledgeBase stack: Graphiti REST + Neo4j + Open WebUI. Ollama is external.
 # All config lives in .env; secrets live in .env.local (gitignored).
 # Run `make` or `make help` to list targets.
 
@@ -53,12 +53,11 @@ ps: ## Show container status (with health)
 config: ## Render effective compose config (secrets redacted)
 	@$(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPENWEBUI_USER_API_KEY|OPENWEBUI_USER_PASSWORD|OPENWEBUI_TEST_PASSWORD): .*/\1: <redacted>/'
 
-health: ## Probe the kb-gateway (via Caddy) and Open WebUI /health
+health: ## Probe the stack /health (Caddy -> kb-gateway aggregated, reflects OWUI)
 	@set -a; . ./.env; set +a; \
-	curl -sf http://localhost:$$GRAPHITI_HOST_PORT/health >/dev/null \
-	  && echo "kb-gateway healthy (via Caddy)" || { echo "kb-gateway DOWN"; exit 1; }; \
-	curl -sf http://localhost:$$OPENWEBUI_HOST_PORT/health >/dev/null \
-	  && echo "open-webui healthy" || { echo "open-webui DOWN"; exit 1; }
+	H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
+	curl -sf "$$H/health" >/dev/null \
+	  && echo "stack healthy ($$H/health)" || { echo "stack DOWN ($$H/health)"; exit 1; }
 
 test: ## Run system integration tests against the running stack (run: make start)
 	@status=0; for t in tests/test_*.sh; do [ -e "$$t" ] || continue; \
@@ -82,8 +81,8 @@ shell-owui: ## Shell into the Open WebUI container
 shell-neo4j: ## Shell into the Neo4j container
 	@docker exec -it kb-neo4j bash
 
-shell-graphiti: ## Shell into the graphiti-mcp container
-	@docker exec -it kb-graphiti-mcp sh
+shell-graphiti: ## Shell into the graphiti container
+	@docker exec -it kb-graphiti sh
 
 shell-caddy: ## Shell into the Caddy gateway container
 	@docker exec -it kb-graphiti-gateway sh

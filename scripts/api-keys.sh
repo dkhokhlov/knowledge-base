@@ -36,7 +36,8 @@ set +a
 python3 - <<'PY'
 import os, json, secrets, tempfile, time, urllib.request, urllib.error, sys
 
-O = "http://localhost:%s" % os.environ.get("OPENWEBUI_HOST_PORT", "3000")
+# OWUI is fronted by Caddy at the KB_HOST root; reach its /api/* there.
+O = os.environ.get("KB_HOST") or ("http://localhost:%s" % os.environ.get("KB_HOST_PORT", "3000"))
 ADMIN_USER = os.environ.get("OPENWEBUI_TEST_USER", "")
 ADMIN_PASS = os.environ.get("OPENWEBUI_TEST_PASSWORD", "")
 AGENT_USER = os.environ.get("OPENWEBUI_USER") or "agent@local.test"

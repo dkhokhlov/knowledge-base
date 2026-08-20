@@ -1,5 +1,5 @@
 # kb-gateway: zero-dependency Python stdlib service (no pip install).
-# Authorizes KB_API_KEY via Open WebUI, bridges to Graphiti MCP, discovers
+# Authorizes KB_API_KEY via Open WebUI, bridges to Graphiti REST, discovers
 # groups from Neo4j, and provisions admin-created users. Runs non-root.
 FROM python:3.12-slim
 
@@ -9,7 +9,7 @@ RUN addgroup --system --gid 2000 kbg && \
     adduser --system --uid 2000 --ingroup kbg --no-create-home kbg
 
 WORKDIR /app
-COPY app.py neo4j.py owui.py mcp.py authorize.py ./
+COPY app.py neo4j.py owui.py graphiti.py authorize.py ./
 
 USER kbg
 EXPOSE 8010

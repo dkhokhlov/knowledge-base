@@ -1,8 +1,29 @@
-# Public edge for the kb-gateway. Caddy proxies every path to the gateway,
-# which enforces KB_API_KEY auth (validated against Open WebUI) and authorizes
-# per call. /health is ungated by the gateway (for probes). graphiti-mcp +
-# neo4j are not reachable from here (they are on the internal graph_internal
-# network, bridged only by kb-gateway).
-:8000 {
-	reverse_proxy kb-gateway:8010
+# Public edge for the KnowledgeBase stack (single external URL = KB_HOST).
+# Caddy listens on :3000 (container port = host port; no translation).
+# Routing:
+#   /memory/*          -> kb-gateway:8010  (memory/facts; gateway serves /memory/*)
+#   POST /admin/users  -> kb-gateway:8010  (admin user provisioning; POST only)
+#   /health            -> kb-gateway:8010  (aggregated; probes OWUI; ungated)
+#   /* (catch-all)     -> openwebui:8080   (OWUI landing + /api/* + SPA)
+# GET /admin/users falls through to OWUI (SPA admin view) — only POST is the
+# gateway's provisioning endpoint, so browser deep-links keep working.
+# graphiti + neo4j are not reachable from here (graph_internal, bridged only
+# by kb-gateway). OWUI is reached over owui_net (Caddy joins owui_net + edge).
+:3000 {
+	@provision {
+		method POST
+		path /admin/users
+	}
+	handle /memory/* {
+		reverse_proxy kb-gateway:8010
+	}
+	handle @provision {
+		reverse_proxy kb-gateway:8010
+	}
+	handle /health {
+		reverse_proxy kb-gateway:8010
+	}
+	handle {
+		reverse_proxy openwebui:8080
+	}
 }

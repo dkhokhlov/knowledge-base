@@ -46,14 +46,21 @@ http_code() {
   curl -s -o /dev/null -w '%{http_code}' "$@" "$url"
 }
 
+# Resolve the single public URL (KB_HOST). Caddy fronts OWUI at the root and
+# the kb-gateway at /memory/*, /admin/users, /health. Falls back to synth from
+# KB_HOST_PORT. Call after load_env.
+kb_host() {
+  printf '%s' "${KB_HOST:-http://localhost:${KB_HOST_PORT:-3000}}"
+}
+
 # Bail early if the stack is not up and healthy. Exits with status 2.
 require_stack_up() {
-  local g o
-  g=$(http_code "http://localhost:${GRAPHITI_HOST_PORT:-8000}/health" --connect-timeout 2)
-  o=$(http_code "http://localhost:${OPENWEBUI_HOST_PORT:-3000}/health" --connect-timeout 2)
-  if [ "$g" != "200" ] || [ "$o" != 200 ]; then
-    printf 'Stack not healthy (graphiti=%s openwebui=%s). Run: make start && make health\n' \
-      "$g" "$o" >&2
+  local h code
+  h="$(kb_host)"
+  code=$(http_code "$h/health" --connect-timeout 2)
+  if [ "$code" != "200" ]; then
+    printf 'Stack not healthy (KB_HOST=%s /health=%s). Run: make start && make health\n' \
+      "$h" "$code" >&2
     exit 2
   fi
 }

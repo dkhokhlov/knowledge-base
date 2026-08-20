@@ -6,12 +6,15 @@ set -u
 load_env
 require_stack_up
 
-G="http://localhost:${GRAPHITI_HOST_PORT:-8000}"
-O="http://localhost:${OPENWEBUI_HOST_PORT:-3000}"
+# KB_HOST is the single public URL: Caddy -> kb-gateway (/memory/*, /health) and
+# OWUI (root). The gateway /health probes OWUI (aggregated), so one probe covers both.
+# O = OWUI at the KB_HOST root; H = the same URL (kept for clarity of intent).
+H="$(kb_host)"
+O="$H"
 
 section "health endpoints (ungated)"
-# :8000 is Caddy -> kb-gateway /health (which reflects the OWUI identity dep).
-code=$(http_code "$G/health")
+# KB_HOST (:3000) is Caddy -> kb-gateway /health (reflects the OWUI identity dep).
+code=$(http_code "$H/health")
 [ "$code" = 200 ] && pass "kb-gateway /health (via Caddy) -> 200" || fail "kb-gateway /health -> $code (want 200)"
 code=$(http_code "$O/health")
 [ "$code" = 200 ] && pass "openwebui /health -> 200" || fail "openwebui /health -> $code (want 200)"
@@ -35,7 +38,7 @@ fi
 
 section "kb-gateway auth gate (via Caddy)"
 # A gateway authed endpoint without Authorization must be rejected with 401.
-code=$(curl -s -o /dev/null -w '%{http_code}' "$G/mem/whoami")
-[ "$code" = 401 ] && pass "mem/whoami without key -> 401" || fail "mem/whoami without key -> $code (want 401)"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$H/memory/whoami")
+[ "$code" = 401 ] && pass "memory/whoami without key -> 401" || fail "memory/whoami without key -> $code (want 401)"
 
 finish

@@ -17,7 +17,8 @@ load_env
 require_stack_up
 require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; }
 
-O="http://localhost:${OPENWEBUI_HOST_PORT:-3000}"
+# OWUI REST is at the KB_HOST root (/api/* via Caddy catch-all -> openwebui:8080).
+O="$(kb_host)"
 AK="$OPENWEBUI_ADMIN_API_KEY"   # admin key (full access) — setup + cleanup
 UK="$OPENWEBUI_USER_API_KEY"    # agent key (read-scoped) — subject under test
 MARKER="kbrouser-9c4f1-piezoresistor"

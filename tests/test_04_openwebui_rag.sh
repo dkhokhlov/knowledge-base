@@ -17,7 +17,8 @@ load_env
 require_stack_up
 require_env OPENWEBUI_TEST_USER OPENWEBUI_TEST_PASSWORD || { finish; exit 1; }
 
-O="http://localhost:${OPENWEBUI_HOST_PORT:-3000}"
+# OWUI REST is at the KB_HOST root (/api/* via Caddy catch-all -> openwebui:8080).
+O="$(kb_host)"
 OWUI_CTN="${OWUI_CONTAINER:-kb-openwebui}"
 # Unique marker so this test's doc is found only by its own query.
 MARKER="kbregrag-7f3a2-quasiparticle"

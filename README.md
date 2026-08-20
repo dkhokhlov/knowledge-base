@@ -1,12 +1,12 @@
 # KnowledgeBase
 
-[![Graphiti](https://img.shields.io/badge/Graphiti-MCP-blue)](https://github.com/getzep/graphiti)
+[![Graphiti](https://img.shields.io/badge/Graphiti-REST-blue)](https://github.com/getzep/graphiti)
 [![Open WebUI](https://img.shields.io/badge/Open_WebUI-RAG-orange)](https://github.com/open-webui/open-webui)
 [![Neo4j](https://img.shields.io/badge/Neo4j-5.26-green)](https://neo4j.com/)
 [![Caddy](https://img.shields.io/badge/Caddy-gateway-1f83c7)](https://caddyserver.com/)
 [![Ollama](https://img.shields.io/badge/Ollama-host_LLM-000000)](https://ollama.com/)
 [![embed](https://img.shields.io/badge/embed-nomic--embed--text-brightgreen)](https://huggingface.co/nomic-ai/nomic-embed-text)
-[![LLM](https://img.shields.io/badge/LLM-gemma4_12b-blueviolet)](https://ollama.com/library/gemma4)
+[![LLM](https://img.shields.io/badge/LLM-qwen2.5_14b-blueviolet)](https://ollama.com/library/qwen2.5)
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED)](https://docs.docker.com/compose/)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
 
@@ -14,11 +14,11 @@ Self-hosted, agent-first knowledge stack combining two complementary knowledge b
 
 Documents provide grounded answers from a curated reference corpus. Fact memory replaces scattered, untrimmed README, notes, and tracker files across projects — where every context load pays a growing token tax and specific facts become hard to find — with one searchable temporal graph, so accumulated knowledge stays findable instead of bloating linearly with every addition. Agents use the stack through the stack-side `kb-gateway`, which authorizes per-account `KB_API_KEY` credentials with identity and role derived server-side, plus a thin zero-dependency CLI and the `/kb` skill. Humans can also use the Open WebUI web interface.
 
-- **[Graphiti][graphiti]** — temporal fact memory over [Neo4j][neo4j]; reached via an internal [MCP][mcp] server.
+- **[Graphiti][graphiti]** — temporal fact memory over [Neo4j][neo4j]; reached via an internal REST server.
 - **[Open WebUI][open-webui]** — document knowledge base with vector search, grounded RAG chat, and user/group access control; also the identity provider for the kb-gateway.
 - **[Neo4j][neo4j]** — graph store for [Graphiti][graphiti] (internal only).
-- **kb-gateway** — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti MCP bridge, live group discovery, and admin user provisioning (zero-dependency Python stdlib).
-- **[Caddy][caddy]** — public edge that proxies agents to the kb-gateway.
+- **kb-gateway** — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti REST bridge, live group discovery, and admin user provisioning (zero-dependency Python stdlib).
+- **[Caddy][caddy]** — the single public edge (`KB_HOST`): fronts Open WebUI at the root and proxies `/memory/*`, `POST /admin/users`, `/health` to the kb-gateway.
 
 [Ollama][ollama] supplies the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings; it is reached via `OLLAMA_HOST` (Ollama's native client env var) and can run on the [Docker][docker] host or a remote/LAN host.
 
@@ -38,39 +38,46 @@ Sub-documents:
 
 - [docs/operations.md](docs/operations.md) — prerequisites, configuration (env vars), Ollama host service, persistent data / RAID, make targets, troubleshooting, full hardening reference.
 - [docs/testing.md](docs/testing.md) — integration test suite + matrix.
+- [docs/agents.md](docs/agents.md) — agent integration per tool (Claude Code, Codex, OpenCode, Pi): install the `kb` skill, set `KB_HOST` + `KB_API_KEY`, example flows.
 
 ## Architecture
 
 ```
-Agent (any host)
-  kb_gateway.py  (thin REST client; holds only KB_API_KEY + KB_GATEWAY_URL)
-  |
-  |  HTTP, Authorization: Bearer <KB_API_KEY>  (an Open Web UI per-account API key)
-  v
-Caddy :8000  (public edge; reverse_proxy kb-gateway:8010; /health ungated)
-  |
-  v
-kb-gateway :8010  (zero-dependency Python stdlib)
-  |  derives identity + role from KB_API_KEY via Open Web UI (tamper-proof)
-  |  writes go to the caller's own personal group; reads span all groups (discovered from Neo4j)
-  |  destructive ops require owning the target group or admin; admin creates users
-  |
-  +-- owui_net       --> Open WebUI :3000   (identity + user provisioning + RAG)
-  +-- graph_internal --> graphiti-mcp :8000 (MCP handshake + tool calls)
-  \-- graph_internal --> Neo4j :7474        (group discovery + delete guards)
+Agent (any host)                              User (browser)
+  |  kb_gateway.py / owui.py                    |
+  |  holds KB_API_KEY only                      |
+  v                                             v
+             KB_HOST  (http://<host>:3000)
+                    |
+                    v
+         Caddy :3000  (single public edge; internal :3000 == host :3000, no port translation)
+            |
+            +-- /memory/*            --> kb-gateway :8010
+            +-- POST /admin/users     --> kb-gateway :8010   (GET falls through to the OWUI SPA)
+            +-- /health               --> kb-gateway :8010   (aggregated; probes OWUI)
+            +-- /* (catch-all)        --> openwebui :8080     (OWUI landing + /api/* + SPA)
 
-User (browser) -- HTTP :3000 --> Open WebUI :3000   (chat UI + RAG + admin)
+         kb-gateway :8010  (zero-dep stdlib; identity + role from KB_API_KEY via OWUI, tamper-proof)
+            |
+            +-- owui_net       --> Open WebUI :8080   (identity + user provisioning + RAG)
+            +-- graph_internal --> graphiti :8000     (REST; bootstrap.py injects Ollama-compatible clients)
+            +-- graph_internal --> Neo4j :7474/:7687 (group discovery + delete guards)
 
-Open WebUI :3000 and graphiti-mcp both reach Ollama :11434 (host, via
-host-gateway) for gemma4:12b (chat) and nomic-embed-text (embeddings).
+  Open WebUI :8080 + graphiti :8000 --> Ollama :11434 (Docker host, via host-gateway)
+                                             qwen2.5:14b (chat + extraction, non-reasoning)  |  nomic-embed-text (embed)
+
+  Published host port: only KB_HOST_PORT (default 3000) -> Caddy :3000.
+  Internal-only: Neo4j + graphiti (graph_internal); Open WebUI (owui_net, fronted by Caddy).
 ```
 
-- A user with a browser reaches [Open WebUI][open-webui] over HTTP (`:3000`) for the chat UI, RAG, and admin.
-- An agent reaches the stack through **one** REST interface: `kb_gateway.py` → Caddy `:8000` → **kb-gateway** `:8010`. The agent holds only `KB_API_KEY` + `KB_GATEWAY_URL` (no Graphiti token, no repo files) — it works on any host.
-- **kb-gateway** is the sole bridge to the graph. It resolves the caller's identity + role from `KB_API_KEY` via Open WebUI (tamper-proof), enforces ownership-bounded writes + owner/admin destructive gating, discovers all existing groups live from [Neo4j][neo4j], runs the [MCP][mcp] handshake to graphiti-mcp, and provisions new KB users for admins.
-- **Network split**: `graph_internal` (neo4j + graphiti-mcp + kb-gateway), `edge` (caddy + kb-gateway), `owui_net` (kb-gateway + openwebui). graphiti-mcp and Neo4j are **internal-only** — no host ports, reachable only through the gateway.
-- Only `:3000` ([Open WebUI][open-webui]) and `:8000` (Caddy → kb-gateway) bind to the host.
-- [Ollama][ollama] is external on the Docker host (reached via host-gateway); not published by this stack. [Open WebUI][open-webui] (RAG + chat) and graphiti-mcp (LLM + embedder) both reach it.
+- A user with a browser and an agent both reach the stack through **one** URL, **`KB_HOST`** (default `http://localhost:3000`): [Caddy][caddy] fronts [Open WebUI][open-webui] at the root and the **kb-gateway** under `/memory/*`, `POST /admin/users`, and `/health`. One port, one var for agents (mirrors `OLLAMA_HOST`).
+- An agent holds only `KB_API_KEY` + `KB_HOST` (no Graphiti token, no repo files) — it works on any host. Its CLI (`kb_gateway.py` / `owui.py`) hits `KB_HOST`: OWUI REST at `/api/*`, kb-gateway memory at `/memory/*`.
+- **kb-gateway** is the sole bridge to the graph. It resolves the caller's identity + role from `KB_API_KEY` via Open WebUI (tamper-proof), enforces ownership-bounded writes + owner/admin destructive gating, discovers all existing groups live from [Neo4j][neo4j], calls the internal [Graphiti][graphiti] REST server, and provisions new KB users for admins.
+- **Graphiti client injection.** The `zepai/graphiti` REST server defaults to `OpenAIClient` (OpenAI Responses API), which [Ollama][ollama] cannot satisfy — entity/fact extraction silently stores nothing. `graphiti/bootstrap.py` is mounted into the container and run as the command; it overrides the FastAPI dependency to inject an `OpenAIGenericClient` subclass that requests **`json_schema` structured outputs** (Ollama >= 0.32 enforces the response schema server-side) + `OpenAIEmbedder` (`nomic-embed-text`, 768-dim), so extraction works with Ollama. There is no config switch for this; the injection is required. See `graphiti/bootstrap.py`.
+- **Network split**: `graph_internal` (neo4j + graphiti + kb-gateway), `edge` (caddy + kb-gateway), `owui_net` (caddy + kb-gateway + openwebui). graphiti and Neo4j are **internal-only** — no host ports, reachable only through the gateway. Open WebUI is internal-only too (fronted by Caddy).
+- Only `KB_HOST_PORT` (default `3000`) → Caddy `:3000` binds to the host. Caddy's `depends_on` uses `service_started` (not `service_healthy`) so the OWUI root stays reachable even if the gateway is broken.
+- [Ollama][ollama] is external on the Docker host (reached via host-gateway); not published by this stack. [Open WebUI][open-webui] (RAG + chat) and graphiti (extraction LLM + embedder) both reach it.
+- **TLS**: the Caddyfile is plain HTTP on the port. For a non-local `KB_HOST` you MUST either front Caddy with an upstream TLS reverse proxy, or switch the `:3000` site block to a hostname block so Caddy auto-terminates TLS and publishes `:443`. For the local MVP (`http://localhost:3000`) no TLS is needed.
 
 ## Operating model
 
@@ -78,23 +85,25 @@ The stack is **agent-facing**: the actor that calls the gateway is an **agent**.
 
 - **Identity is tamper-proof.** The gateway resolves `(id, email, role)` from `KB_API_KEY` via Open Web UI `GET /api/v1/auths/`. The caller cannot set or influence it — there is no `KB_USER_ID` env var, no spoofable header.
 - **Authorization = role + personal-group ownership**, both enforced on the stack (not bypassable by a modified CLI):
-  - **Writes go to your own personal group.** `add` with no `--group` writes to `user:<email>`. `add --group G` is allowed only if `G` is your own personal group; any other group → `403`. There are **no shared write groups** — reads are how knowledge is shared across accounts.
+  - **Writes go to your own personal group.** `add` with no `--group` writes to `user:<email>`. `add --group G` is allowed only if `G` is your own personal group; any other group → `403`. There are **no shared write groups** — reads are how knowledge is shared across accounts. Graphiti stores the personal group as a charset-safe id (`user-<sanitized-email>`, e.g. `user-agent-local-test`); `forget` accepts the `user:<email>` form too.
   - **Reads span all groups that have data**, discovered live from [Neo4j][neo4j] (no roster file). `search`, `episodes`, `status`, `groups` are read-only for everyone.
   - **Destructive ops** (`forget`, `delete-edge`, `delete-episode`) require owning the target group or admin. Admin (`role=admin`) overrides ownership and is the only role that can create users.
 
 ### Exposed endpoints
 
+All endpoints are on one URL, **`KB_HOST`** (`http://<host>:3000` by default). Caddy routes by path.
+
 | Endpoint | Auth | Use |
 |---|---|---|
-| `http://<host>:3000` | session (web UI) | document upload, chat, admin, users, knowledge bases |
-| `http://<host>:3000/api/*` | `Authorization: Bearer <OWUI API key>` | REST for agents (chat, RAG, files, KBs) |
-| `http://<host>:3000/docs` | none (read-only) | Swagger UI |
-| `http://<host>:3000/openapi.json` | none (read-only) | OpenAPI schema |
-| `http://<host>:8000/mem/*` | `Authorization: Bearer <KB_API_KEY>` | kb-gateway: memory (whoami, groups, add, search, episodes, status, forget, delete-edge, delete-episode) |
-| `http://<host>:8000/admin/users` | `Authorization: Bearer <KB_API_KEY>` (admin) | kb-gateway: create a new KB user (returns temp password + `KB_API_KEY`) |
-| `http://<host>:8000/health` | none (read-only) | health probe (Caddy → kb-gateway → OWUI) |
+| `KB_HOST/` | session (web UI) | Open WebUI: document upload, chat, admin, users, knowledge bases |
+| `KB_HOST/api/*` | `Authorization: Bearer <OWUI API key>` | OWUI REST for agents (chat, RAG, files, KBs) |
+| `KB_HOST/docs` | none (read-only) | Swagger UI (OWUI; `ENV=dev`) |
+| `KB_HOST/openapi.json` | none (read-only) | OpenAPI schema (OWUI) |
+| `KB_HOST/memory/*` | `Authorization: Bearer <KB_API_KEY>` | kb-gateway: memory (whoami, groups, add, search, episodes, status, forget, delete-edge, delete-episode) |
+| `KB_HOST/admin/users` | `Authorization: Bearer <KB_API_KEY>` (admin, POST) | kb-gateway: create a new KB user (returns temp password + `KB_API_KEY`); GET falls through to the OWUI SPA |
+| `KB_HOST/health` | none (read-only) | health probe (Caddy → kb-gateway → OWUI, aggregated) |
 
-[Neo4j][neo4j] (`:7474`, `:7687`) and graphiti-mcp (`:8000` internal) are not published — reachable only through the kb-gateway over `graph_internal`.
+`KB_HOST` is read from `.env` (default `http://localhost:3000`), or synthesized from `KB_HOST_PORT`. [Neo4j][neo4j] (`:7474`, `:7687`) and graphiti (`:8000` internal) are not published — reachable only through the kb-gateway over `graph_internal`.
 
 ## Quick start
 
@@ -103,7 +112,7 @@ Full prerequisites, configuration, and env vars are in [docs/operations.md](docs
 **Minimum env vars to set** — everything else has a working default or is auto-generated:
 
 - `.env` → `OLLAMA_HOST`: the only hard blocker. `make start` refuses the `<ollama-host>` placeholder. Set your Ollama URL (`http://host.docker.internal:11434` if Ollama runs on the Docker host) in shell env or `.env` (shell overrides `.env`).
-- `.env` → `KB_GATEWAY_URL`: defaults to `http://localhost:8000`; change only for remote agents (HTTPS/VPN).
+- `.env` → `KB_HOST`: the single public URL agents/clients point at (default `http://localhost:3000`). `KB_HOST_PORT` (default `3000`) is the only host-published port. Change `KB_HOST` for remote agents (HTTPS/VPN).
 
 `WEBUI_SECRET_KEY` (`make bootstrap`), `OPENWEBUI_*_API_KEY` (`make api-keys`), and Neo4j auth are generated or default locally. Test-only creds (`OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` for `make test`) are in [docs/testing.md](docs/testing.md).
 
@@ -112,7 +121,7 @@ Full prerequisites, configuration, and env vars are in [docs/operations.md](docs
    make bootstrap
    ```
    Generates `WEBUI_SECRET_KEY` into `.env.local` (`0600`), creates `./data/{neo4j/data,neo4j/logs,openwebui}`, and creates `.env` from `.env.example` if absent. Set `OLLAMA_HOST` (shell env or `.env`) to your Ollama URL before `make start`.
-2. Set `KB_GATEWAY_URL` for agent clients (in `.env` / `.env.local`): `http://localhost:8000` on the Docker host, or `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
+2. Set `KB_HOST` for agent clients (in `.env`): `http://localhost:3000` on the Docker host, or `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
 3. **Pull models**, **preflight**, **start**, **verify**:
    ```
    make pull-models
@@ -120,7 +129,7 @@ Full prerequisites, configuration, and env vars are in [docs/operations.md](docs
    make start
    make health
    ```
-4. Open `http://<your-host-ip>:3000` and register the first user (becomes admin). Set `OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` in `.env.local` to this admin (used by `make test` and `make api-keys`).
+4. Open `KB_HOST` (`http://<your-host-ip>:3000`) and register the first user (becomes admin). Set `OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` in `.env.local` to this admin (used by `make test` and `make api-keys`).
 5. **Provision API keys** (admin + read-scoped agent) into `.env.local`:
    ```
    make api-keys
@@ -138,12 +147,14 @@ Provisioning sequence: `make start` → (admin signs up in UI) → `make api-key
 
 ## Agent interfaces
 
-Two interfaces for agents, both keyed with `KB_API_KEY` (an Open Web UI per-account API key):
+Two interfaces for agents, both on `KB_HOST` and keyed with `KB_API_KEY` (an Open Web UI per-account API key):
 
-- **Open Web UI REST** (`:3000/api/*`) — chat, RAG, file and knowledge-base management. Direct to Open Web UI.
-- **kb-gateway REST** (`:8000/mem/*`, `:8000/admin/users`) — Graphiti memory + graph tools and admin user provisioning. A thin CLI (`kb_gateway.py`) wraps it; the agent never speaks [MCP][mcp] directly (graphiti-mcp is internal-only).
+- **Open Web UI REST** (`KB_HOST/api/*`) — chat, RAG, file and knowledge-base management. Served by Open Web UI via Caddy's catch-all.
+- **kb-gateway REST** (`KB_HOST/memory/*`, `KB_HOST/admin/users`) — Graphiti memory + graph tools and admin user provisioning. A thin CLI (`kb_gateway.py`) wraps it; the agent never reaches the Graphiti REST server directly (it is internal-only).
 
-Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs on the Docker host.
+`KB_HOST` is the single URL for both. See [docs/agents.md](docs/agents.md) for per-tool integration examples (Claude Code, Codex, OpenCode, Pi).
+
+Replace `<host>` in `KB_HOST` with the Docker host name/IP, or `localhost` if the client runs on the Docker host.
 
 ### API keys
 
@@ -163,7 +174,7 @@ Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs
 
 - Base path: `/api`; auth `Authorization: Bearer <OWUI API key>` (or a JWT from `POST /api/v1/auths/signin`).
 - OpenAPI schema: `GET /openapi.json`; interactive Swagger UI: `/api/docs` (`ENV=dev` only).
-- `kb` skill (read-scoped agent): a zero-dependency CLI wrapper (`scripts/owui.py`) that handles auth and flattens the Chroma nested-array search response. Reads `OPENWEBUI_HOST_PORT` + `OPENWEBUI_USER_API_KEY` + `OPENWEBUI_MODEL` from `.env` / `.env.local` via `--env-file`.
+- `kb` skill (read-scoped agent): a zero-dependency CLI wrapper (`scripts/owui.py`) that handles auth and flattens the Chroma nested-array search response. Reads `KB_HOST` + `KB_API_KEY` (fallback `OPENWEBUI_USER_API_KEY`) + `OPENWEBUI_MODEL` from `.env` / `.env.local` via `--env-file`.
 
   | Trigger | Example phrasing | Deterministic? |
   |---|---|---|
@@ -176,8 +187,8 @@ Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs
 
 ### Graphiti memory (kb-gateway)
 
-- Endpoint `http://<host>:8000` (Caddy → kb-gateway). All paths under `/mem/*` and `/admin/users` require `Authorization: Bearer <KB_API_KEY>`; `/health` is ungated. Identity + role are derived from the key (tamper-proof).
-- Thin CLI (`scripts/kb_gateway.py`, zero-dependency): reads `KB_API_KEY` + `KB_GATEWAY_URL` from `.env` / `.env.local` via `--env-file`. Subcommands:
+- Endpoint `KB_HOST` (Caddy → kb-gateway). All paths under `/memory/*` and `POST /admin/users` require `Authorization: Bearer <KB_API_KEY>`; `/health` is ungated. Identity + role are derived from the key (tamper-proof). `GET /admin/users` falls through to the OWUI SPA.
+- Thin CLI (`scripts/kb_gateway.py`, zero-dependency): reads `KB_API_KEY` + `KB_HOST` from `.env` / `.env.local` via `--env-file`. Subcommands:
   ```
   python3 ~/.claude/skills/kb/scripts/kb_gateway.py --env-file .env --env-file .env.local whoami
   python3 ~/.claude/skills/kb/scripts/kb_gateway.py ... groups
@@ -213,19 +224,19 @@ An admin tells an agent **"create a new KB user alice\@example.com named Alice"*
 
 The trust model in brief. For lockdown defaults, phone-home hardening, container caps, secrets handling, Neo4j auth, and dev-mode docs, see [docs/operations.md#hardening-reference](docs/operations.md#hardening-reference).
 
-### Open WebUI (`:3000`)
+### Open WebUI (fronted by Caddy at `KB_HOST`)
 
 - `WEBUI_AUTH=true`: every UI and REST call needs a session or a Bearer API key.
 - First registered user becomes admin. Later signups get `DEFAULT_USER_ROLE=pending` and need admin approval. Close signup with `ENABLE_SIGNUP=false` + `make restart`.
 - Knowledge bases are private by default; admins grant access to user groups (Workspace -> Knowledge). RBAC is additive: role + group membership.
 - JWTs signed with `WEBUI_SECRET_KEY` (stored only in gitignored `.env.local`; `make start` rejects an empty/missing key).
 
-### kb-gateway (`:8000` → `:8010`)
+### kb-gateway (`KB_HOST/memory/*`, `/admin/users`, `/health` → `:8010`)
 
-- graphiti-mcp and Neo4j have no agent-facing auth and are **internal-only** on `graph_internal`. The kb-gateway is the sole bridge; [Caddy][caddy] (`:8000`) proxies to it. graphiti-mcp has no native auth — the gateway is the gate.
+- graphiti and Neo4j have no agent-facing auth and are **internal-only** on `graph_internal`. The kb-gateway is the sole bridge; [Caddy][caddy] (`KB_HOST`) proxies `/memory/*`, `POST /admin/users`, and `/health` to it. The Graphiti REST server has no native auth — the gateway is the gate.
 - Every gateway endpoint (except `/health`) requires `Authorization: Bearer <KB_API_KEY>`. No key → `401`; bad key → `401`; Open WebUI unreachable → `503` (fail closed).
 - `/health` is ungated on purpose: non-sensitive probe, carries no data or credentials. It also probes Open WebUI so `make health` catches an identity-broken stack rather than reporting healthy while auth is down.
-- `KB_API_KEY` is a bearer — `KB_GATEWAY_URL` MUST be HTTPS or VPN/tunnel for any non-local agent. Plain HTTP is safe only on a trusted local interface.
+- `KB_API_KEY` is a bearer — `KB_HOST` MUST be HTTPS or VPN/tunnel for any non-local agent. Plain HTTP is safe only on a trusted local interface.
 - Rotate [Open WebUI][open-webui] API keys on a schedule (`FORCE=1 make api-keys`).
 
 ## Repository layout
@@ -233,12 +244,14 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 | Path | Contents |
 |---|---|
 | `compose.yml` | services + networks (`graph_internal`, `edge`, `owui_net`); kb-gateway internal env |
-| `gateway/` | kb-gateway: `app.py`, `authorize.py`, `mcp.py`, `neo4j.py`, `owui.py`, `Dockerfile` (zero-dependency stdlib, non-root) |
-| `caddy/Caddyfile` | public edge; `reverse_proxy kb-gateway:8010` (no token block) |
-| `graphiti/config.yaml` | Graphiti MCP config (LLM + embedder → Ollama `/v1`; `nomic-embed-text`, 768-dim; ro mount) |
+| `gateway/` | kb-gateway: `app.py`, `authorize.py`, `graphiti.py`, `neo4j.py`, `owui.py`, `Dockerfile` (zero-dependency stdlib, non-root) |
+| `caddy/Caddyfile` | public edge `KB_HOST`; routes `/memory/*`, `POST /admin/users`, `/health` → kb-gateway:8010, catch-all → openwebui:8080 |
+| `graphiti/bootstrap.py` | mounted into the `graphiti` container and run as the command; injects `OpenAIGenericClient` + `nomic` embedder (768) so Ollama extraction works, runs a robust `/messages` worker, owns the app lifespan |
+| `graphiti/config.yaml` | UNUSED — config for the retired MCP image; kept for reference (not mounted) |
 | `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `rag-config.sh` |
+| `skills/` | per-tool `kb` agent skill (`claude/` primary; `codex/`, `opencode/`, `pi/` symlink `scripts/` to it) — see [docs/agents.md](docs/agents.md) |
 | `tests/` | `test_01`..`test_07` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
-| `docs/` | `operations.md`, `testing.md`, favicon assets |
+| `docs/` | `operations.md`, `testing.md`, `agents.md`, favicon assets |
 | `.env` / `.env.example` | tracked template — no secrets (ports, tags, models, tunables, `OLLAMA_HOST`) |
 | `.env.local` / `.env.local.example` | gitignored secrets + generated keys (`chmod 0600`) |
 | `Makefile` | targets (see [docs/operations.md#make-targets](docs/operations.md#make-targets)) |
@@ -246,11 +259,13 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 
 ## Notes
 
-- Embedding dimensions must be 768 for [`nomic-embed-text`][nomic-embed-text]. Change `EMBEDDER_MODEL` and `EMBEDDER_DIMENSIONS` together if you swap models.
-- [Graphiti][graphiti] uses `json_object` structured output ([Ollama][ollama] does not support `json_schema`).
-- There are no shared write groups. Each account writes to its own `user:<email>` group; reads span all groups, so cross-account knowledge is shared read-only.
+- Embedding dimensions must be 768 for [`nomic-embed-text`][nomic-embed-text]. Change `EMBEDDER_MODEL` and `EMBEDDER_DIMENSIONS` together if you swap models. The bootstrap reads `EMBEDDER_DIMENSIONS` to set both the embedder and the vector index dim (Graphiti defaults to 1024, which would reject 768-dim writes).
+- [Graphiti][graphiti] extraction uses **`json_schema` structured outputs** over Chat Completions. With plain `json_object` mode a 14B local model echoes the response schema back as values (Neo4j then rejects the nested MAP), so the bootstrap's `_SchemaEnforcingClient` passes each step's Pydantic schema through Ollama's structured-output path, which enforces it server-side. Ollama's Responses-API endpoint yields no parseable entities either — hence the `OpenAIGenericClient` injection in `graphiti/bootstrap.py`.
+- Extraction is **async and slow**: `POST /memory/add` returns `200` as soon as the episode is queued, but each episode runs several LLM extraction calls (~20 s each on `qwen2.5:14b`), so a fact is searchable only after ~1-2 min. Poll `/memory/search` for the probe token; do not treat a bare `200` (or even a stored episode) as proof of extraction.
+- `MODEL_NAME` **must be a non-reasoning model.** Graphiti calls it with `max_tokens=8192`; a reasoning model (e.g. `gemma4:12b`) spends the budget on its thinking chain and emits no `content` (`finish_reason=length`) → `json.loads('')` → extraction silently stores nothing, even with `json_schema` enforcement. `qwen2.5:14b` is non-reasoning and tested reliable. Ollama's `/v1/chat/completions` does not honor `think=false`, so suppressing reasoning that way is not an option.
+- There are no shared write groups. Each account writes to its own personal group (logical `user:<email>`, stored by Graphiti as `user-<sanitized-email>` e.g. `user-agent-local-test`); reads span all groups, so cross-account knowledge is shared read-only.
 - [Open WebUI][open-webui] exposes `/docs` and `/openapi.json` only in `ENV=dev` (also raises log verbosity — acceptable for an internal/LAN deployment).
-- `SEMAPHORE_LIMIT=3` is conservative for one local [Ollama][ollama]. Raise it if the host Ollama has capacity.
+- `SEMAPHORE_LIMIT=3` bounds graphiti_core extraction concurrency; conservative for one local [Ollama][ollama]. Raise it if the host Ollama has capacity.
 
 [graphiti]: https://github.com/getzep/graphiti
 [open-webui]: https://github.com/open-webui/open-webui
@@ -258,5 +273,4 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 [caddy]: https://caddyserver.com/
 [ollama]: https://ollama.com/
 [docker]: https://www.docker.com/
-[mcp]: https://modelcontextprotocol.io/
 [nomic-embed-text]: https://huggingface.co/nomic-ai/nomic-embed-text
