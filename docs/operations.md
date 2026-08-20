@@ -18,6 +18,26 @@ hardening reference. For the trust model and architecture see the
   ```
   Equivalent to `ollama pull <OLLAMA_MODEL_BASE>`, a `Modelfile`-driven `ollama create <MODEL_NAME>`, and `ollama pull nomic-embed-text`. The `/v1` endpoint ignores `num_ctx` in requests, so the context window is baked into `MODEL_NAME`; `make preflight` verifies it.
 
+### Custom model (ctx-baked variant)
+
+`MODEL_NAME` (default `qwen2.5:14b-ctx8192`) is **not a stock Ollama model**. It is a local variant created from `OLLAMA_MODEL_BASE` with the context window baked in. Ollama's `/v1` endpoint ignores `num_ctx` in request bodies, so the window must be set in a Modelfile. The reference Modelfile for the default config is committed as [`Modelfile_qwen2_5`](../Modelfile_qwen2_5) (repo root):
+
+```
+FROM qwen2.5:14b
+PARAMETER num_ctx 8192
+```
+
+`make pull-models` builds the variant from `OLLAMA_MODEL_BASE` / `OLLAMA_MODEL_CONTEXT` / `MODEL_NAME` (it generates the Modelfile from the env vars, so it stays generic). Manual equivalent using the committed file:
+
+```
+ollama pull qwen2.5:14b                      # OLLAMA_MODEL_BASE (stock)
+ollama rm qwen2.5:14b-ctx8192 2>/dev/null || true
+ollama create qwen2.5:14b-ctx8192 -f Modelfile_qwen2_5
+ollama pull nomic-embed-text                 # embedder (stock)
+```
+
+Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on a ~22.5 GB GPU (extraction crawls); `num_ctx 8192` loads ~20 GB and fits. `OPENWEBUI_MODEL` MUST equal `MODEL_NAME` so only one 14B instance loads. To re-bake after changing `OLLAMA_MODEL_CONTEXT` or `OLLAMA_MODEL_BASE`, re-run `make pull-models && make restart`. If a same-size alias is already loaded with a long keep-alive, `ollama stop` + `ollama rm` it first — Ollama will not evict an unexpired model to load the new one. `make preflight` verifies the model exists and its `num_ctx` matches `OLLAMA_MODEL_CONTEXT`.
+
 ## Configuration
 
 - `.env` — gitignored, copied from `.env.example` (the tracked template). No secrets; set `OLLAMA_HOST` to your Ollama URL here:

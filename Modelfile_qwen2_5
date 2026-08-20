@@ -1,0 +1,11 @@
+# Custom ctx-baked variant of qwen2.5:14b for the KnowledgeBase stack.
+# This is the reference Modelfile for the default config
+# (OLLAMA_MODEL_BASE=qwen2.5:14b, OLLAMA_MODEL_CONTEXT=8192,
+# MODEL_NAME=qwen2.5:14b-ctx8192). `make pull-models` generates an equivalent
+# Modelfile from those env vars, so this file stays in sync with the defaults.
+# See docs/operations.md#custom-model-ctx-baked-variant.
+#
+# Build:  ollama create qwen2.5:14b-ctx8192 -f Modelfile_qwen2_5
+# Verify: make preflight   (checks the model exists and num_ctx matches)
+FROM qwen2.5:14b
+PARAMETER num_ctx 8192
