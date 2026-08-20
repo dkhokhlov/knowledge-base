@@ -25,9 +25,20 @@ Documents provide grounded answers from a curated reference corpus. Fact memory 
 
 ## Documentation map
 
-- **README** — [Architecture](#architecture) · [Operating model](#operating-model) · [Quick start](#quick-start) · [Agent interfaces](#agent-interfaces) · [Security](#security) · [Repository layout](#repository-layout) · [Notes](#notes)
-- **[docs/operations.md](docs/operations.md)** — prerequisites, configuration (env vars), Ollama host service, persistent data / RAID, make targets, troubleshooting, full hardening reference.
-- **[docs/testing.md](docs/testing.md)** — integration test suite + matrix.
+README:
+
+- [Architecture](#architecture)
+- [Operating model](#operating-model)
+- [Quick start](#quick-start)
+- [Agent interfaces](#agent-interfaces)
+- [Security](#security)
+- [Repository layout](#repository-layout)
+- [Notes](#notes)
+
+Sub-documents:
+
+- [docs/operations.md](docs/operations.md) — prerequisites, configuration (env vars), Ollama host service, persistent data / RAID, make targets, troubleshooting, full hardening reference.
+- [docs/testing.md](docs/testing.md) — integration test suite + matrix.
 
 ## Architecture
 
