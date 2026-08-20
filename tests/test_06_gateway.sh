@@ -8,10 +8,8 @@
 #   - admin override: admin forgets user:<agent> -> 200
 #   - spoof/claim deny: agent add --group user:<admin> -> 403 (ownership enforced
 #     server-side; the client cannot write to another user's group by claiming it)
-#   - shared-group deny: agent add --group unknown-shared -> 403
-# The OWNERS.md positive case (owner writes to a declared shared group) is
-# covered by the gateway/owners.py + gateway/authorize.py unit tests; the live
-# OWNERS.md ships empty (personal groups only).
+#   - shared-group deny: agent add --group unknown-shared -> 403 (no shared
+#     write groups; only the caller's own personal group is writable)
 set -u
 . "$(dirname "$0")/lib.sh"
 load_env

@@ -48,8 +48,8 @@ Caddy :8000  (public edge; reverse_proxy kb-gateway:8010; /health ungated)
   v
 kb-gateway :8010  (zero-dependency Python stdlib)
   |  derives identity + role from KB_API_KEY via Open WebUI (tamper-proof)
-  |  writes ownership-bounded; reads span all groups (discovered from Neo4j)
-  |  destructive ops require group ownership or admin; admin creates users
+  |  writes go to the caller's own personal group; reads span all groups (discovered from Neo4j)
+  |  destructive ops require owning the target group or admin; admin creates users
   |
   +-- owui_net       --> Open WebUI :3000   (identity + user provisioning + RAG)
   +-- graph_internal --> graphiti-mcp :8000 (MCP handshake + tool calls)
@@ -172,7 +172,6 @@ Provisioning sequence: `make start` → (admin signs up in UI) → `make api-key
   - [Docker Compose][docker-compose] loads them via `env_file`.
   - `GRAPHITI_API_TOKEN` is **retired** — no longer generated or used (graphiti-mcp has no native auth; the kb-gateway is the gate).
 - `KB_GATEWAY_URL` — the kb-gateway base URL for agent clients. `http://localhost:8000` on the Docker host; HTTPS or VPN for a remote host (the key is a bearer).
-- `OWNERS.md` — version-controlled group-ownership policy (shared groups + owner emails). Personal `user:<email>` groups are implicit. Mounted read-only into the kb-gateway. See [Group ownership](#group-ownership).
 - `graphiti/config.yaml` — [Graphiti MCP][graphiti] config:
   - LLM + embedder point at [Ollama][ollama] `/v1`.
   - [`nomic-embed-text`][nomic-embed-text]; 768 dimensions.
@@ -252,10 +251,10 @@ Notes:
 - Every gateway endpoint (except `/health`) requires `Authorization: Bearer <KB_API_KEY>`. No key → `401`; bad key → `401`; Open WebUI unreachable → `503` (fail closed).
 - **Identity is tamper-proof**: the gateway resolves `(id, email, role)` from `KB_API_KEY` via Open WebUI `GET /api/v1/auths/`. The caller cannot set or influence it — there is no `KB_USER_ID` env var, no spoofable header. Fixes the "user can edit user_id" concern.
 - `KB_API_KEY` is a **per-account** Open Web UI API key (not a shared secret). Admin keys resolve to `role=admin`; the `agent@local.test` key resolves to `role=user`. Keys for additional accounts are issued by the admin provisioning flow (see [KB user provisioning (admin)](#kb-user-provisioning-admin)).
-- **Authorization = role + ownership**, both enforced on the stack (not bypassable by a modified CLI):
-  - Writes are **ownership-bounded**: no `group` → `user:<me>`; `--group G` → `me ∈ owners(G)` (per `OWNERS.md`) or admin. A user cannot write to another user's personal group by claiming it.
+- **Authorization = role + personal-group ownership**, both enforced on the stack (not bypassable by a modified CLI):
+  - Writes go to your own personal group: no `--group` → `user:<me>`. `--group G` is allowed only if `G` is your own personal group; another account's personal group or any other group → `403`. There are **no shared write groups** — reads are how knowledge is shared across accounts.
   - Reads (`search`, `episodes`, `status`, `groups`) span **all groups that have data**, discovered live from [Neo4j][neo4j] (no roster file). Read-only for everyone.
-  - Destructive ops (`forget` = `clear_graph`, `delete-edge`, `delete-episode`) require group ownership or admin.
+  - Destructive ops (`forget` = `clear_graph`, `delete-edge`, `delete-episode`) require owning the target group or admin.
   - Admin (`role=admin`) overrides ownership for destructive ops and is the only role that can create users.
 - `/health` is ungated on purpose: non-sensitive probe, carries no data or credentials. It also probes Open WebUI so `make health` catches an identity-broken stack rather than reporting healthy while auth is down.
 
@@ -330,7 +329,7 @@ Notes:
 
 - No service runs `privileged`.
 - All services set `security_opt: no-new-privileges:true`.
-- [Caddy][caddy], graphiti-mcp, and kb-gateway also set `cap_drop: ALL`. kb-gateway runs as a non-root user (`uid 2000`) and mounts only `OWNERS.md` read-only — no host-owned bind-mount writes.
+- [Caddy][caddy], graphiti-mcp, and kb-gateway also set `cap_drop: ALL`. kb-gateway runs as a non-root user (`uid 2000`) and has no data mounts (stateless; config via env only).
 - [Neo4j][neo4j] and [Open WebUI][open-webui] keep default capabilities:
   - Their entrypoints need `CAP_CHOWN` / `DAC_OVERRIDE` to write to the host-owned `./data` bind mounts.
   - Dropping all caps would break startup.
@@ -427,26 +426,11 @@ Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs
   ```
 - Behavior:
   - `add` with no `--group` writes to your personal group `user:<me>`.
-  - `add --group G` writes to shared group `G` only if you own it (per `OWNERS.md`) or are admin.
+  - `add --group G` is allowed only if `G` is your own personal group; any other group → `403` (no shared write groups).
   - `search`, `groups`, `episodes`, `status` are read-only and span all groups that have data.
-  - `forget`, `delete-edge`, `delete-episode` require ownership of the target group or admin.
+  - `forget`, `delete-edge`, `delete-episode` require owning the target group or admin.
   - `user-create` is admin-only (see [KB user provisioning (admin)](#kb-user-provisioning-admin)).
 - The `/kb` skill exposes these as natural-language triggers ("remember …", "what do we know about …", "forget …") plus the slash command.
-
-### Group ownership
-
-- `OWNERS.md` (repo root, version-controlled) declares shared groups and their owner emails:
-  ```markdown
-  # KB Group Owners
-  Personal groups `user:<email>` are implicit (not listed). All groups readable by all (read-only).
-  | group_id   | owners     | description                |
-  |------------|------------|----------------------------|
-  | ops        | carol      | Ops runbook + incident mem |
-  | atlas-team | alice, bob | Project Atlas shared memory |
-  ```
-- The shipped `OWNERS.md` is an **empty policy** (header + separator, no rows) → personal-groups-only. Add shared groups by editing the file and `make restart` (it is mounted read-only into the kb-gateway).
-- Parser is **fail-closed**: a malformed row, duplicate group, `user:*` shared entry, or invalid email → the gateway refuses every authz-dependent request with `500` (never an over-broad empty policy).
-- Owners are OWUI emails. Email change orphans old data (rare); `id` is the stable alternative for a future revision.
 
 ### KB user provisioning (admin)
 
@@ -526,7 +510,7 @@ make test
 Notes:
 
 - The tests are read-only except `test_03` (one stateless chat completion), `test_04` (creates a KB + file, then deletes both on exit), `test_05` (admin creates a temp KB + file + `*` read grant, then deletes all three on exit), `test_06` (writes to a temp agent group, then clears it), and `test_07` (creates temp OWUI users, then deletes them via `DELETE /api/v1/users/{id}`).
-- `test_07` rollback case starts an isolated kb-gateway (`docker compose run`) with the test-only `KB_TEST_PROVISION_FAIL_AFTER_CREATE` flag to force a failure after user creation; if that run mechanism is unavailable in the environment it is skipped (verify it exercises, not skips, on the host). The shared-owner positive case is covered by `gateway/owners.py` + `gateway/authorize.py` unit tests (the live `OWNERS.md` ships empty).
+- `test_07` rollback case starts an isolated kb-gateway (`docker compose run`) with the test-only `KB_TEST_PROVISION_FAIL_AFTER_CREATE` flag to force a failure after user creation; if that run mechanism is unavailable in the environment it is skipped (verify it exercises, not skips, on the host).
 - Each script sources `tests/lib.sh` (env loader, pass/fail counters, stack-up guard) and exits non-zero on any failure.
 - `make test` runs all scripts and exits non-zero if any fail.
 
@@ -562,7 +546,7 @@ Notes:
   - Change `EMBEDDER_MODEL` and `EMBEDDER_DIMENSIONS` together if you swap models.
 - [Graphiti][graphiti] uses `json_object` structured output ([Ollama][ollama] does not support `json_schema`).
 - `KB_API_KEY` is a per-account Open Web UI API key (admin key = admin role; agent key = read-scoped). Rotate with `FORCE=1 make api-keys`. `GRAPHITI_API_TOKEN` is retired.
-- `OWNERS.md` is the shared-group ownership policy (fail-closed parser). Personal `user:<email>` groups are implicit; add shared groups by editing the file.
+- There are no shared write groups. Each account writes to its own `user:<email>` group; reads span all groups, so cross-account knowledge is shared read-only.
 - [Open WebUI][open-webui] exposes `/docs` and `/openapi.json` only in `ENV=dev`.
   - `ENV=dev` also raises log verbosity. Acceptable for an internal/LAN deployment.
 - `SEMAPHORE_LIMIT=3` is conservative for one local [Ollama][ollama]. Raise it if the host Ollama has capacity.

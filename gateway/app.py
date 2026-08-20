@@ -5,8 +5,9 @@ provisioning. Zero-dependency (Python 3 stdlib only).
 Listens on :8010 (container-internal). Caddy (:8000, edge) is the public face.
 All endpoints require `Authorization: Bearer <KB_API_KEY>` except /health.
 Identity + role are derived from the key via Open WebUI (tamper-proof); the
-caller cannot influence them. Writes are ownership-bounded; destructive ops
-require group ownership or admin; reads see all groups (discovered from Neo4j).
+caller cannot influence them. Writes are to the caller's own personal group;
+destructive ops require owning the target group or admin; reads see all
+groups (discovered from Neo4j).
 """
 import json
 import os
@@ -20,18 +21,12 @@ import authorize
 import mcp
 import neo4j
 import owui
-import owners as owners_mod
 
 MAX_BODY = int(os.environ.get("KB_MAX_BODY", str(256 * 1024)))
 MAX_CONCURRENCY = int(os.environ.get("KB_MAX_CONCURRENCY", "16"))
 
-# OWNERS.md is version-controlled and never mutated at runtime. Load once at
-# startup; a parse failure keeps the process up (so /health works) but every
-# authz-dependent request fails closed with 500.
-OWNERS = {}
-OWNERS_ERR = None
 # Whether this Open WebUI image supports the admin user-provisioning flow
-# (codex #3: probed from /openapi.json at startup; mutable image tag).
+# (probed from /openapi.json at startup; mutable image tag).
 PROVISIONING_OK = False
 PROVISIONING_MISSING = []
 
@@ -47,12 +42,6 @@ class GatewayError(Exception):
 
 
 # --- helpers -----------------------------------------------------------------
-
-def _owners_ok():
-    if OWNERS_ERR:
-        raise GatewayError(500, "OWNERS policy unavailable: %s" % OWNERS_ERR)
-    return OWNERS
-
 
 def tool_text(result):
     """Extract a MCP tools/call result into a Python value. Graphiti returns
@@ -223,10 +212,9 @@ class Handler(BaseHTTPRequestHandler):
         self._ok({"status": "ok", "owui": "up"})
 
     def _add(self, identity, body):
-        owners = _owners_ok()
         text = _req(body, "text")
         name = (body.get("name") or "").strip() or "kb-memory"
-        group, err = authorize.resolve_add_group(identity, owners, body.get("group"))
+        group, err = authorize.resolve_add_group(identity, body.get("group"))
         if err:
             raise GatewayError(403, err)
         args = {"name": name, "episode_body": text, "group_id": group,
@@ -243,15 +231,13 @@ class Handler(BaseHTTPRequestHandler):
         self._ok({"facts": result, "groups": groups})
 
     def _forget(self, identity, body):
-        owners = _owners_ok()
         group = (_req(body, "group") or "").strip()
-        if not authorize.can_destruct(identity, owners, group):
+        if not authorize.can_destruct(identity, group):
             raise GatewayError(403, "not permitted to clear group %r" % group)
         mcp.call_tool("clear_graph", {"group_ids": [group]})
         self._ok({"ok": True, "group": group})
 
     def _delete_uuid(self, identity, body, kind):
-        owners = _owners_ok()
         uuid = _req(body, "uuid")
         if kind == "edge":
             target_group = neo4j.lookup_edge_group(uuid)
@@ -259,7 +245,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             target_group = neo4j.lookup_node_group(uuid)
             tool, args = "delete_episode", {"uuid": uuid}
-        ok, err = authorize.check_uuid_target_group(identity, owners, target_group)
+        ok, err = authorize.check_uuid_target_group(identity, target_group)
         if not ok:
             raise GatewayError(403, err)
         mcp.call_tool(tool, args)
@@ -365,22 +351,15 @@ def _qs_int(qs, key, default):
 
 
 def main():
-    global OWNERS, OWNERS_ERR, PROVISIONING_OK, PROVISIONING_MISSING
-    path = os.environ.get("OWNERS_FILE", "/owners/OWNERS.md")
-    try:
-        OWNERS = owners_mod.load_owners(path)
-    except owners_mod.ParseError as e:
-        OWNERS_ERR = str(e)
-        OWNERS = {}
-    # Codex #3: probe the deployed OWUI image's provisioning endpoints.
+    global PROVISIONING_OK, PROVISIONING_MISSING
+    # Probe the deployed OWUI image's provisioning endpoints.
     try:
         PROVISIONING_OK, PROVISIONING_MISSING, perr = owui.provisioning_capabilities()
     except Exception as e:  # never crash startup over the probe
         PROVISIONING_OK, PROVISIONING_MISSING, perr = False, [], str(e)
     prov = "ok" if PROVISIONING_OK else ("missing %s" % (PROVISIONING_MISSING or [perr]))
     port = int(os.environ.get("KB_GATEWAY_PORT", "8010"))
-    print("kb-gateway on :%s (owners=%s, err=%s, provisioning=%s)" % (
-        port, path, OWNERS_ERR or "none", prov), flush=True)
+    print("kb-gateway on :%s (provisioning=%s)" % (port, prov), flush=True)
     httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     httpd.serve_forever()
 

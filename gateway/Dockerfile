@@ -4,12 +4,12 @@
 FROM python:3.12-slim
 
 # A system user to run the gateway. uid/gid chosen not to collide with the
-# host owner; the only mount is OWNERS.md (read-only, world-readable policy).
+# host owner. No data mounts (stateless; config via env only).
 RUN addgroup --system --gid 2000 kbg && \
     adduser --system --uid 2000 --ingroup kbg --no-create-home kbg
 
 WORKDIR /app
-COPY app.py owners.py neo4j.py owui.py mcp.py authorize.py ./
+COPY app.py neo4j.py owui.py mcp.py authorize.py ./
 
 USER kbg
 EXPOSE 8010
