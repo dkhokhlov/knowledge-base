@@ -261,6 +261,8 @@ class Handler(BaseHTTPRequestHandler):
         email = (_req(body, "email") or "").strip().lower()
         name = (_req(body, "name") or "").strip()
         role = (body.get("role") or "user").strip() or "user"
+        if role not in ("admin", "user"):
+            raise GatewayError(400, "role must be 'admin' or 'user', got %r" % role)
         if "@" not in email:
             raise GatewayError(400, "invalid email")
         if not name:
@@ -269,7 +271,8 @@ class Handler(BaseHTTPRequestHandler):
         password = secrets.token_urlsafe(24)
 
         # 1. create the user (admin key authorizes). Raises OwuiConflict(409)
-        #    on duplicate email — no partial state to clean up.
+        #    on duplicate email — no partial state to clean up. A transport
+        #    failure (OwuiError) here propagates as 503 with no user created.
         created = owui.add_user(admin_key, name, email, password, role)
         user_id = created.get("id")
         # Test-only hook (codex #3 rollback coverage): when set, force a failure
@@ -279,41 +282,45 @@ class Handler(BaseHTTPRequestHandler):
             self._rollback_user(admin_key, user_id)
             raise GatewayError(502, "forced test failure after user creation "
                                     "(rollback exercised)")
-        # 2. sign in AS the new user -> that user's own JWT (not the admin's).
-        jwt = owui.signin(email, password)
-        if not jwt:
-            self._rollback_user(admin_key, user_id)
-            raise GatewayError(502, "created user but signin failed (rolled back)")
-        # 3. generate the new user's API key with the new user's JWT.
+        # 2-4. sign in as the new user, generate that user's API key, verify it.
+        #    ANY failure after a successful create (transport error on signin,
+        #    bad creds, key generation failure, unexpected identity) rolls back
+        #    the partial user so we never leave a half-provisioned account. The
+        #    broad `except Exception` is intentional: the rollback guarantee
+        #    outranks a precise status code here; the message includes the cause.
+        jwt = None
         try:
+            jwt = owui.signin(email, password)
+            if not jwt:
+                raise owui.OwuiError("signin returned no token")
             api_key = owui.gen_api_key(jwt)
-        except owui.OwuiError as e:
-            self._rollback_user(admin_key, user_id)
-            raise GatewayError(502, "created user but key generation failed: %s "
-                                    "(rolled back)" % e)
-        # 4. verify the key resolves to the new user.
-        try:
             who = owui.whoami(api_key)
-        except owui.OwuiError as e:
-            self._rollback_user(admin_key, user_id)
-            raise GatewayError(502, "created user but key verification failed: %s "
+            if not who or who.get("email", "").lower() != email or who.get("role") != role:
+                raise owui.OwuiError("key resolved to an unexpected identity")
+        except Exception as e:
+            self._rollback_user(admin_key, user_id, jwt)
+            raise GatewayError(502, "created user but provisioning failed: %s "
                                     "(rolled back)" % e)
-        if not who or who.get("email", "").lower() != email or who.get("role") != role:
-            self._rollback_user(admin_key, user_id)
-            raise GatewayError(502, "created user but key resolved to an unexpected "
-                                    "identity (rolled back)")
         # 5. return everything to the admin; never persist (stateless).
         self._ok({"email": email, "temp_password": password,
                   "kb_api_key": api_key, "role": who.get("role"), "id": user_id})
 
-    def _rollback_user(self, admin_key, user_id):
-        """Best-effort delete of a partially-provisioned user. Never raises."""
+    def _rollback_user(self, admin_key, user_id, jwt=None):
+        """Best-effort cleanup of a partially-provisioned user. Never raises.
+        Revokes the new user's API key (if a JWT was obtained) then deletes the
+        user (OWUI cascades the user's keys on delete). Failures are logged to
+        stdout so a leaked partial user is visible, not silently ignored."""
         if not user_id:
             return
+        if jwt:
+            try:
+                owui.revoke_api_key(jwt)
+            except Exception as e:
+                print("rollback: key revoke failed for user %s: %s" % (user_id, e), flush=True)
         try:
             owui.delete_user(admin_key, user_id)
-        except Exception:
-            pass
+        except Exception as e:
+            print("rollback: user delete failed for user %s: %s" % (user_id, e), flush=True)
 
 
 # --- utils ---
@@ -326,13 +333,15 @@ def _req(body, key):
 
 
 def _probe(url, timeout=3):
-    """True if a GET returns any HTTP status (the host is reachable). Used by
-    /health to confirm the identity dependency is up."""
+    """True only if a GET returns 2xx (the host is reachable AND healthy). Used
+    by /health to confirm the identity dependency is up; a 4xx/5xx means
+    reachable but unhealthy, so /health reports degraded rather than masking
+    a broken Open WebUI as "up"."""
     try:
-        urllib.request.urlopen(url, timeout=timeout)
-        return True
-    except urllib.error.HTTPError:
-        return True  # reachable (e.g. 401) still counts as up
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return 200 <= r.status < 300
+    except urllib.error.HTTPError as e:
+        return 200 <= e.code < 300
     except Exception:
         return False
 

@@ -109,6 +109,29 @@ Host: a CUDA GPU host with enough VRAM for the chat model weights plus the 12-sl
   ```
 - `DATA_ROOT=./data` resolves through the symlink, so no `.env` edit is needed.
 
+## Troubleshooting
+
+Symptom → likely cause → fix. Run `make health` first; it probes the kb-gateway
+`/health` (which also probes Open WebUI) and reports `degraded` when the identity
+dependency is down.
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `make start` rejects with empty `WEBUI_SECRET_KEY` | `.env.local` missing or key empty | run `make bootstrap` (not raw `docker compose up`, which does not fail-fast on empty secrets) |
+| RAG search returns 0 hits; file embedding `process/status = failed` | `rag.ollama.base_url` stale (OWUI persists it on first boot, ignores later `.env` changes) | `make rag-config` (re-syncs to `.env` `OLLAMA_BASE_URL`); `make preflight` warns on drift; test_04 catches it |
+| RAG chat confabulates (wrong vendor, invented file names) | strict-grounding RAG template not set (model falls back to its own knowledge) | `make rag-config`; re-run after any DB reset/rebuild (`make clear-all` reverts it) |
+| Agent chat returns `Model not found` | non-admin user lacks read access on the chat model | `make api-keys` (grants `*` read on `MODEL_NAME` to the agent user) |
+| kb-gateway returns `503 identity service unavailable` | Open WebUI unreachable from the gateway (identity resolution fails closed) | check `make health`, the `openwebui` container, and `owui_net`; the gateway cannot authorize without OWUI |
+| kb-gateway `/admin/users` returns `501` | deployed OWUI image lacks the provisioning endpoints | check `OPENWEBUI_IMAGE_TAG`; gateway startup log prints `provisioning=missing ...` listing the absent paths |
+| kb-gateway returns `401` | bad or missing `KB_API_KEY` | verify the key: `kb_gateway.py ... whoami`; confirm `KB_API_KEY` (or the `OPENWEBUI_USER_API_KEY` fallback) is set |
+| `add --group G` returns `403` | only your own personal group is writable (no shared write groups) | omit `--group` to write to `user:<email>`; reads are how knowledge is shared |
+| `forget` / `delete-*` returns `403` | you do not own the target group and are not admin | use an admin `KB_API_KEY`, or operate on your own group |
+| `user-create` returns `409` | the email already exists (deterministic; no second account) | use a different email, or delete the existing user first |
+| Provisioning failed mid-flow and a user seems half-created | rollback ran but its cleanup itself failed (rare) | check gateway stdout for `rollback: ... failed for user <id>` lines; delete the partial user via admin `DELETE /api/v1/users/{id}` |
+| Neo4j restarts / OOM-killed | heap or pagecache too small for the graph | raise `NEO4J_HEAP_MAX` / `NEO4J_PAGECACHE` in `.env`; `make restart` |
+| RAG chat is slow; `ollama ps` shows a CPU/GPU split | `MODEL_NAME` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; keep `MODEL_NAME` and `OPENWEBUI_MODEL` in sync |
+| `make health` says `degraded` but the UI works | OWUI `/health` returned non-2xx | inspect the `openwebui` logs; the gateway reports degraded whenever the identity dependency is not healthy |
+
 ## Make targets
 
 | target | action |

@@ -3,9 +3,9 @@
 # generate WEBUI_SECRET_KEY, lock .env.local to 0600, and ensure the ./data
 # bind-mount tree exists. Idempotent: existing non-empty values are kept.
 #
-# Graphiti is no longer gated by a shared GRAPHITI_API_TOKEN. Agents authenticate
-# with KB_API_KEY (an Open WebUI key); the kb-gateway validates it against Open
-# WebUI and authorizes per call. See README "KB_API_KEY & the kb-gateway".
+# Agents authenticate with KB_API_KEY (an Open Web UI per-account key); the
+# kb-gateway validates it against Open Web UI and authorizes per call. See
+# README "KB_API_KEY & the kb-gateway".
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -79,4 +79,4 @@ printf '  ensured ./data/{neo4j/data,neo4j/logs,openwebui} exist\n'
 
 printf '\nBootstrap done. Next: make preflight && make start\n'
 printf 'After start + admin signup: make api-keys (admin + shared-agent keys),\n'
-printf 'then provision humans via the kb-gateway (see README KB_API_KEY).\n'
+printf 'then provision accounts via the kb-gateway (see README KB_API_KEY).\n'

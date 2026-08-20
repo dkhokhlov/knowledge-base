@@ -1,5 +1,16 @@
 # KnowledgeBase
 
+[![Graphiti](https://img.shields.io/badge/Graphiti-MCP-blue)](https://github.com/getzep/graphiti)
+[![Open WebUI](https://img.shields.io/badge/Open_WebUI-RAG-orange)](https://github.com/open-webui/open-webui)
+[![Neo4j](https://img.shields.io/badge/Neo4j-5.26-green)](https://neo4j.com/)
+[![Caddy](https://img.shields.io/badge/Caddy-gateway-1f83c7)](https://caddyserver.com/)
+[![Ollama](https://img.shields.io/badge/Ollama-host_LLM-000000)](https://ollama.com/)
+[![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-8b5cf6)](https://modelcontextprotocol.io/)
+[![embed](https://img.shields.io/badge/embed-nomic--embed--text-brightgreen)](https://huggingface.co/nomic-ai/nomic-embed-text)
+[![LLM](https://img.shields.io/badge/LLM-gemma4_12b-blueviolet)](https://ollama.com/library/gemma4)
+[![Docker](https://img.shields.io/badge/Docker-compose-2496ED)](https://docs.docker.com/compose/)
+[![license](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
+
 Self-hosted knowledge base stack. [Ollama][ollama] runs on the [Docker][docker] host and supplies
 the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
 
@@ -12,7 +23,7 @@ the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings.
 ## Documentation map
 
 - **README** — [Architecture](#architecture) · [Operating model](#operating-model) · [Quick start](#quick-start) · [Agent interfaces](#agent-interfaces) · [Security](#security) · [Repository layout](#repository-layout) · [Notes](#notes)
-- **[docs/operations.md](docs/operations.md)** — prerequisites, configuration (env vars), Ollama host service, persistent data / RAID, make targets, full hardening reference.
+- **[docs/operations.md](docs/operations.md)** — prerequisites, configuration (env vars), Ollama host service, persistent data / RAID, make targets, troubleshooting, full hardening reference.
 - **[docs/testing.md](docs/testing.md)** — integration test suite + matrix.
 
 ## Architecture
@@ -191,7 +202,7 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 
 ### kb-gateway (`:8000` → `:8010`)
 
-- graphiti-mcp and Neo4j have no agent-facing auth and are **internal-only** on `graph_internal`. The kb-gateway is the sole bridge; [Caddy][caddy] (`:8000`) proxies to it. No `GRAPHITI_API_TOKEN` — it is retired (graphiti-mcp has no native auth; the gateway is the gate).
+- graphiti-mcp and Neo4j have no agent-facing auth and are **internal-only** on `graph_internal`. The kb-gateway is the sole bridge; [Caddy][caddy] (`:8000`) proxies to it. graphiti-mcp has no native auth — the gateway is the gate.
 - Every gateway endpoint (except `/health`) requires `Authorization: Bearer <KB_API_KEY>`. No key → `401`; bad key → `401`; Open WebUI unreachable → `503` (fail closed).
 - `/health` is ungated on purpose: non-sensitive probe, carries no data or credentials. It also probes Open WebUI so `make health` catches an identity-broken stack rather than reporting healthy while auth is down.
 - `KB_API_KEY` is a bearer — `KB_GATEWAY_URL` MUST be HTTPS or VPN/tunnel for any non-local agent. Plain HTTP is safe only on a trusted local interface.

@@ -105,7 +105,7 @@ if [ -n "$CID" ]; then
   done
 fi
 if [ -z "$iso_up" ]; then
-  pass "rollback: isolated gateway unavailable here — skipped (verify on the host: see gateway unit tests)"
+  fail "rollback: isolated gateway did not start — rollback path NOT exercised (fix test infra: docker compose run must work on the host)"
 else
   # The isolated gateway must fail (not report success) on provisioning.
   rcode=$(provision "http://localhost:8011" "$ADMIN_KEY" "$EMAIL_R" "Rollback Test" user | cut -f1)

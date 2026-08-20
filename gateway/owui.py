@@ -132,7 +132,6 @@ PROVISIONING_PATHS = {
     "POST /api/v1/auths/signin": ("POST", "/api/v1/auths/signin"),
     "POST /api/v1/auths/api_key": ("POST", "/api/v1/auths/api_key"),
     "GET /api/v1/auths/": ("GET", "/api/v1/auths/"),
-    "DELETE /api/v1/auths/api_key": ("DELETE", "/api/v1/auths/api_key"),
     "DELETE /api/v1/users/{user_id}": ("DELETE", "/api/v1/users/{user_id}"),
 }
 

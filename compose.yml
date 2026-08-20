@@ -104,8 +104,8 @@ services:
       - "${GRAPHITI_HOST_PORT:-8000}:8000"
     # Caddy is the public edge. It proxies to kb-gateway (edge net), which is
     # the sole bridge to graphiti-mcp + neo4j (graph_internal) and OWUI
-    # (owui_net). No GRAPHITI_API_TOKEN anymore — the gateway authorizes via
-    # KB_API_KEY (validated against Open WebUI).
+    # (owui_net). The gateway authorizes via KB_API_KEY (validated against
+    # Open WebUI).
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
     healthcheck:
