@@ -18,7 +18,7 @@ Documents provide grounded answers from a curated reference corpus. Fact memory 
 - **[Graphiti MCP][graphiti]** — temporal fact memory over [Neo4j][neo4j]; HTTP [MCP][mcp] server (internal only).
 - **[Open WebUI][open-webui]** — document knowledge base with vector search, grounded RAG chat, and user/group access control; also the identity provider for the kb-gateway.
 - **[Neo4j][neo4j]** — graph store for [Graphiti][graphiti] (internal only).
-- **kb-gateway** — stack-side authorization, per-account identity and role validation, Graphiti MCP bridge, live group discovery, and admin user provisioning (zero-dependency Python stdlib).
+- **kb-gateway** — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti MCP bridge, live group discovery, and admin user provisioning (zero-dependency Python stdlib).
 - **[Caddy][caddy]** — public edge that proxies agents to the kb-gateway.
 
 [Ollama][ollama] supplies the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings; it is reached via `OLLAMA_BASE_URL` and can run on the [Docker][docker] host or a remote/LAN host.
