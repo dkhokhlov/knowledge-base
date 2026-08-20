@@ -40,10 +40,23 @@ TAGS="$(curl -sf --connect-timeout 3 "${OLLAMA}/api/tags" 2>/dev/null)" \
   || fail "Ollama not reachable at ${OLLAMA} (is it running? check OLLAMA_HOST in shell env or .env)"
 ok "Ollama reachable at ${OLLAMA}"
 
-MODEL_NAME="${MODEL_NAME:-qwen2.5:14b}"
+MODEL_NAME="${MODEL_NAME:-qwen2.5:14b-ctx8192}"
 echo "$TAGS" | grep -q "\"${MODEL_NAME}\"" \
   || fail "model '${MODEL_NAME}' not pulled in host Ollama (run: make pull-models)"
 ok "Ollama has LLM model '${MODEL_NAME}'"
+# Verify the ctx variant's num_ctx matches OLLAMA_MODEL_CONTEXT. The /v1
+# endpoint ignores options.num_ctx in requests, so num_ctx is baked into the
+# model via a Modelfile (PARAMETER num_ctx) at make pull-models. A wrong or
+# absent value means the model loads at the default 32k (~53 GB) and spills
+# to CPU (extraction crawls) — so this is a hard fail, not a warning.
+EXP_CTX="${OLLAMA_MODEL_CONTEXT:-8192}"
+GOT_CTX="$(curl -sf --connect-timeout 3 "${OLLAMA}/api/show" -d "{\"name\":\"${MODEL_NAME}\"}" 2>/dev/null \
+  | python3 -c 'import sys,json,re; p=json.load(sys.stdin).get("parameters",""); m=re.search(r"(?m)^\s*num_ctx\s+(\d+)", p); print(m.group(1) if m else "")' 2>/dev/null)"
+[ -n "$GOT_CTX" ] \
+  || fail "model '${MODEL_NAME}' has no num_ctx (not a ctx variant — run: make pull-models)"
+[ "$GOT_CTX" = "$EXP_CTX" ] \
+  || fail "model '${MODEL_NAME}' num_ctx=${GOT_CTX} != OLLAMA_MODEL_CONTEXT=${EXP_CTX} (re-run: make pull-models)"
+ok "model '${MODEL_NAME}' num_ctx=${GOT_CTX}"
 echo "$TAGS" | grep -qE '"nomic-embed-text(:|")' \
   || fail "model 'nomic-embed-text' not pulled in Ollama (run: make pull-models)"
 ok "Ollama has embedder 'nomic-embed-text'"

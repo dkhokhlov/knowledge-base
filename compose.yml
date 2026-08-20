@@ -41,13 +41,14 @@ services:
       start_period: 30s
 
   graphiti:
-    # zepai/graphiti REST server (graph_service FastAPI app). The image's default
+    # graphiti REST server (graph_service FastAPI app). The image's default
     # Graphiti client uses OpenAIClient (OpenAI Responses API), which Ollama
     # cannot satisfy (extraction silently stores nothing). graphiti/bootstrap.py
     # is mounted and run as the command; it rebuilds the app with a dependency
-    # override that injects OpenAIGenericClient (Chat Completions) + the nomic
-    # embedder @ 768, so Ollama extraction works. See graphiti/bootstrap.py.
-    image: zepai/graphiti:${GRAPHITI_IMAGE_TAG:-0.22.0}
+    # override that injects OpenAIGenericClient (Chat Completions + json_schema
+    # structured outputs, the >= 0.29 default) + the nomic embedder @ 768, so
+    # Ollama extraction works. See graphiti/bootstrap.py.
+    image: ghcr.io/dkhokhlov/graphiti-rest:${GRAPHITI_IMAGE_TAG:-0.29.3}
     container_name: kb-graphiti
     restart: unless-stopped
     networks: [graph_internal]
@@ -72,7 +73,10 @@ services:
       # The REST server reads these via graph_service.config.Settings:
       - OPENAI_API_KEY=ollama
       - OPENAI_BASE_URL=${OLLAMA_HOST:-http://host.docker.internal:11434}/v1
-      - MODEL_NAME=${MODEL_NAME:-qwen2.5:14b}
+      # MODEL_NAME is the ctx-baked variant (qwen2.5:14b-ctx8192); the fallback
+      # matches .env so a missing .env never silently loads the stock 32k model
+      # (~53 GB, spills to CPU). See .env "LLM model".
+      - MODEL_NAME=${MODEL_NAME:-qwen2.5:14b-ctx8192}
       - EMBEDDING_MODEL_NAME=${EMBEDDER_MODEL:-nomic-embed-text}
       # Not a REST Settings field; the bootstrap reads it to set the embedder
       # dim (and thus the vector index dim). Default 768 = nomic-embed-text.

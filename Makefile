@@ -8,7 +8,8 @@ COMPOSE  := docker compose
 DATA_DIR := ./data
 
 .PHONY: help bootstrap preflight pull pull-models start stop restart logs ps config \
-        health test api-keys rag-config shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
+        health test test-e2e api-keys admin-signup rag-config \
+        shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -22,10 +23,21 @@ preflight: ## Read-only checks: docker, secrets, Ollama, required models
 pull: ## Pull all images
 	@$(COMPOSE) pull
 
-pull-models: ## Pull Ollama models (MODEL_NAME + nomic-embed-text) on the host
-	@set -a; . ./.env; set +a; \
-	echo "Pulling LLM model: $$MODEL_NAME"; ollama pull $$MODEL_NAME; \
-	echo "Pulling embedder: nomic-embed-text"; ollama pull nomic-embed-text
+pull-models: ## Pull base LLM, create the ctx-baked variant (MODEL_NAME), pull embedder
+	@set -euo pipefail; \
+	set -a; . ./.env; set +a; \
+	: "$${OLLAMA_MODEL_BASE:?OLLAMA_MODEL_BASE not set in .env}"; \
+	: "$${MODEL_NAME:?MODEL_NAME not set in .env}"; \
+	case "$${OLLAMA_MODEL_CONTEXT:-}" in ''|*[!0-9]*) \
+	  echo "REFUSING: OLLAMA_MODEL_CONTEXT must be a positive integer (got '$${OLLAMA_MODEL_CONTEXT:-<unset>}')" >&2; exit 1;; esac; \
+	[ "$$OLLAMA_MODEL_CONTEXT" -gt 0 ] || { echo "REFUSING: OLLAMA_MODEL_CONTEXT must be > 0" >&2; exit 1; }; \
+	echo "Pulling base LLM: $$OLLAMA_MODEL_BASE"; ollama pull "$$OLLAMA_MODEL_BASE"; \
+	mf=$$(mktemp); printf 'FROM %s\nPARAMETER num_ctx %s\n' "$$OLLAMA_MODEL_BASE" "$$OLLAMA_MODEL_CONTEXT" > $$mf; \
+	echo "Creating ctx variant: $$MODEL_NAME (num_ctx=$$OLLAMA_MODEL_CONTEXT)"; \
+	ollama rm "$$MODEL_NAME" >/dev/null 2>&1 || true; \
+	ollama create "$$MODEL_NAME" -f $$mf; rm -f $$mf; \
+	echo "Pulling embedder: nomic-embed-text"; ollama pull nomic-embed-text; \
+	echo "Done. If the stack is running, restart it so Ollama reloads the new manifest: make restart"
 
 start: ## Start the stack detached (run `make bootstrap` first)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
@@ -64,11 +76,42 @@ test: ## Run system integration tests against the running stack (run: make start
 	  echo; echo "=== $$t ==="; bash "$$t" || status=1; \
 	done; exit $$status
 
+test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch + full test suite + e2e
+	@set -e; \
+	echo "==> DESTRUCTIVE: wipes all data and re-provisions from scratch."; \
+	test -f .env.local || { echo "REFUSING: no .env.local (no admin creds to stash) — run make bootstrap + fill OPENWEBUI_TEST_USER/PASSWORD first" >&2; exit 1; }; \
+	set -a; . ./.env; . ./.env.local; set +a; \
+	[ -n "$${OPENWEBUI_TEST_USER:-}" ] && [ -n "$${OPENWEBUI_TEST_PASSWORD:-}" ] \
+	  || { echo "REFUSING: OPENWEBUI_TEST_USER/PASSWORD not set in .env.local (admin account) — fill them first" >&2; exit 1; }; \
+	stash=$$(mktemp); chmod 600 $$stash; \
+	{ printf 'OPENWEBUI_TEST_USER=%s\nOPENWEBUI_TEST_PASSWORD=%s\n' "$$OPENWEBUI_TEST_USER" "$$OPENWEBUI_TEST_PASSWORD"; \
+	  [ -n "$${OPENWEBUI_USER:-}" ] && printf 'OPENWEBUI_USER=%s\n' "$$OPENWEBUI_USER" || true; } > $$stash; \
+	trap 'rm -f $$stash' EXIT; \
+	$(MAKE) clear-all && \
+	$(MAKE) bootstrap && \
+	./scripts/e2e-restore-creds.sh $$stash && \
+	$(MAKE) preflight && \
+	$(MAKE) start && \
+	{ H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; i=0; \
+	  until curl -sf "$$H/health" >/dev/null; do i=$$((i+1)); [ $$i -lt 60 ] || { echo "stack did not become healthy in 120s ($$H/health)" >&2; exit 1; }; sleep 2; done; \
+	  echo "stack healthy ($$H/health)"; } && \
+	$(MAKE) admin-signup && \
+	$(MAKE) api-keys && \
+	$(MAKE) rag-config && \
+	$(MAKE) test && \
+	echo "==> test-e2e PASS"
+
 api-keys: ## Provision admin + agent-user API keys into .env.local (run after `make start` + admin signup)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_TEST_USER=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_TEST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
 	@./scripts/api-keys.sh
+
+admin-signup: ## Create the OWUI admin account (OPENWEBUI_TEST_USER/PASSWORD) via signup API; run after make start
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_TEST_USER=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_TEST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
+	@./scripts/admin-signup.sh
 
 rag-config: ## Set the strict-grounding RAG template in Open WebUI (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }

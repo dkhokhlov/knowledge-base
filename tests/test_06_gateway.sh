@@ -45,31 +45,39 @@ pass "identities resolved: admin=${ADMIN_EMAIL} agent=${AGENT_EMAIL}"
 
 section "personal write (agent -> own group)"
 TS=$(date +%s)
-PROBE="T06 integration probe token ZT${TS} belongs to the knowledgebase gateway test"
+# The probe embeds a 6-digit RID, but detection does NOT rely on the number
+# surviving extraction (at temperature=0 ggml batching is still
+# non-deterministic; the model sometimes rephrases the number out). The
+# STABLE signal is the descriptive noun ("cryostat"/"lattice-D"), preserved
+# in every observed extraction. $TS (10-digit) makes the episode name
+# (t06-${TS}) run-unique.
+RID=$(( TS % 900000 + 100000 ))
+PROBE="T06 integration probe: the cryostat on lattice-D holds exactly ${RID} cells for the knowledgebase gateway test."
 code=$(gwcode "$USER" POST /memory/add "{\"text\":\"${PROBE}\",\"name\":\"t06-${TS}\"}")
 [ "$code" = 200 ] && pass "agent add to ${AGENT_GROUP} -> 200" || fail "agent add -> $code (want 200)"
 
 section "write persisted (fact searchable after async extraction)"
 # Graphiti extracts facts via Ollama Chat Completions asynchronously after
-# add returns 202. With a ~12B model each episode takes minutes (multiple LLM
-# extraction calls, ~20s each). A bare 202 is not proof; an episode alone is
-# not proof (extraction can store the episode yet produce no facts — the
-# OpenAIClient/Ollama failure mode). The real signal is a FACT containing the
-# unique probe token in /memory/search, which proves the OpenAIGenericClient
-# extracted entities+facts. Poll up to 5 min.
+# add returns 202. A bare 202 is not proof; an episode alone is not proof
+# (extraction can store the episode yet produce no facts — the OpenAIClient
+# failure mode). The real signal is a FACT whose text contains the stable
+# noun "cryostat"/"lattice-D" in /memory/search, which proves the
+# OpenAIGenericClient extracted entities+facts. Poll up to 5 min. The agent
+# group is empty at test start (fresh e2e, or a prior run's cleanup), so the
+# first cryostat fact IS this add's.
 fact_found=0; ep_found=0
 for i in $(seq 1 60); do
-  if [ "$fact_found" != 1 ] && curl -s "$G/memory/search" -H "$USER" -H "$CT" -d "{\"query\":\"ZT${TS}\",\"k\":5}" | grep -q "ZT${TS}"; then fact_found=1; fi
-  if [ "$ep_found" != 1 ] && curl -s "$G/memory/episodes?max=50" -H "$USER" | grep -q "ZT${TS}"; then ep_found=1; fi
+  if [ "$fact_found" != 1 ] && curl -s "$G/memory/search" -H "$USER" -H "$CT" -d "{\"query\":\"cryostat lattice-D\",\"k\":5}" | grep -qE "cryostat|lattice-D"; then fact_found=1; fi
+  if [ "$ep_found" != 1 ] && curl -s "$G/memory/episodes?max=50" -H "$USER" | grep -q "t06-${TS}"; then ep_found=1; fi
   [ "$fact_found" = 1 ] && break
   sleep 5
 done
 if [ "$fact_found" = 1 ]; then
-  pass "fact extracted (ZT${TS} in /memory/search)"
+  pass "fact extracted (cryostat in /memory/search)"
 elif [ "$ep_found" = 1 ]; then
-  fail "episode stored but no fact in 300s (ZT${TS} in episodes only) — extraction failed"
+  fail "episode stored but no fact in 300s (t06-${TS} in episodes only) — extraction failed"
 else
-  fail "add returned 200 but ZT${TS} never searchable in 300s — memory write silently failed"
+  fail "add returned 200 but cryostat never searchable in 300s — memory write silently failed"
 fi
 
 section "read-all (agent search + episodes across all groups)"

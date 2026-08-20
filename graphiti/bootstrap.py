@@ -11,8 +11,8 @@ Why this exists (the memory stack was non-functional with Ollama):
     client targets the OpenAI Responses API; Ollama answers /v1/responses
     with a shape Graphiti cannot parse, so entity/fact extraction silently
     stores nothing. The package METADATA says: use OpenAIGenericClient for
-    Ollama (Chat Completions + json_object). There is no config switch for
-    this, so we inject it here.
+    Ollama (Chat Completions + json_schema structured outputs). There is no
+    config switch for this, so we inject it here.
   - The default embedder is OpenAIEmbedder() with model text-embedding-3-small
     and dim 1024, neither of which exists on this stack (we use
     nomic-embed-text @ 768). Injecting the embedder also fixes the vector
@@ -30,102 +30,40 @@ Lifecycle (codex review):
     `app.dependency_overrides[get_graphiti]`, the documented override path.
 """
 import asyncio
-import json
-import logging
 import os
 import traceback
 from contextlib import asynccontextmanager
 
-import openai
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.graphiti import Graphiti
-from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
-from graphiti_core.llm_client.errors import RateLimitError
+from graphiti_core.llm_client.config import LLMConfig
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graph_service.config import get_settings
 from graph_service.routers import ingest, retrieve
 from graph_service.routers.ingest import async_worker
 from graph_service.zep_graphiti import ZepGraphiti, get_graphiti
 
-logger = logging.getLogger(__name__)
-
 # Process-level Graphiti client. Built once at startup, returned to every
 # request via the dependency override, closed once at shutdown.
 _SINGLETON = None
 
 
-class _SchemaEnforcingClient(OpenAIGenericClient):
-    """OpenAIGenericClient that uses Ollama structured outputs (json_schema).
-
-    Why this subclass exists (the json_object default breaks extraction):
-      OpenAIGenericClient._generate_response requests
-      ``response_format={'type': 'json_object'}`` and relies on the schema being
-      appended to the prompt as TEXT (in generate_response). With a local
-      Ollama model that is only a 14B non-reasoning model, the model frequently
-      echoes the schema object back as its answer (e.g. the EntityAttributes
-      step returns ``{"properties":..., "required":..., "title":..., "type":...,
-      "summary": {schema}}``) instead of filling it in. The ``summary`` value is
-      then a MAP, which Neo4j rejects ("Property values can only be of primitive
-      types"), so add_episode aborts before any fact is stored.
-
-      Ollama >= 0.32 supports OpenAI-compatible structured outputs
-      (``response_format={'type':'json_schema','json_schema':{...}}``), which
-      enforces the schema server-side so the model cannot echo it. This override
-      passes the response_model's JSON schema through that path; the rest of the
-      call (message cleaning, parsing, retry in generate_response) is unchanged.
-
-      A reasoning model (e.g. gemma4:12b) is still unsuitable regardless of
-      mode: its thinking chain can exhaust max_tokens before any content is
-      emitted (finish_reason=length -> empty content -> json.loads('') fails).
-      MODEL_NAME must therefore be a non-reasoning model; see .env.
-    """
-
-    async def _generate_response(
-        self,
-        messages,
-        response_model=None,
-        max_tokens=DEFAULT_MAX_TOKENS,
-        model_size=ModelSize.medium,
-    ):
-        openai_messages = []
-        for m in messages:
-            m.content = self._clean_input(m.content)
-            if m.role == 'user':
-                openai_messages.append({'role': 'user', 'content': m.content})
-            elif m.role == 'system':
-                openai_messages.append({'role': 'system', 'content': m.content})
-        # When a response_model is given, enforce it server-side via json_schema
-        # (Ollama structured outputs). Otherwise fall back to json_object.
-        if response_model is not None:
-            response_format = {
-                'type': 'json_schema',
-                'json_schema': {
-                    'name': response_model.__name__,
-                    'schema': response_model.model_json_schema(),
-                    'strict': True,
-                },
-            }
-        else:
-            response_format = {'type': 'json_object'}
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model or 'gpt-4.1-mini',
-                messages=openai_messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                response_format=response_format,
-            )
-            result = response.choices[0].message.content or ''
-            return json.loads(result)
-        except openai.RateLimitError as e:
-            raise RateLimitError from e
-        except Exception as e:
-            logger.error('Error in generating LLM response: %s', e)
-            raise
+# Why the stock OpenAIGenericClient is enough on this image (>= 0.29):
+#   graphiti-core 0.29's OpenAIGenericClient defaults to
+#   structured_output_mode='json_schema' (Ollama constrained decoding), so it
+#   enforces each extraction step's Pydantic schema server-side. The 0.22
+#   image defaulted to json_object + schema-as-text, which a 14B local model
+#   echoed back as values (the "summary is a MAP" CypherTypeError), so this
+#   file used a hand-rolled _SchemaEnforcingClient subclass to pass json_schema.
+#   That subclass is now redundant: the stock client does the same, plus
+#   code-fence stripping, an empty-response error, and tenacity retry. We only
+#   inject it (with temperature=0 for deterministic extraction) and the nomic
+#   embedder @ 768; see _build_client. MODEL_NAME must still be a non-reasoning
+#   model (a reasoning model exhausts max_tokens on its thinking chain); see .env.
 
 
 class _InjectedZepGraphiti(ZepGraphiti):
@@ -148,11 +86,17 @@ def _build_client(settings):
     # the compose service sets. Default 768 (nomic-embed-text). The vector
     # index is created at this dim, so a wrong value makes 768-dim writes fail.
     dim = int(os.environ.get("EMBEDDER_DIMENSIONS", "768"))
-    llm = _SchemaEnforcingClient(config=LLMConfig(
+    # temperature=0 keeps extraction deterministic (graphiti-core >= 0.29
+    # defaults LLMConfig.temperature to 1, which makes extraction noisier and
+    # the schema-echo failure more likely under json_object fallback). The
+    # stock OpenAIGenericClient defaults to structured_output_mode='json_schema'
+    # (Ollama constrained decoding); see the note above _InjectedZepGraphiti.
+    llm = OpenAIGenericClient(config=LLMConfig(
         api_key=settings.openai_api_key,
         model=settings.model_name,
         small_model=settings.model_name,  # no separate small model on this stack
         base_url=settings.openai_base_url,
+        temperature=0,
     ))
     embedder = OpenAIEmbedder(config=OpenAIEmbedderConfig(
         embedding_model=settings.embedding_model_name,
