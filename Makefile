@@ -93,6 +93,9 @@ clear: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.lo
 
 clear-all: ## Full wipe: clear + DELETE ./data + remove .env.local. Keeps .env and configs.
 	@$(COMPOSE) down --remove-orphans --volumes
-	@rm -rf $(DATA_DIR)
+	@# Remove ./data as root via a throwaway container: OWUI (root) and Neo4j
+	@# (neo4j uid) write bind-mount files the host user cannot delete, so a host
+	@# `rm -rf` fails midway and never reaches `rm -f .env.local`.
+	@docker run --rm -v "$(CURDIR)/$(DATA_DIR):/data" alpine sh -c "rm -rf /data/*"
 	@rm -f .env.local
 	@echo "Wiped containers, ./data, and .env.local. .env, graphiti/config.yaml, caddy/Caddyfile are preserved."
