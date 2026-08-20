@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Create .env (from .env.example, if missing) and .env.local (gitignored),
-# generate both secrets (WEBUI_SECRET_KEY and GRAPHITI_API_TOKEN), lock .env.local
-# to 0600, ensure the ./data bind-mount tree exists, and print the
-# GRAPHITI_API_TOKEN so it can be copied into MCP clients.
-# Idempotent: existing non-empty values are kept.
+# generate WEBUI_SECRET_KEY, lock .env.local to 0600, and ensure the ./data
+# bind-mount tree exists. Idempotent: existing non-empty values are kept.
+#
+# Graphiti is no longer gated by a shared GRAPHITI_API_TOKEN. Agents authenticate
+# with KB_API_KEY (an Open WebUI key); the kb-gateway validates it against Open
+# WebUI and authorizes per call. See README "KB_API_KEY & the kb-gateway".
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -68,7 +70,6 @@ if [ ! -f .env.local ]; then
 fi
 
 ensure_secret .env.local WEBUI_SECRET_KEY
-ensure_secret .env.local GRAPHITI_API_TOKEN
 
 chmod 600 .env.local
 printf '  set .env.local permissions to 0600\n'
@@ -76,6 +77,6 @@ printf '  set .env.local permissions to 0600\n'
 mkdir -p data/neo4j/data data/neo4j/logs data/openwebui
 printf '  ensured ./data/{neo4j/data,neo4j/logs,openwebui} exist\n'
 
-TOK="$(grep -E '^GRAPHITI_API_TOKEN=' .env.local | cut -d= -f2-)"
-printf '\n  GRAPHITI_API_TOKEN (copy into your MCP clients):\n    %s\n' "$TOK"
 printf '\nBootstrap done. Next: make preflight && make start\n'
+printf 'After start + admin signup: make api-keys (admin + shared-agent keys),\n'
+printf 'then provision humans via the kb-gateway (see README KB_API_KEY).\n'

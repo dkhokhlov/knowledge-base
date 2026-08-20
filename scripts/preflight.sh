@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Read-only checks: docker compose plugin, .env.local + both secrets, ./data
-# tree, host Ollama reachability, and required models. Exits non-zero on FAIL.
+# Read-only checks: docker compose plugin, .env.local + WEBUI_SECRET_KEY,
+# ./data tree, host Ollama reachability, and required models. Exits non-zero
+# on FAIL.
 set -u
 
 cd "$(dirname "$0")/.."
@@ -18,11 +19,11 @@ ok "docker compose available"
 # all read as empty — same parse the Makefile start guard uses. A grep on the
 # raw text would falsely accept '"" # comment'.
 secrets_present() (
-  unset WEBUI_SECRET_KEY GRAPHITI_API_TOKEN
+  unset WEBUI_SECRET_KEY
   . ./.env.local 2>/dev/null || exit 1
-  [ -n "${WEBUI_SECRET_KEY:-}" ] && [ -n "${GRAPHITI_API_TOKEN:-}" ]
+  [ -n "${WEBUI_SECRET_KEY:-}" ]
 )
-secrets_present || fail ".env.local must contain non-empty WEBUI_SECRET_KEY and GRAPHITI_API_TOKEN (run: make bootstrap)"
+secrets_present || fail ".env.local must contain non-empty WEBUI_SECRET_KEY (run: make bootstrap)"
 ok "secrets present in .env.local"
 
 [ -d data/neo4j/data ] && [ -d data/neo4j/logs ] && [ -d data/openwebui ] \

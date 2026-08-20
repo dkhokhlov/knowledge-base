@@ -148,8 +148,12 @@ agent_jwt = signin(AGENT_USER, agent_pass) if agent_pass else ""
 if agent_jwt:
     out("OK    agent user %s exists (signin ok)" % AGENT_USER)
 else:
-    # Need to create it. No admin user-create API in this build, so briefly
-    # re-enable signup with DEFAULT_USER_ROLE=user, then restore.
+    # Need to create it. The admin user-create API (POST /api/v1/auths/add)
+    # exists, but it can set a new account to 'pending' (unable to sign in) on
+    # some builds. The signup path with DEFAULT_USER_ROLE=user is the proven
+    # way to get a signable non-admin agent account here. Per-account provisioning
+    # via auths/add (with a signin + api_key flow) is done by the kb-gateway's
+    # admin endpoint (POST /admin/users) — see README "KB user provisioning".
     if not agent_pass:
         agent_pass = secrets.token_hex(16)
     code, cfg2, _ = jget("GET", "/api/v1/auths/admin/config", admin_jwt)

@@ -29,9 +29,9 @@ pull-models: ## Pull Ollama models (MODEL_NAME + nomic-embed-text) on the host
 
 start: ## Start the stack detached (run `make bootstrap` first)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
-	@unset WEBUI_SECRET_KEY GRAPHITI_API_TOKEN; \
+	@unset WEBUI_SECRET_KEY; \
 	  . ./.env.local 2>/dev/null || { echo "MISSING secret — run: make bootstrap"; exit 1; }; \
-	  [ -n "$${WEBUI_SECRET_KEY:-}" ] && [ -n "$${GRAPHITI_API_TOKEN:-}" ] \
+	  [ -n "$${WEBUI_SECRET_KEY:-}" ] \
 	    || { echo "MISSING secret — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; set +a; \
 	case "$$OLLAMA_BASE_URL" in \
@@ -51,12 +51,12 @@ ps: ## Show container status (with health)
 	@$(COMPOSE) ps
 
 config: ## Render effective compose config (secrets redacted)
-	@$(COMPOSE) config | sed -E 's/(GRAPHITI_API_TOKEN|WEBUI_SECRET_KEY): .*/\1: <redacted>/'
+	@$(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPENWEBUI_USER_API_KEY|OPENWEBUI_USER_PASSWORD|OPENWEBUI_TEST_PASSWORD): .*/\1: <redacted>/'
 
-health: ## Probe graphiti /health and Open WebUI /health
+health: ## Probe the kb-gateway (via Caddy) and Open WebUI /health
 	@set -a; . ./.env; set +a; \
 	curl -sf http://localhost:$$GRAPHITI_HOST_PORT/health >/dev/null \
-	  && echo "graphiti-mcp healthy" || { echo "graphiti-mcp DOWN"; exit 1; }; \
+	  && echo "kb-gateway healthy (via Caddy)" || { echo "kb-gateway DOWN"; exit 1; }; \
 	curl -sf http://localhost:$$OPENWEBUI_HOST_PORT/health >/dev/null \
 	  && echo "open-webui healthy" || { echo "open-webui DOWN"; exit 1; }
 
