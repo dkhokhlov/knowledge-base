@@ -5,7 +5,6 @@
 [![Neo4j](https://img.shields.io/badge/Neo4j-5.26-green)](https://neo4j.com/)
 [![Caddy](https://img.shields.io/badge/Caddy-gateway-1f83c7)](https://caddyserver.com/)
 [![Ollama](https://img.shields.io/badge/Ollama-host_LLM-000000)](https://ollama.com/)
-[![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-8b5cf6)](https://modelcontextprotocol.io/)
 [![embed](https://img.shields.io/badge/embed-nomic--embed--text-brightgreen)](https://huggingface.co/nomic-ai/nomic-embed-text)
 [![LLM](https://img.shields.io/badge/LLM-gemma4_12b-blueviolet)](https://ollama.com/library/gemma4)
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED)](https://docs.docker.com/compose/)
