@@ -178,6 +178,44 @@ Provisioning sequence: `make start` → (admin signs up in UI) → `make api-key
   - Mounted read-only into the container.
 - `caddy/Caddyfile` — public edge; `reverse_proxy kb-gateway:8010` (no token block). Safe to commit.
 
+### Environment variables
+
+`.env` — tracked template (`.env.example`); no secrets; operator-edited:
+
+| Var | Purpose |
+|---|---|
+| `DATA_ROOT` | bind-mount source for state (`./data`) |
+| `OLLAMA_BASE_URL` | Ollama host URL (chat LLM + embeddings) |
+| `OPENWEBUI_IMAGE_TAG` / `GRAPHITI_IMAGE_TAG` / `NEO4J_IMAGE_TAG` | pinned image tags |
+| `GRAPHITI_HOST_PORT` / `OPENWEBUI_HOST_PORT` | the only two host-exposed ports (Caddy `:8000`, OWUI `:3000`) |
+| `KB_GATEWAY_URL` | public gateway URL agents point at (HTTPS/VPN if non-local) |
+| `NEO4J_USER` / `NEO4J_PASSWORD` / `NEO4J_DATABASE` | Neo4j auth + db (container-network only) |
+| `NEO4J_HEAP_INITIAL` / `NEO4J_HEAP_MAX` / `NEO4J_PAGECACHE` | Neo4j memory |
+| `MODEL_NAME` / `OPENWEBUI_MODEL` | chat LLM (keep in sync; the skill reads `OPENWEBUI_MODEL`) |
+| `EMBEDDER_MODEL` / `EMBEDDER_DIMENSIONS` | embedder (must be 768 for `nomic-embed-text`) |
+| `GRAPHITI_GROUP_ID` / `SEMAPHORE_LIMIT` / `LLM_STRUCTURED_OUTPUT_MODE` | Graphiti MCP tunables |
+| `ENV` / `ENABLE_SIGNUP` / `DEFAULT_USER_ROLE` / `ENABLE_API_KEYS` / `USER_PERMISSIONS_FEATURES_API_KEYS` / `RAG_EMBEDDING_MODEL` | Open Web UI behavior |
+| `USER_PERMISSIONS_*` / `ENABLE_OPENAI_API` / `ENABLE_WEB_SEARCH` / `ENABLE_COMMUNITY_SHARING` / `ENABLE_EVALUATION_ARENA_MODELS` / `ENABLE_VERSION_UPDATE_CHECK` / `ENABLE_OTEL` / `WEBUI_FAVICON_URL` | attack-surface + phone-home reduction (full set in `.env.example`) |
+
+`.env.local` — gitignored (`chmod 0600`); secrets + generated keys:
+
+| Var | Source | Purpose |
+|---|---|---|
+| `WEBUI_SECRET_KEY` | `make bootstrap` (random) | Open Web UI JWT signing key |
+| `OPENWEBUI_USER` / `OPENWEBUI_USER_PASSWORD` | `make api-keys` | the shared agent account (`role=user`) |
+| `OPENWEBUI_ADMIN_API_KEY` | `make api-keys` | admin key (`role=admin`) — a valid `KB_API_KEY` |
+| `OPENWEBUI_USER_API_KEY` | `make api-keys` | agent key (read-scoped) — a valid `KB_API_KEY` |
+| `OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` | by hand | existing OWUI user for `make test` |
+
+Notes:
+- `KB_API_KEY` is an Open Web UI per-account API key, carried as an **env var**. It is set on the agent host (in that host's env file or shell); on the stack host it may also live in `.env.local`. Its value is one of:
+  - the admin key (`OPENWEBUI_ADMIN_API_KEY`, `role=admin`), or
+  - the agent key (`OPENWEBUI_USER_API_KEY`, read-scoped), or
+  - a per-account key issued by the gateway (`POST /admin/users`) and relayed to the account.
+  The CLI falls back to `OPENWEBUI_USER_API_KEY` if `KB_API_KEY` is unset.
+- The kb-gateway never persists `KB_API_KEY` server-side — it is stateless. The key arrives as `Authorization: Bearer` on each request and is used only to resolve `(id, email, role)` via Open Web UI; the server stores no key material.
+- kb-gateway internal env (`OWUI_URL`, `GRAPHITI_MCP_URL`, `NEO4J_URL`, `KB_GATEWAY_PORT`, `KB_MAX_CONCURRENCY`) is set in `compose.yml`, not in `.env`.
+
 ## Ollama host service
 
 Ollama runs on the Docker host as a systemd unit
