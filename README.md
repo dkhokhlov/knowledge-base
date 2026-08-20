@@ -29,7 +29,7 @@ README:
 - [Architecture](#architecture)
 - [Operating model](#operating-model)
 - [Quick start](#quick-start)
-- [Agent interfaces](#agent-interfaces)
+- [Performance](#performance)
 - [Security](#security)
 - [Repository layout](#repository-layout)
 - [Notes](#notes)
@@ -105,125 +105,11 @@ All endpoints are on one URL, **`KB_HOST`** (`http://<host>:3000` by default). C
 
 `KB_HOST` is read from `.env` (default `http://localhost:3000`), or synthesized from `KB_HOST_PORT`. [Neo4j][neo4j] (`:7474`, `:7687`) and graphiti (`:8000` internal) are not published — reachable only through the kb-gateway over `graph_internal`.
 
-## Quick start
-
-Full prerequisites, configuration, and env vars are in [docs/operations.md](docs/operations.md). Core sequence:
-
-**Minimum env vars to set** — everything else has a working default or is auto-generated:
-
-- `.env` → `OLLAMA_HOST`: the only hard blocker. `make start` refuses the `<ollama-host>` placeholder. Set your Ollama URL (`http://host.docker.internal:11434` if Ollama runs on the Docker host) in shell env or `.env` (shell overrides `.env`).
-- `.env` → `KB_HOST`: the single public URL agents/clients point at (default `http://localhost:3000`). `KB_HOST_PORT` (default `3000`) is the only host-published port. Change `KB_HOST` for remote agents (HTTPS/VPN).
-
-`WEBUI_SECRET_KEY` (`make bootstrap`), `OPENWEBUI_*_API_KEY` (`make api-keys`), and Neo4j auth are generated or default locally. Test-only creds (`OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` for `make test`) are in [docs/testing.md](docs/testing.md).
-
-1. **Bootstrap** the local secret file and data dirs:
-   ```
-   make bootstrap
-   ```
-   Generates `WEBUI_SECRET_KEY` into `.env.local` (`0600`), creates `./data/{neo4j/data,neo4j/logs,openwebui}`, and creates `.env` from `.env.example` if absent. Set `OLLAMA_HOST` (shell env or `.env`) to your Ollama URL before `make start`.
-2. Set `KB_HOST` for agent clients (in `.env`): `http://localhost:3000` on the Docker host, or `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
-3. **Pull models**, **preflight**, **start**, **verify**:
-   ```
-   make pull-models
-   make preflight
-   make start
-   make health
-   ```
-4. Open `KB_HOST` (`http://<your-host-ip>:3000`) and register the first user (becomes admin). Set `OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` in `.env.local` to this admin (used by `make test` and `make api-keys`).
-5. **Provision API keys** (admin + read-scoped agent) into `.env.local`:
-   ```
-   make api-keys
-   ```
-   Idempotent; `FORCE=1` rotates. See [API keys](#api-keys).
-6. **Set the strict-grounding RAG template**:
-   ```
-   make rag-config
-   ```
-   Re-run after a DB reset/rebuild or an `OLLAMA_HOST` change.
-
-Provisioning sequence: `make start` → (admin signs up in UI) → `make api-keys` → `make rag-config`.
-
-7. (Optional) Close signup: set `ENABLE_SIGNUP=false` in `.env` and `make restart`.
-
-## Agent interfaces
-
-Two interfaces for agents, both on `KB_HOST` and keyed with `KB_API_KEY` (an Open Web UI per-account API key):
-
-- **Open Web UI REST** (`KB_HOST/api/*`) — chat, RAG, file and knowledge-base management. Served by Open Web UI via Caddy's catch-all.
-- **kb-gateway REST** (`KB_HOST/memory/*`, `KB_HOST/admin/users`) — Graphiti memory + graph tools and admin user provisioning. A thin CLI (`kb_gateway.py`) wraps it; the agent never reaches the Graphiti REST server directly (it is internal-only).
-
-`KB_HOST` is the single URL for both. See [docs/agents.md](docs/agents.md) for per-tool integration examples (Claude Code, Codex, OpenCode, Pi).
-
-Replace `<host>` in `KB_HOST` with the Docker host name/IP, or `localhost` if the client runs on the Docker host.
-
-### API keys
-
-`make api-keys` provisions two REST API keys into `.env.local` (run after `make start` and admin signup):
-
-| Variable | Account | Access | Hand to agents? |
-|---|---|---|---|
-| `OPENWEBUI_ADMIN_API_KEY` | `admin@local.test` (admin) | Full — bypasses access control | **No** |
-| `OPENWEBUI_USER_API_KEY` | `agent@local.test` (user) | Read-scoped — sees KBs via their `*` read grants; cannot write to or delete the admin's KBs | **Yes** |
-
-- Either is a valid `KB_API_KEY` for the kb-gateway (admin key → admin role; agent key → read-scoped). `KB_API_KEY` may also be a per-account key issued by the gateway (`POST /admin/users`). The CLI falls back to `OPENWEBUI_USER_API_KEY` if `KB_API_KEY` is unset. See [docs/operations.md](docs/operations.md#environment-variables) for storage details.
-- `make api-keys` also grants `*` read on the chat model (`MODEL_NAME`) so the agent user can do RAG chat. Without it, a non-admin user sees 0 models and chat returns `Model not found`.
-- Idempotent; `FORCE=1 make api-keys` rotates (replaces) the keys.
-- For a hard API-layer read-only lock on every key: Settings -> Admin -> API Key Endpoint Restrictions (`ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS`) — global, also restricts the admin key.
-
-### Open Web UI REST
-
-- Base path: `/api`; auth `Authorization: Bearer <OWUI API key>` (or a JWT from `POST /api/v1/auths/signin`).
-- OpenAPI schema: `GET /openapi.json`; interactive Swagger UI: `/api/docs` (`ENV=dev` only).
-- `kb` skill (read-scoped agent): a zero-dependency CLI wrapper (`scripts/owui.py`) that handles auth and flattens the Chroma nested-array search response. Reads `KB_HOST` + `KB_API_KEY` (fallback `OPENWEBUI_USER_API_KEY`) + `OPENWEBUI_MODEL` from `.env` / `.env.local` via `--env-file`.
-
-  | Trigger | Example phrasing | Deterministic? |
-  |---|---|---|
-  | Slash command | `/kb` then the request | yes |
-  | Natural — search | "search the KB for X" / "search the knowledge base for X" | by description match |
-  | Natural — RAG chat | "ask the KB: \<question\>" / "ask the knowledge base: \<question\>" | by description match |
-  | Natural — list | "list my KBs" / "list my knowledge bases" | by description match |
-
-  The slash command is the most reliable; natural phrasing triggers automatically when it matches the skill description. Both "KB" and "knowledge base" phrasings are recognized.
-
-### Graphiti memory (kb-gateway)
-
-- Endpoint `KB_HOST` (Caddy → kb-gateway). All paths under `/memory/*` and `POST /admin/users` require `Authorization: Bearer <KB_API_KEY>`; `/health` is ungated. Identity + role are derived from the key (tamper-proof). `GET /admin/users` falls through to the OWUI SPA.
-- Thin CLI (`scripts/kb_gateway.py`, zero-dependency): reads `KB_API_KEY` + `KB_HOST` from `.env` / `.env.local` via `--env-file`. Subcommands:
-  ```
-  python3 ~/.claude/skills/kb/scripts/kb_gateway.py --env-file .env --env-file .env.local whoami
-  python3 ~/.claude/skills/kb/scripts/kb_gateway.py ... groups
-  python3 ~/.claude/skills/kb/scripts/kb_gateway.py ... add "Project Atlas uses QPU scheduler" --name atlas
-  python3 ~/.claude/skills/kb/scripts/kb_gateway.py ... search "atlas scheduler"
-  python3 ~/.claude/skills/kb/scripts/kb_gateway.py ... episodes
-  python3 ~/.claude/skills/kb/scripts/kb_gateway.py ... status
-  python3 ~/.claude/skills/kb/scripts/kb_gateway.py ... forget user:<me>
-  python3 ~/.claude/skills/kb/scripts/kb_gateway.py ... delete-edge <uuid>
-  python3 ~/.claude/skills/kb/scripts/kb_gateway.py ... delete-episode <uuid>
-  python3 ~/.claude/skills/kb/scripts/kb_gateway.py ... user-create --email alice@example.com --name Alice
-  ```
-- Authorization rules are in [Operating model](#operating-model): personal-only writes, read-all, owner/admin destructive. The `/kb` skill exposes these as natural-language triggers ("remember …", "what do we know about …", "forget …") plus the slash command.
-
-#### Performance
-
-Measured warm on mini4 (one 14B ctx-baked model loaded). The first call after idle adds model-load time (~30 s cold).
-
-| Operation | Endpoint | Median latency |
-|---|---|---|
-| add (queue -> 202, episode queued) | `POST /memory/add` | ~54 ms |
-| retrieve facts (search) | `POST /memory/search` | ~89 ms |
-| fetch raw episodes | `GET /memory/episodes?max=20` | ~57 ms |
-| add -> fact searchable (async extraction, warm model) | add + poll `/memory/search` | ~9 s |
-
-#### search vs episodes (facts vs raw)
-
-- `/memory/search` returns **facts** (`entity_edges`): each fact is a fact text with `valid_at` / `invalid_at`. It is Graphiti RAG — the query is embedded (`nomic-embed-text`), matched by vector similarity over nodes, then refined by graph traversal. The original `add` text is not returned.
-- `/memory/episodes` returns the raw **episodes**: the original `add` texts, verbatim, in order. No embedding, no LLM, no graph traversal.
-
 ### KB user provisioning (admin)
 
 An admin tells an agent **"create a new KB user alice\@example.com named Alice"**; the agent runs `kb_gateway.py ... user-create --email alice@example.com --name Alice`.
 
-- The gateway enforces `role=admin` **server-side** before any write. A non-admin `KB_API_KEY` → `403` (not merely a CLI check). OWUI down → `503`.
+- The gateway enforces `role=admin` **server-side** before any write. A non-admin key → `403` (not merely a CLI check). OWUI down → `503`.
 - Flow (all inside the gateway, one stateless request): generate a strong temp password → create the OWUI user (`POST /api/v1/auths/add`, admin key) → sign in as the new user → generate that user's `KB_API_KEY` with the new user's own JWT (`POST /api/v1/auths/api_key`) → verify the key via `GET /api/v1/auths/` resolves to the expected email + `role=user`.
 - Returns to the admin **only**: `email`, `temp_password`, `kb_api_key`, `role`, `id`. The gateway is stateless — it **never persists** the password or key; they exist only in the one response. The agent must relay them to the requesting administrator and not store them.
 - **Rollback**: if any step after user creation fails, the gateway deletes the partial user (admin `DELETE /api/v1/users/{id}`) and returns a clear error. It never reports success on partial provisioning. A duplicate email → deterministic `409` (no second account).
@@ -236,16 +122,70 @@ An admin tells an agent **"create a new KB user alice\@example.com named Alice"*
 - To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field of `/api/chat/completions` as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds.
 - `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
 
-#### Performance
+For per-tool agent integration (skill install, CLI examples), see [docs/agents.md](docs/agents.md).
 
-Measured warm on mini4. RAG chat includes the LLM generation step, so it is the slower path.
+## Quick start
+
+Full prerequisites, configuration, and env vars are in [docs/operations.md](docs/operations.md). Core sequence:
+
+**Minimum env vars to set** — everything else has a working default or is auto-generated:
+
+- `.env` → `OLLAMA_HOST`: the only hard blocker. `make start` refuses the `<ollama-host>` placeholder. Set your Ollama URL (`http://host.docker.internal:11434` if Ollama runs on the Docker host) in shell env or `.env` (shell overrides `.env`).
+- `.env` → `KB_HOST`: the single public URL agents/clients point at (default `http://localhost:3000`). `KB_HOST_PORT` (default `3000`) is the only host-published port. Change `KB_HOST` for remote agents (HTTPS/VPN).
+
+A generated JWT signing key (`make bootstrap`), the API keys (`make api-keys`), and Neo4j auth are generated or default locally. Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
+
+1. **Bootstrap** the local secret file and data dirs:
+   ```
+   make bootstrap
+   ```
+   Generates the JWT signing key into `.env.local` (`0600`), creates `./data/{neo4j/data,neo4j/logs,openwebui}`, and creates `.env` from `.env.example` if absent. Set `OLLAMA_HOST` (shell env or `.env`) to your Ollama URL before `make start`.
+2. Set `KB_HOST` for agent clients (in `.env`): `http://localhost:3000` on the Docker host, or `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
+3. **Pull models**, **preflight**, **start**, **verify**:
+   ```
+   make pull-models
+   make preflight
+   make start
+   make health
+   ```
+4. Open `KB_HOST` (`http://<your-host-ip>:3000`) and register the first user (becomes admin). Record this admin as the test user in `.env.local` (see [docs/testing.md](docs/testing.md); used by `make test` and `make api-keys`).
+5. **Provision API keys** (admin + read-scoped agent) into `.env.local`:
+   ```
+   make api-keys
+   ```
+   Idempotent; `FORCE=1` rotates. See [docs/operations.md](docs/operations.md#environment-variables).
+6. **Set the strict-grounding RAG template**:
+   ```
+   make rag-config
+   ```
+   Re-run after a DB reset/rebuild or an `OLLAMA_HOST` change.
+
+Provisioning sequence: `make start` → (admin signs up in UI) → `make api-keys` → `make rag-config`.
+
+7. (Optional) Close signup: set `ENABLE_SIGNUP=false` in `.env` and `make restart`.
+
+## Performance
+
+Measured warm on mini4 (one 14B ctx-baked model loaded). The first call after idle adds model-load time (~30 s cold). RAG chat and async extraction include the LLM; the other operations do not.
+
+### Memory (kb-gateway)
+
+| Operation | Endpoint | Median latency |
+|---|---|---|
+| add (queue -> 202, episode queued) | `POST /memory/add` | ~54 ms |
+| retrieve facts (search) | `POST /memory/search` | ~89 ms |
+| fetch raw episodes | `GET /memory/episodes?max=20` | ~57 ms |
+| add -> fact searchable (async extraction, warm model) | add + poll `/memory/search` | ~9 s |
+
+- `/memory/search` returns **facts** (`entity_edges`; fact text + `valid_at` / `invalid_at`) via Graphiti RAG: the query is embedded (`nomic-embed-text`), matched by vector similarity over nodes, then refined by graph traversal. The original `add` text is not returned.
+- `/memory/episodes` returns the raw **episodes**: the original `add` texts, verbatim, in order. No embedding, no LLM, no graph traversal.
+
+### RAG (Open Web UI)
 
 | Operation | Endpoint | Median latency |
 |---|---|---|
 | raw chunk retrieval | `POST /api/v1/retrieval/query/collection` | ~64 ms (first call ~328 ms) |
 | RAG chat (retrieval + grounded LLM) | `POST /api/chat/completions` (`files`) | ~1.5 s |
-
-#### RAG chat vs raw retrieval (chunks)
 
 - Raw retrieval (`/api/v1/retrieval/query/collection`) returns **chunks**: a Chroma-style object (`distances`, `documents`, `metadatas`, `ids`), top-k by vector similarity. No LLM runs.
 - RAG chat (`/api/chat/completions` with `files:[{"type":"collection","id":<kb-id>}]`) runs retrieval, injects the chunks as context, and returns a grounded LLM answer. The `make rag-config` strict template makes the model answer only from the retrieved chunks and refuse when the answer is absent.
@@ -259,7 +199,7 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 - `WEBUI_AUTH=true`: every UI and REST call needs a session or a Bearer API key.
 - First registered user becomes admin. Later signups get `DEFAULT_USER_ROLE=pending` and need admin approval. Close signup with `ENABLE_SIGNUP=false` + `make restart`.
 - Knowledge bases are private by default; admins grant access to user groups (Workspace -> Knowledge). RBAC is additive: role + group membership.
-- JWTs signed with `WEBUI_SECRET_KEY` (stored only in gitignored `.env.local`; `make start` rejects an empty/missing key).
+- JWTs signed with a generated secret key (gitignored `.env.local`; `make start` rejects an empty/missing key). See [docs/operations.md#secrets-handling](docs/operations.md#secrets-handling).
 
 ### kb-gateway (`KB_HOST/memory/*`, `/admin/users`, `/health` → `:8010`)
 
@@ -280,7 +220,7 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 | `graphiti/config.yaml` | UNUSED — config for the retired MCP image; kept for reference (not mounted) |
 | `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `rag-config.sh` |
 | `skills/` | per-tool `kb` agent skill (`claude/` primary; `codex/`, `opencode/`, `pi/` symlink `scripts/` to it) — see [docs/agents.md](docs/agents.md) |
-| `tests/` | `test_01`..`test_07` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
+| `tests/` | `test_01`..`test_08` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
 | `docs/` | `operations.md`, `testing.md`, `agents.md`, favicon assets |
 | `.env` / `.env.example` | tracked template — no secrets (ports, tags, models, tunables, `OLLAMA_HOST`) |
 | `.env.local` / `.env.local.example` | gitignored secrets + generated keys (`chmod 0600`) |

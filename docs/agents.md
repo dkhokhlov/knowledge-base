@@ -24,7 +24,7 @@ VPN/tunnel for any non-local agent.
 ## Prerequisites
 
 - The stack is up and healthy: `make start && make health`.
-- `KB_HOST` is set in `.env` (default `http://localhost:3000`).
+- `KB_HOST` is set in `.env` (default `http://localhost:3000`). Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs on the Docker host.
 - You have a `KB_API_KEY`. For the bootstrap admin + read-scoped agent keys, run
   `make api-keys` (writes `OPENWEBUI_ADMIN_API_KEY` / `OPENWEBUI_USER_API_KEY` into
   gitignored `.env.local`). For additional accounts, an admin runs `user-create`.
@@ -46,6 +46,19 @@ Python 3.8+ stdlib:
 Both read `KB_HOST` (fallback synth from `KB_HOST_PORT`) + `KB_API_KEY` (fallback
 `OPENWEBUI_USER_API_KEY`) from the environment or `--env-file` (repeatable; load
 `.env` then `.env.local`).
+
+### Triggers
+
+| Trigger | Example phrasing | Deterministic? |
+|---|---|---|
+| Slash command | `/kb` then the request | yes |
+| Natural — search | "search the KB for X" / "search the knowledge base for X" | by description match |
+| Natural — RAG chat | "ask the KB: \<question\>" / "ask the knowledge base: \<question\>" | by description match |
+| Natural — list | "list my KBs" / "list my knowledge bases" | by description match |
+
+The slash command is the most reliable; natural phrasing triggers automatically
+when it matches the skill description. Both "KB" and "knowledge base" phrasings
+are recognized.
 
 ### Install per tool
 

@@ -73,6 +73,8 @@ Notes:
   - the agent key (`OPENWEBUI_USER_API_KEY`, read-scoped), or
   - a per-account key issued by the gateway (`POST /admin/users`) and relayed to the account.
   The CLI falls back to `OPENWEBUI_USER_API_KEY` if `KB_API_KEY` is unset.
+- `make api-keys` is idempotent; `FORCE=1 make api-keys` rotates (replaces) the keys. It also grants `*` read on the chat model (`MODEL_NAME`) to the agent user, so a non-admin agent can do RAG chat — without it the agent sees 0 models and chat returns `Model not found`.
+- Hand the **read-scoped agent key** to agents, **not** the admin key — the admin key bypasses access control. For a hard API-layer read-only lock on every key (including the admin key), use Settings -> Admin -> API Key Endpoint Restrictions (`ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS`).
 - The kb-gateway never persists `KB_API_KEY` server-side — it is stateless. The key arrives as `Authorization: Bearer` on each request and is used only to resolve `(id, email, role)` via Open Web UI; the server stores no key material.
 - kb-gateway internal env: `OWUI_URL`, `GRAPHITI_URL`, `NEO4J_URL`, `KB_GATEWAY_PORT` are hardcoded in `compose.yml`; `KB_MAX_CONCURRENCY` (default 16) is interpolated from `.env`; `OWUI_TIMEOUT`, `GRAPHITI_TIMEOUT`, `NEO4J_TIMEOUT`, `KB_MAX_BODY` are code defaults (overridable via env). None are in `.env.example`.
 
