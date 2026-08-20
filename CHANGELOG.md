@@ -32,7 +32,8 @@ clean-state e2e harness.
   Modelfile. New vars `OLLAMA_MODEL_BASE`, `OLLAMA_MODEL_CONTEXT` (8192),
   `MODEL_NAME=qwen2.5:14b-ctx8192`. The stock 14B at the default 32k loads
   ~53 GB and spills to CPU on a 22.5 GB GPU (extraction crawls / stalls);
-  `num_ctx 8192` loads ~20 GB, fits the GPU, extraction ~20-40 s.
+  `num_ctx 8192` loads ~20 GB, fits the GPU; a fact is searchable in ~9 s warm
+  (~30 s cold, model load).
   `OPENWEBUI_MODEL` must equal `MODEL_NAME` so only one 14B instance loads.
 - **`make test-e2e` harness.** Destructive orchestrator: `clear-all` ->
   `bootstrap` -> restore creds -> `preflight` -> `start` -> health poll ->

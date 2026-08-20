@@ -60,8 +60,8 @@ printf '%s' "$ADDOUT" | grep -q "added to group" && pass "agent add -> ${AGENT_G
 
 section "fact extracted (searchable after async extraction)"
 # Budget 420 s @ 10 s. The ctx-baked model (num_ctx=8192, ~20 GB) fits the
-# GPU, so extraction is ~20-40 s warm; the budget covers a cold first load
-# (model load ~30 s) plus concurrent test load. Detection greps for the
+# GPU, so a fact is searchable in ~9 s warm; the budget covers a cold first
+# load (model load ~30 s) plus concurrent test load. Detection greps for the
 # stable descriptive noun ("cryostat" / "lattice-D"), NOT the run-id number
 # (which extraction sometimes drops). The group was emptied above, so the
 # first cryostat fact to appear IS this add's.
