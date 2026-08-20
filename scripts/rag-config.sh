@@ -91,14 +91,14 @@ if d.get("RAG_TEMPLATE") != NEW:
 print("OK    strict-grounding RAG_TEMPLATE set (len=%d)" % len(d["RAG_TEMPLATE"]))
 print("      merge sanity: TOP_K=%s CHUNK_SIZE=%s" % (d.get("TOP_K"), d.get("CHUNK_SIZE")))
 
-# --- sync rag.ollama.base_url to .env OLLAMA_BASE_URL ------------------------
+# --- sync rag.ollama.base_url to OLLAMA_HOST ---------------------------------
 # Open WebUI persists rag.ollama.base_url in webui.db on first boot and ignores
-# later .env changes, so the embedder can drift to a stale host while chat works
-# (file upload then "process/status=failed", RAG search returns 0 hits). Reconcile
+# later OLLAMA_HOST changes, so the embedder can drift to a stale host while chat
+# works (file upload then "process/status=failed", RAG search returns 0 hits). Reconcile
 # via the embedding API: GET the current config, change only the ollama URL, POST
 # it back. /embedding/update REPLACES the whole config, so we preserve
 # engine/model/batch/async/concurrent/key from the GET. Idempotent.
-OLLAMA_URL = (os.environ.get("OLLAMA_BASE_URL") or "http://host.docker.internal:11434").rstrip("/")
+OLLAMA_URL = (os.environ.get("OLLAMA_HOST") or "http://host.docker.internal:11434").rstrip("/")
 
 st, txt = call("GET", "/api/v1/retrieval/embedding")
 if st != 200:

@@ -16,7 +16,7 @@ if [ ! -f .env ]; then
     exit 1
   fi
   cp .env.example .env
-  printf '  created .env from .env.example — set OLLAMA_BASE_URL before `make start`\n'
+  printf '  created .env from .env.example — set OLLAMA_HOST (shell env or .env) before `make start`\n'
 fi
 
 gen_hex() {

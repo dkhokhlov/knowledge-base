@@ -67,7 +67,7 @@ services:
       - CONFIG_PATH=/app/mcp/config/config.yaml
       - MODEL_NAME=${MODEL_NAME:-qwen2.5:14b}
       - OPENAI_API_KEY=ollama
-      - OPENAI_API_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}/v1
+      - OPENAI_API_URL=${OLLAMA_HOST:-http://host.docker.internal:11434}/v1
       - EMBEDDER_MODEL=${EMBEDDER_MODEL:-nomic-embed-text}
       - EMBEDDER_DIMENSIONS=${EMBEDDER_DIMENSIONS:-768}
       - LLM_STRUCTURED_OUTPUT_MODE=${LLM_STRUCTURED_OUTPUT_MODE:-json_object}
@@ -179,7 +179,9 @@ services:
       - ENV=${ENV:-dev}
       - ENABLE_API_KEYS=${ENABLE_API_KEYS:-true}
       - USER_PERMISSIONS_FEATURES_API_KEYS=${USER_PERMISSIONS_FEATURES_API_KEYS:-true}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      # OLLAMA_BASE_URL is the env name Open WebUI reads on first boot; the value
+      # comes from the operator's OLLAMA_HOST (Ollama's native client var).
+      - OLLAMA_BASE_URL=${OLLAMA_HOST:-http://host.docker.internal:11434}
       - RAG_EMBEDDING_ENGINE=ollama
       - RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-nomic-embed-text}
       # --- Attack-surface reduction (defaults locked to False; see .env) ---

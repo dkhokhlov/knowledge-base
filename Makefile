@@ -34,8 +34,8 @@ start: ## Start the stack detached (run `make bootstrap` first)
 	  [ -n "$${WEBUI_SECRET_KEY:-}" ] \
 	    || { echo "MISSING secret — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; set +a; \
-	case "$$OLLAMA_BASE_URL" in \
-	  *'<ollama-host>'*) echo "REFUSING start: OLLAMA_BASE_URL is still the '<ollama-host>' placeholder — edit .env (cp .env.example .env, set the real Ollama host)"; exit 1;; \
+	case "$$OLLAMA_HOST" in \
+	  *'<ollama-host>'*) echo "REFUSING start: OLLAMA_HOST is still the '<ollama-host>' placeholder — set OLLAMA_HOST (shell env or .env) to the real Ollama URL"; exit 1;; \
 	esac; \
 	$(COMPOSE) up -d
 

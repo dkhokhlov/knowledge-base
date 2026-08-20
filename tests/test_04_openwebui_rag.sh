@@ -3,7 +3,7 @@
 #
 # Regression guard: Open WebUI persists the RAG embedding Ollama URL
 # (`rag.ollama.base_url`) in webui.db on first boot. A later change to
-# OLLAMA_BASE_URL in .env does NOT override the persisted value, so the
+# OLLAMA_HOST (shell env or .env) does NOT override the persisted value, so the
 # embedder can keep pointing at a stale, unreachable host while chat still
 # works. Symptom: file upload succeeds, /api/v1/files/{id}/process/status
 # reports "failed", and /api/v1/retrieval/query/collection returns 0 hits.
@@ -51,7 +51,7 @@ if [ "$code" = "200" ]; then
   pass "embedding URL reachable from container: ${emb_url} (model=${emb_model})"
 else
   fail "embedding URL UNREACHABLE from container: ${emb_url} -> HTTP ${code}"
-  fail "regression: persisted rag.ollama.base_url is stale. Fix: make rag-config (syncs it to .env OLLAMA_BASE_URL), or wipe ./data/openwebui and 'make start'."
+  fail "regression: persisted rag.ollama.base_url is stale. Fix: make rag-config (syncs it to OLLAMA_HOST), or wipe ./data/openwebui and 'make start'."
   finish; exit 1
 fi
 

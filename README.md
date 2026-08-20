@@ -20,7 +20,7 @@ Documents provide grounded answers from a curated reference corpus. Fact memory 
 - **kb-gateway** — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti MCP bridge, live group discovery, and admin user provisioning (zero-dependency Python stdlib).
 - **[Caddy][caddy]** — public edge that proxies agents to the kb-gateway.
 
-[Ollama][ollama] supplies the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings; it is reached via `OLLAMA_BASE_URL` and can run on the [Docker][docker] host or a remote/LAN host.
+[Ollama][ollama] supplies the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings; it is reached via `OLLAMA_HOST` (Ollama's native client env var) and can run on the [Docker][docker] host or a remote/LAN host.
 
 ## Documentation map
 
@@ -100,11 +100,18 @@ The stack is **agent-facing**: the actor that calls the gateway is an **agent**.
 
 Full prerequisites, configuration, and env vars are in [docs/operations.md](docs/operations.md). Core sequence:
 
+**Minimum env vars to set** — everything else has a working default or is auto-generated:
+
+- `.env` → `OLLAMA_HOST`: the only hard blocker. `make start` refuses the `<ollama-host>` placeholder. Set your Ollama URL (`http://host.docker.internal:11434` if Ollama runs on the Docker host) in shell env or `.env` (shell overrides `.env`).
+- `.env` → `KB_GATEWAY_URL`: defaults to `http://localhost:8000`; change only for remote agents (HTTPS/VPN).
+
+`WEBUI_SECRET_KEY` (`make bootstrap`), `OPENWEBUI_*_API_KEY` (`make api-keys`), and Neo4j auth are generated or default locally. Test-only creds (`OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` for `make test`) are in [docs/testing.md](docs/testing.md).
+
 1. **Bootstrap** the local secret file and data dirs:
    ```
    make bootstrap
    ```
-   Generates `WEBUI_SECRET_KEY` into `.env.local` (`0600`), creates `./data/{neo4j/data,neo4j/logs,openwebui}`, and creates `.env` from `.env.example` if absent. Set `OLLAMA_BASE_URL` in `.env` to your Ollama host before `make start`.
+   Generates `WEBUI_SECRET_KEY` into `.env.local` (`0600`), creates `./data/{neo4j/data,neo4j/logs,openwebui}`, and creates `.env` from `.env.example` if absent. Set `OLLAMA_HOST` (shell env or `.env`) to your Ollama URL before `make start`.
 2. Set `KB_GATEWAY_URL` for agent clients (in `.env` / `.env.local`): `http://localhost:8000` on the Docker host, or `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
 3. **Pull models**, **preflight**, **start**, **verify**:
    ```
@@ -123,7 +130,7 @@ Full prerequisites, configuration, and env vars are in [docs/operations.md](docs
    ```
    make rag-config
    ```
-   Re-run after a DB reset/rebuild or an `OLLAMA_BASE_URL` change.
+   Re-run after a DB reset/rebuild or an `OLLAMA_HOST` change.
 
 Provisioning sequence: `make start` → (admin signs up in UI) → `make api-keys` → `make rag-config`.
 
@@ -200,7 +207,7 @@ An admin tells an agent **"create a new KB user alice\@example.com named Alice"*
 - A user's uploaded files and knowledge bases are private to that user by default. The KB owner (with `sharing.knowledge`) or an admin grants a KB to user groups: Workspace -> Knowledge.
 - An agent using a user's API key inherits that user's permissions: the user's own files + KBs shared with the user's groups. It cannot see other users' private docs. An admin key bypasses access control — give agents a dedicated low-priv user's key, not an admin key.
 - To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field of `/api/chat/completions` as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds.
-- `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `.env` `OLLAMA_BASE_URL` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
+- `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
 
 ## Security
 
@@ -232,7 +239,7 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 | `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `rag-config.sh` |
 | `tests/` | `test_01`..`test_07` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
 | `docs/` | `operations.md`, `testing.md`, favicon assets |
-| `.env` / `.env.example` | tracked template — no secrets (ports, tags, models, tunables, `OLLAMA_BASE_URL`) |
+| `.env` / `.env.example` | tracked template — no secrets (ports, tags, models, tunables, `OLLAMA_HOST`) |
 | `.env.local` / `.env.local.example` | gitignored secrets + generated keys (`chmod 0600`) |
 | `Makefile` | targets (see [docs/operations.md#make-targets](docs/operations.md#make-targets)) |
 | `LICENSE` | MIT |

@@ -33,11 +33,11 @@ ok "./data tree exists"
 # Load config-of-record (non-secret).
 set -a; . ./.env; set +a
 
-OLLAMA="${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+OLLAMA="${OLLAMA_HOST:-http://host.docker.internal:11434}"
 # Probe the configured Ollama from the host side (it must be reachable from
 # the host AND from the containers; compose points both services at $OLLAMA).
 TAGS="$(curl -sf --connect-timeout 3 "${OLLAMA}/api/tags" 2>/dev/null)" \
-  || fail "Ollama not reachable at ${OLLAMA} (is it running? check OLLAMA_BASE_URL in .env)"
+  || fail "Ollama not reachable at ${OLLAMA} (is it running? check OLLAMA_HOST in shell env or .env)"
 ok "Ollama reachable at ${OLLAMA}"
 
 MODEL_NAME="${MODEL_NAME:-qwen2.5:14b}"
@@ -50,7 +50,7 @@ ok "Ollama has embedder 'nomic-embed-text'"
 
 # --- RAG embedding URL sync (read webui.db directly; works pre-start) --------
 # Open WebUI persists rag.ollama.base_url in webui.db on first boot and ignores
-# later .env OLLAMA_BASE_URL changes, so the embedder can drift to a stale host
+# later OLLAMA_HOST changes, so the embedder can drift to a stale host
 # while chat still works. Read the persisted value straight from the DB (no OWUI
 # up / admin key needed) and compare to .env. WARN, not a hard fail: a stale URL
 # does not block `make start` (only embedding), and the fix (make rag-config)
@@ -58,7 +58,7 @@ ok "Ollama has embedder 'nomic-embed-text'"
 emb_warn=0
 if emb_msg="$(python3 - 2>&1 <<'PY'
 import sqlite3, json, os, sys
-env_url = (os.environ.get("OLLAMA_BASE_URL") or "http://host.docker.internal:11434").rstrip("/")
+env_url = (os.environ.get("OLLAMA_HOST") or "http://host.docker.internal:11434").rstrip("/")
 db = "./data/openwebui/webui.db"
 if not os.path.exists(db):
     print("rag.ollama.base_url: webui.db not present (first boot) - nothing to sync")
@@ -81,14 +81,14 @@ except Exception:
 if persisted == env_url:
     print("rag.ollama.base_url in sync: %s" % persisted)
     sys.exit(0)
-print("rag.ollama.base_url STALE: persisted=%r != .env OLLAMA_BASE_URL=%r (embedder will use the stale host)" % (persisted, env_url))
+print("rag.ollama.base_url STALE: persisted=%r != OLLAMA_HOST=%r (embedder will use the stale host)" % (persisted, env_url))
 sys.exit(1)
 PY
 )"; then
   ok "$emb_msg"
 else
   warn "$emb_msg"
-  warn "       after 'make start', run: make rag-config  (syncs rag.ollama.base_url to .env OLLAMA_BASE_URL)"
+  warn "       after 'make start', run: make rag-config  (syncs rag.ollama.base_url to OLLAMA_HOST)"
   emb_warn=1
 fi
 
