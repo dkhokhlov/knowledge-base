@@ -47,7 +47,7 @@ clean-state e2e harness.
 ### Operator-facing changes (action required on upgrade)
 
 - **`OLLAMA_BASE_URL` -> `OLLAMA_HOST`** (Ollama's native client var). Set
-  `OLLAMA_HOST` (full URL, e.g. `http://mini4:11434`) in your shell or `.env`;
+  `OLLAMA_HOST` (full URL, e.g. `http://<ollama-host>:11434`) in your shell or `.env`;
   shell overrides `.env`. The Open WebUI container still receives
   `OLLAMA_BASE_URL` (the name OWUI reads on first boot), sourced from
   `${OLLAMA_HOST}`.

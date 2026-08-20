@@ -166,7 +166,7 @@ Provisioning sequence: `make start` → (admin signs up in UI) → `make api-key
 
 ## Performance
 
-Measured warm on mini4 (one 14B ctx-baked model loaded). The first call after idle adds model-load time (~30 s cold). RAG chat and async extraction include the LLM; the other operations do not.
+Measured warm on the GPU host (one 14B ctx-baked model loaded). The first call after idle adds model-load time (~30 s cold). RAG chat and async extraction include the LLM; the other operations do not.
 
 ### Memory (kb-gateway)
 
