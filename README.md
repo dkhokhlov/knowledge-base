@@ -43,31 +43,42 @@ Sub-documents:
 ## Architecture
 
 ```
-Agent (any host)                              User (browser)
-  |  kb_gateway.py / owui.py                    |
-  |  holds KB_API_KEY only                      |
-  v                                             v
-             KB_HOST  (http://<host>:3000)
-                    |
-                    v
-         Caddy :3000  (single public edge; internal :3000 == host :3000, no port translation)
-            |
-            +-- /memory/*            --> kb-gateway :8010
-            +-- POST /admin/users     --> kb-gateway :8010   (GET falls through to the OWUI SPA)
-            +-- /health               --> kb-gateway :8010   (aggregated; probes OWUI)
-            +-- /* (catch-all)        --> openwebui :8080     (OWUI landing + /api/* + SPA)
-
-         kb-gateway :8010  (zero-dep stdlib; identity + role from KB_API_KEY via OWUI, tamper-proof)
-            |
-            +-- owui_net       --> Open WebUI :8080   (identity + user provisioning + RAG)
-            +-- graph_internal --> graphiti :8000     (REST; bootstrap.py injects Ollama-compatible clients)
-            +-- graph_internal --> Neo4j :7474/:7687 (group discovery + delete guards)
-
-  Open WebUI :8080 + graphiti :8000 --> Ollama :11434 (Docker host, via host-gateway)
-                                             qwen2.5:14b (chat + extraction, non-reasoning)  |  nomic-embed-text (embed)
-
-  Published host port: only KB_HOST_PORT (default 3000) -> Caddy :3000.
-  Internal-only: Neo4j + graphiti (graph_internal); Open WebUI (owui_net, fronted by Caddy).
+  ┌───────────┐       ┌────────────────────────┐
+  │ User      │       │ Agent  (any host)      │
+  │ (browser) │       │ kb_gateway.py / owui.py│
+  │           │       │ holds KB_API_KEY only  │
+  └──────┴────┘       └────────────┴───────────┘
+         └─────────┬───────────────┘
+                   ▼ KB_HOST  http://<host>:3000
+  ┌────────────────┬─────────────────────────────────────────────────────────────┐
+  │                │                                           Docker host       │
+  │  ┌─────────────┬──────────────────────────────────────────────────────────┐  │
+  │  │Caddy  :3000   KB_HOST — single public edge (only published port)       │  │
+  │  │/memory/*  /admin/users(POST)  /health   → kb-gateway :8010             │  │
+  │  │/* catch-all                          → openwebui   :8080               │  │
+  │  └─────────────┴─────────────────────────────────────┴────────────────────┘  │
+  │                ▼                                     ▼                       │
+  │  ┌─────────────┬────────────┐   ┌────────────────────┬────────────────────┐  │
+  │  │openwebui :8080           │   │kb-gateway :8010  (zero-dep stdlib)      │  │
+  │  │owui_net                  │   │identity+role from KB_API_KEY via OWUI   │  │
+  │  │identity + users          │   │owui_net ► openwebui :8080               │  │
+  │  │+ RAG                     │   │graph_internal ► graphiti :8000          │  │
+  │  │                          │   │graph_internal ► Neo4j :7474/7687        │  │
+  │  │                          │   └─────────┴──────────────────────┴────────┘  │
+  │  │                          │             ▼                      ▼           │
+  │  │                          │   ┌─────────┬─────────┐   ┌────────┬────────┐  │
+  │  │                          │   │graphiti :8000     │   │Neo4j :7474/7687 │  │
+  │  │                          │   │(REST) graph_int   │   │group discovery  │  │
+  │  │                          │   │bootstrap.py:      │   │delete guards    │  │
+  │  │                          │   │ Ollama client     │   │(graph_int)      │  │
+  │  │                          │   │ + nomic embed     │   │                 │  │
+  │  └─────────────┴────────────┘   └─────────┴─────────┘   └─────────────────┘  │
+  │                ▼                          ▼                                  │
+  │  ┌─────────────┬──────────────────────────┬───────────────────────────────┐  │
+  │  │Ollama  :11434   (host, via host-gateway)                               │  │
+  │  │qwen2.5:14b-ctx8192 (chat + extraction, non-reasoning)  nomic-embed-text│  │
+  │  └────────────────────────────────────────────────────────────────────────┘  │
+  └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - A user with a browser and an agent both reach the stack through **one** URL, **`KB_HOST`** (default `http://localhost:3000`): [Caddy][caddy] fronts [Open WebUI][open-webui] at the root and the **kb-gateway** under `/memory/*`, `POST /admin/users`, and `/health`. One port, one var for agents (mirrors `OLLAMA_HOST`).
