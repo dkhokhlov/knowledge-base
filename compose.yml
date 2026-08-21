@@ -176,7 +176,16 @@ services:
       start_period: 30s
 
   openwebui:
-    image: ghcr.io/open-webui/open-webui:${OPENWEBUI_IMAGE_TAG:-main}
+    # Custom overlay image: the official Open WebUI image + two build-time
+    # patches (path-aware dedup hash in retrieval.py; upload idempotency in
+    # files.py) that stop the oikb gdrive-indexer churn. Built locally from
+    # open-webui/; see open-webui/PATCH.md. The GHCR ref is a local tag (not
+    # pushed), so pull_policy: never — `make pull` skips this service;
+    # `docker compose build openwebui` (or `make start` on first run) builds it.
+    image: ghcr.io/dkhokhlov/open-webui:${OPENWEBUI_IMAGE_TAG:-0.11.0-pathdedup-idem}
+    build:
+      context: open-webui
+    pull_policy: never
     container_name: kb-openwebui
     restart: unless-stopped
     # Chroma 1.5.x (rust backend) opens a SQLite db per RAG collection. Bulk
@@ -259,6 +268,16 @@ services:
     # not create KBs). Additive service: no existing service is changed.
     image: ghcr.io/open-webui/oikb:${OIKB_IMAGE_TAG:-0.4.0}
     container_name: kb-gdrive-indexer
+    # Profile-gated (no-fallback): this sidecar CANNOT start unprovisioned. With
+    # GDRIVE_KB_ID unset, .oikb.yaml interpolates kb-id to '' and oikb exits 1
+    # ("Invalid entry (needs source + kb-id)") -> restart loop (the "no key" bad
+    # state). Gating it behind the `gdrive` profile means `make start` (no
+    # profile) never creates it; it is started ONLY by `make gdrive-index-bootstrap`
+    # (--profile gdrive), which first writes GDRIVE_KB_ID. `make start` adds
+    # --profile gdrive itself when GDRIVE_KB_ID is already in .env.local, so a
+    # provisioned stack's `make restart` brings it back. On this compose build,
+    # stop/down/ps/logs still manage a running profiled service without the flag.
+    profiles: [gdrive]
     restart: unless-stopped
     networks: [owui_net]
     security_opt:
@@ -282,6 +301,13 @@ services:
       - GDRIVE_KB_ID=${GDRIVE_KB_ID}
       - GDRIVE_INDEX_INTERVAL=${GDRIVE_INDEX_INTERVAL:-30s}
       - OIKB_MAX_SIZE=${OIKB_MAX_SIZE:-50mb}
+      # Persist oikb state (history.db + config.yaml) on the bind-mounted /data
+      # (data/oikb on the host) so it survives container recreation. oikb's
+      # CONFIG_DIR defaults to ~/.config/oikb (ephemeral in-container, lost every
+      # recreate). Pointing it at /data makes history.db land on the bind mount;
+      # `make gdrive-index-bootstrap` chowns data/oikb to the oikb uid so appuser
+      # can write it. See oikb config.py (OIKB_CONFIG_DIR) + history.py (_DEFAULT_DB).
+      - OIKB_CONFIG_DIR=/data
       - LOG_FORMAT=json
     volumes:
       # Source tree, read-only. rclone (gdrive-sync) writes here on the host;

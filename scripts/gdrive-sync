@@ -15,18 +15,44 @@ Options:
   -h, --help              show this help
 
 The destination contains one directory per shared drive. The command uses
-rclone copy, so it does not delete local files.
+rclone sync, so files removed from Drive are deleted from the destination
+(delta sync). Deleted/overwritten files are moved into a dated backup dir
+(.<destination>-backup/<UTC-ISO>/) as a recovery net, NOT deleted in place —
+so a bad/empty mount is recoverable from the backup dir (`make clean` clears it).
+
+Fail-fast: ANY transfer error aborts the run immediately (the report is still
+written with the failing files + rclone reasons). A per-drive empty-source guard
+refuses to sync a drive whose remote listing is empty (sync deletes to match the
+source, so an empty remote would mass-delete the local drive dir).
+
+Concurrency: a hidden <destination>/.sync.lock (holder PID) prevents two runs
+from racing on the same destination; a stale lock whose PID is no longer alive
+is retaken. Aborts with exit 1 if another run is in progress.
+
+The (gitignored) ./gdrive-exclude.conf is an INI file (see the tracked
+gdrive-exclude.conf.example): [<drive name>] sections list patterns that apply
+only to that shared drive (matched by name; resolved to the drive id at
+runtime); a [*] section holds global patterns applied to every drive (e.g.
+*.tmp). Patterns are passed VERBATIM to rclone --exclude-from (rclone-native:
+no "/" matches the basename at any depth, "/" matches the full path). Per-drive
+entries list permanently non-downloadable files (Drive-admin download-forbidden
+403, dangling shortcuts); append one when a sync fails fast on a NEW
+non-downloadable file and re-run. Transient errors (network/5xx) are NOT
+excluded — those fail fast by design.
 
 A sync report is written to <destination>/.sync-reports/sync-<UTC-ISO>.report
-containing the per-drive + total summary and a "Files not downloaded" section
-(one line per file that failed to transfer, with the rclone reason — e.g.
-admin-protected / download-restricted Drive files surface as a 403). Downloadable
-files are still transferred; the exit code is non-zero if any drive had errors.
+containing the per-drive + total summary, a "Files changed" breakdown
+(COPY / UPDATE / DELETE, per file with drive prefix), a "Files excluded"
+section (Drive files that matched the exclude patterns, from rclone's DEBUG
+log), a "Duplicates ignored" section (Drive files rclone skipped because another
+file shares the same path — Drive permits duplicate names), and a "Files not
+downloaded" section (failing paths + rclone reasons).
 EOF
 }
 
 remote="gdrive"
 destination="./gdrive"
+exclude_file="./gdrive-exclude.conf"
 dry_run=0
 
 while (($# > 0)); do
@@ -83,23 +109,290 @@ mkdir -p -- "$destination"
 # rclone logs each failed transfer with its path + cause at INFO level; we parse
 # that log after the run to list files that were NOT downloaded and why. The
 # report lives under the (gitignored) destination in a hidden dir rclone never
-# writes into (rclone copy targets per-drive subdirs, not the destination root).
+# writes into (rclone sync targets per-drive subdirs, not the destination root).
 reports_dir="$destination/.sync-reports"
 mkdir -p -- "$reports_dir"
 ts=$(date -u +%Y%m%dT%H%M%SZ)
 report="$reports_dir/sync-${ts}.report"
-logfile=$(mktemp)
-# Keep INFO log lines: "YYYY/MM/DD HH:MM:SS ERROR : <path>: <reason>".
-log_args=(--log-level INFO --log-file "$logfile")
-cleanup() { rm -f -- "$logfile"; }
+
+# rclone sync --backup-dir retention: deleted/overwritten files are moved here
+# (in their original hierarchy) instead of being deleted in place. MUST sit
+# outside <destination> — oikb scans <destination> read-only and would re-index
+# any backup file matching the .oikb.yaml allowlist (*.pdf, *.docx, ...). Dated
+# subdir per run so backups never overwrite each other. `make clean` wipes the
+# whole .<destination>-backup tree.
+dest_norm="${destination%/}"
+backup_dir="$(cd "$(dirname "$dest_norm")" && pwd)/.$(basename "$dest_norm")-backup"
+backup_root="$backup_dir/$ts"
+temp_files=()
+# Per-drive rclone logs are created in the loop (--log-file); the EXIT trap
+# removes them all. Each drive's log is parsed right after its sync for
+# COPY/UPDATE/DELETE + failures (paths are drive-relative, so the drive name is
+# added at parse time).
+
+# --- concurrency lock -------------------------------------------------------
+# A hidden .sync.lock inside <destination> holds the holder's PID. Two
+# gdrive-sync runs into the same destination would race on the per-drive dirs
+# and the --backup-dir tree (rclone sync deletes to match source — a second
+# run could delete the first run's in-flight files). Acquire before the sync
+# loop; release on every exit path via the EXIT trap. A stale lock whose PID is
+# no longer alive (crashed/killed holder) is retaken — `kill -0` is the
+# liveness probe. PID reuse is a residual: a dead PID recycled to an unrelated
+# live process would look alive and block (rare on a single-user host). The
+# lock file has no .oikb.yaml-allowlisted extension, so oikb does not index it.
+# `lock_held` gates release so a contention abort (exit 1 before we acquire)
+# does NOT delete the other holder's lock via the EXIT trap.
+LOCK="$dest_norm/.sync.lock"
+lock_held=0
+# shellcheck disable=SC2317 # invoked via the EXIT trap (cleanup), not directly
+release_lock() {
+    if (( lock_held )); then
+        rm -f -- "$LOCK" 2>/dev/null || true
+    fi
+}
+acquire_lock() {
+    if [[ -f "$LOCK" ]]; then
+        local old_pid
+        old_pid=$(cat -- "$LOCK" 2>/dev/null || true)
+        if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
+            printf 'FAIL: another gdrive-sync is already running on %s (pid %s, lock %s) — aborting.\n' \
+                "$destination" "$old_pid" "$LOCK" >&2
+            exit 1   # lock_held is still 0 → release_lock (EXIT trap) is a no-op
+        fi
+        # Stale lock (holder PID no longer alive) — retake.
+        printf 'stale lock %s (pid %s not alive) — retaking\n' "$LOCK" "$old_pid" >&2
+        rm -f -- "$LOCK"
+    fi
+    printf '%s\n' "$$" > "$LOCK"
+    lock_held=1
+}
+# shellcheck disable=SC2317 # invoked via the EXIT trap below
+cleanup() {
+    if (( ${#temp_files[@]} > 0 )); then
+        rm -f -- "${temp_files[@]}" 2>/dev/null || true
+    fi
+    release_lock
+}
 trap cleanup EXIT
+acquire_lock
 
 # summary accumulates the report-worthy lines (also printed to stdout).
 summary=""
 emit() { printf '%s\n' "$*"; summary+="$*"$'\n'; }
 
+# Owner-only perms (files 600, dirs 700) on the synced tree + backup retention.
+# Drive content is business-sensitive; rclone v1.60 has no --umask, so normalize
+# after the sync. The oikb sidecar reads ./gdrive read-only as uid 1000 (appuser)
+# == host owner, so owner-only is readable by the container. Skip under --dry-run
+# (no files are created). Run on every exit path (success + fail-fast).
+normalize_perms() {
+    (( dry_run )) && return 0
+    find "$destination" -type d -exec chmod 700 {} + 2>/dev/null || true
+    find "$destination" -type f -exec chmod 600 {} + 2>/dev/null || true
+    if [[ -d "$backup_dir" ]]; then
+        find "$backup_dir" -type d -exec chmod 700 {} + 2>/dev/null || true
+        find "$backup_dir" -type f -exec chmod 600 {} + 2>/dev/null || true
+    fi
+}
+
+# Parse this drive's rclone log into the global $changes accumulator. Each line
+# is TAG<TAB><drive>/<path> for COPY/UPDATE/DELETE/EXCLUDE/DUP, or
+# FAIL<TAB><drive>/<path><TAB><reason> for transfer failures. rclone log paths
+# are relative to the drive root, so the drive name is prepended here. Filenames
+# may contain ": " (e.g. "Report: Q4 review - ..."), so the
+# path/message split anchors on the fixed rclone message, not the first ": ".
+# COPY/UPDATE/DELETE: with rclone sync --backup-dir (always on here) an
+# overwritten file logs "Moved ..." (old copy to backup) then "Copied (new)"
+# (new copy in), and a deleted file logs "Moved ..." then "Moved into backup
+# dir" — NOT "Copied (replaced existing)" / "Deleted". So a "Moved" line is
+# PENDING: resolved to UPDATE when a "Copied (new)" follows for the same path
+# (old moved to backup, new replaced it), else DELETE at end of log (moved to
+# backup, no replacement). The old verbs still match as a fallback.
+# DUP: rclone logs "Duplicate object found in source - ignoring" when Drive
+# holds two files at the same path (Drive permits duplicate names); it syncs
+# one and ignores the rest. Counted so the report's remote/local/excluded/dups
+# table reconciles (remote counts every object; local only the one rclone keeps).
+# Failures are deduped by path keeping the LAST reason (rclone retries repeat a
+# path). Excludes are NOT deduped (same-path duplicates each log once). The
+# local dest side never logs "Excluded", so no source+dest double-count risk.
+parse_drive_log() {
+    local parsed
+    parsed=$(python3 - "$drive_log" "$safe_name" <<'PY'
+import re, sys
+log, drive = sys.argv[1], sys.argv[2]
+PREFIX = re.compile(r'^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \w+\s*: ')
+NEW  = re.compile(r'^(.+): Copied \(new\)$')
+REPL = re.compile(r'^(.+): Copied \(replaced existing\)$')   # overwrite, no --backup-dir
+DELO = re.compile(r'^(.+): Deleted$')                       # delete, no --backup-dir
+# With rclone sync --backup-dir (always on here), an overwritten file is first
+# moved out to the backup dir then the new version copied in, and a deleted file
+# is moved to the backup dir — so rclone logs "Moved ..." verbs instead of
+# "Copied (replaced existing)" / "Deleted". A "Moved" line is therefore PENDING:
+# resolve it to UPDATE if a fresh "Copied (new)" follows for the same path (the
+# old copy went to backup, a new one replaced it), else to DELETE at end of log
+# (the file moved to backup with no replacement). Robust to the verb text varying
+# by backend (local "Moved (server-side)", Drive variants, ...): any "Moved"
+# line is pending, and the old verbs still match as a fallback.
+MOVED = re.compile(r'^(.+): Moved')
+FAIL = re.compile(r'^(.+): Failed to copy: (.+)$')
+EXC  = re.compile(r'^(.+): Excluded$')
+DUP  = re.compile(r'^(.+): Duplicate object found in source - ignoring$')
+out = []
+fail = {}
+excl = []
+dup = []
+moved = set()   # paths moved to backup dir, pending UPDATE-or-DELETE resolution
+for ln in open(log, errors="replace"):
+    if not PREFIX.match(ln):
+        continue
+    rest = PREFIX.sub("", ln.rstrip("\n"))
+    m = NEW.match(rest)
+    if m:
+        p = m.group(1)
+        if p in moved:               # old copy moved to backup, new replaces it
+            out.append("UPDATE\t%s/%s" % (drive, p)); moved.discard(p)
+        else:
+            out.append("COPY\t%s/%s" % (drive, p))
+        continue
+    m = REPL.match(rest)
+    if m:
+        p = m.group(1); out.append("UPDATE\t%s/%s" % (drive, p)); moved.discard(p); continue
+    m = DELO.match(rest)
+    if m:
+        p = m.group(1); out.append("DELETE\t%s/%s" % (drive, p)); moved.discard(p); continue
+    m = MOVED.match(rest)
+    if m:
+        moved.add(m.group(1)); continue
+    fm = FAIL.match(rest)
+    if fm:
+        path, reason = fm.group(1), fm.group(2)
+        # rclone retry summaries ("Attempt 1/3", "There were N ...") are not
+        # real paths — skip them. Matched on their numeric form so a real file
+        # named "Failed invoice.pdf" / "There were wolves.pdf" is kept.
+        if re.match(r'^(Attempt \d+/\d+|There were \d+ )', path):
+            continue
+        fail[path] = reason
+        continue
+    em = EXC.match(rest)
+    if em:
+        excl.append(em.group(1)); continue
+    dm = DUP.match(rest)
+    if dm:
+        dup.append(dm.group(1)); continue
+# End of log: a path moved to backup with no fresh copy = DELETE.
+for p in sorted(moved):
+    out.append("DELETE\t%s/%s" % (drive, p))
+for p in sorted(fail):
+    out.append("FAIL\t%s/%s\t%s" % (drive, p, fail[p]))
+for p in sorted(excl):
+    out.append("EXCLUDE\t%s/%s" % (drive, p))
+for p in sorted(dup):
+    out.append("DUP\t%s/%s" % (drive, p))
+print("\n".join(out))
+PY
+)
+    if [[ -n "$parsed" ]]; then
+        changes+="$parsed"$'\n'
+        drive_excl_count=$(awk -F'\t' '$1=="EXCLUDE"' <<<"$parsed" | wc -l)
+        drive_dup_count=$(awk -F'\t' '$1=="DUP"' <<<"$parsed" | wc -l)
+    else
+        drive_excl_count=0
+        drive_dup_count=0
+    fi
+}
+
+# Render the per-drive remote/local/excluded table to stdout. Called inside the
+# report's { } block (output goes to the report file) and again after (to the
+# terminal). Globals: drive_rows (name<TAB>remote<TAB>local<TAB>excluded per
+# completed drive), total_remote, total_local, total_excl.
+print_drive_table() {
+    printf 'Drive table:\n'
+    printf '%-28s %10s %10s %10s %8s\n' "DRIVE" "remote" "local" "excluded" "dups"
+    printf '%-28s %10s %10s %10s %8s\n' "-----" "------" "-----" "--------" "----"
+    if [[ -n "$drive_rows" ]]; then
+        while IFS=$'\t' read -r dname rem loc exc dup; do
+            [[ -n "$dname" ]] || continue
+            printf '%-28s %10s %10s %10s %8s\n' "$dname" "$rem" "$loc" "$exc" "$dup"
+        done <<<"$drive_rows"
+    fi
+    printf '%-28s %10s %10s %10s %8s\n' "TOTAL" "$total_remote" "$total_local" "$total_excl" "$total_dups"
+}
+
+# Write the sync report (header + $summary + drive table + "Files changed"
+# COPY/UPDATE/DELETE + "Files excluded" + "Files not downloaded") and exit with
+# $1. Called both on fail-fast (mid-loop) and at success. $changes holds
+# TAG<TAB><drive>/<path>[<TAB><reason>] lines accumulated per drive by
+# parse_drive_log.
+write_report_and_exit() {
+    local exit_code=$1 copy_n update_n delete_n fail_n exclude_n dup_n
+    normalize_perms
+    copy_n=$(awk -F'\t' '$1=="COPY"' <<<"$changes" | wc -l)
+    update_n=$(awk -F'\t' '$1=="UPDATE"' <<<"$changes" | wc -l)
+    delete_n=$(awk -F'\t' '$1=="DELETE"' <<<"$changes" | wc -l)
+    fail_n=$(awk -F'\t' '$1=="FAIL"' <<<"$changes" | wc -l)
+    exclude_n=$(awk -F'\t' '$1=="EXCLUDE"' <<<"$changes" | wc -l)
+    dup_n=$(awk -F'\t' '$1=="DUP"' <<<"$changes" | wc -l)
+    {
+        printf 'gdrive sync report\n'
+        printf 'remote: %s\n' "$remote"
+        printf 'destination: %s\n' "$destination"
+        printf 'started (UTC): %s\n' "$ts"
+        printf 'backup-dir: %s\n' "$backup_root"
+        printf 'dry-run: %s\n\n' "$([ "$dry_run" = 1 ] && echo yes || echo no)"
+        printf '%s\n' "$summary"
+        print_drive_table
+        printf '\n'
+        printf 'Files changed: %d COPY, %d UPDATE, %d DELETE\n' "$copy_n" "$update_n" "$delete_n"
+        if (( copy_n > 0 )); then
+            printf 'COPY (%d):\n' "$copy_n"
+            awk -F'\t' '$1=="COPY"{print "  COPY    "$2}' <<<"$changes"
+        fi
+        if (( update_n > 0 )); then
+            printf 'UPDATE (%d):\n' "$update_n"
+            awk -F'\t' '$1=="UPDATE"{print "  UPDATE  "$2}' <<<"$changes"
+        fi
+        if (( delete_n > 0 )); then
+            printf 'DELETE (%d):\n' "$delete_n"
+            awk -F'\t' '$1=="DELETE"{print "  DELETE  "$2}' <<<"$changes"
+        fi
+        printf '\nFiles excluded: %d\n' "$exclude_n"
+        if (( exclude_n > 0 )); then
+            awk -F'\t' '$1=="EXCLUDE"{print "  "$2}' <<<"$changes"
+        else
+            printf '  (none)\n'
+        fi
+        printf '\nDuplicates ignored: %d\n' "$dup_n"
+        if (( dup_n > 0 )); then
+            awk -F'\t' '$1=="DUP"{print "  "$2}' <<<"$changes"
+        else
+            printf '  (none)\n'
+        fi
+        printf '\nFiles not downloaded: %d\n' "$fail_n"
+        if (( fail_n > 0 )); then
+            awk -F'\t' '$1=="FAIL"{print "  "$2" — "$3}' <<<"$changes"
+        else
+            printf '  (none)\n'
+        fi
+    } > "$report"
+    chmod 600 -- "$report" 2>/dev/null || true   # owner-only (umask 022 would make it 0644)
+    emit "Files changed: ${copy_n} COPY, ${update_n} UPDATE, ${delete_n} DELETE; excluded: ${exclude_n}; duplicates: ${dup_n}; not downloaded: ${fail_n} (see report)"
+    print_drive_table
+    printf 'Report written: %s\n' "$report" >&2
+    exit "$exit_code"
+}
+
+changes=""
 processed_drives=0
-failed_drives=0
+# Per-drive accumulators for the report's drive table + totals. remote/local/
+# excluded are summed per drive; drive_rows holds one TSV row per completed drive
+# (name<TAB>remote<TAB>local<TAB>excluded) rendered as the report table.
+total_remote=0
+total_local=0
+total_bytes=0
+total_excl=0     # init here: print_drive_table() reaches these on the fail-fast /
+total_dups=0     # empty-source paths INSIDE the loop, before the post-loop compute
+drive_rows=""
+declare -A seen_names=()   # safe_name -> drive_id, for the name-collision guard
 
 while IFS=$'\t' read -r drive_id drive_name; do
     [[ -n "$drive_id" && -n "$drive_name" ]] || continue
@@ -109,23 +402,108 @@ while IFS=$'\t' read -r drive_id drive_name; do
     safe_name=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"$safe_name")
     [[ -n "$safe_name" ]] || safe_name="$drive_id"
 
+    # --- name-collision guard ------------------------------------------------
+    # Two drives can map to the same safe local name (same Drive name, or a
+    # sanitization collision like "A:B" -> "A_B" == "A_B"). Both would sync into
+    # the same dir + backup subtree; the second sync would delete the first
+    # drive's files (sync deletes to match source). Abort before any sync.
+    if [[ -n "${seen_names[$safe_name]:-}" && "${seen_names[$safe_name]}" != "$drive_id" ]]; then
+        printf 'FAIL: drive %s (id %s) maps to local name "%s" already used by drive id %s — aborting (name collision would cause data loss).\n' "$drive_name" "$drive_id" "$safe_name" "${seen_names[$safe_name]}" >&2
+        emit "FAIL: drive ${drive_name} collides on local name ${safe_name} — aborted (data-loss guard)"
+        write_report_and_exit 1
+    fi
+    seen_names[$safe_name]=$drive_id
+
     target="$destination/$safe_name"
     printf 'Syncing shared drive %s -> %s\n' "$drive_name" "$target"
     processed_drives=$((processed_drives + 1))
 
+    # --- hard guard: refuse to sync an empty remote drive --------------------
+    # rclone sync deletes to match the source, so an empty remote (bad mount,
+    # revoked access, transient API return) would mass-delete the local drive
+    # dir. The account-wide "no drives visible" case is already caught above
+    # (drive_count==0); this catches a SINGLE drive coming back empty. Recursive
+    # listing is required — depth-1 would miss files in subdirs and false-abort.
+    if ! remote_files=$(rclone lsf -R --files-only "${remote}:" --drive-team-drive "$drive_id" 2>/dev/null | wc -l); then
+        printf 'FAIL: cannot list remote files for drive %s (rclone lsf error) — aborting (fail-fast).\n' "$drive_name" >&2
+        emit "FAIL: cannot list remote files for drive ${drive_name} — aborted (fail-fast)"
+        write_report_and_exit 1
+    fi
+    if (( remote_files == 0 )); then
+        printf 'FAIL: shared drive %s has 0 remote files — refusing to sync (empty source would mass-delete %s). Investigate Drive access; local copy preserved.\n' "$drive_name" "$target" >&2
+        emit "FAIL: drive ${drive_name} has 0 remote files — aborted (fail-fast, empty-source guard)"
+        write_report_and_exit 1
+    fi
+
+    # --- exclude list (INI format: per-drive sections + [*] globals) ---------
+    # Convert the (gitignored) master exclude file on the fly into this drive's
+    # --exclude-from. Sections are [<drive name>] (matched by name; the wrapper
+    # resolves name -> id from `rclone backend drives`); [*] applies to every
+    # drive. Patterns are emitted VERBATIM — rclone-native: a pattern with no
+    # "/" matches the basename at any depth (file.pdf, *glob*, *.tmp, or a lone
+    # "*" = every file in the section); a "/" pattern matches the full path
+    # relative to the drive root. Per-drive scoping by name avoids mis-excluding
+    # same-named files in other drives.
+    tmp_exclude=""
+    if [[ -f "$exclude_file" ]]; then
+        tmp_exclude=$(mktemp); temp_files+=("$tmp_exclude")
+        awk -v target="$drive_name" '
+            /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+            /^\[.*\][[:space:]]*$/ {
+                hdr = $0
+                sub(/^\[/, "", hdr); sub(/\][[:space:]]*$/, "", hdr)
+                active = (hdr == "*" || hdr == target)
+                next
+            }
+            active {
+                line = $0
+                sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+                if (line != "") print line
+            }
+        ' "$exclude_file" > "$tmp_exclude"
+        if [[ ! -s "$tmp_exclude" ]]; then
+            rm -f "$tmp_exclude"; tmp_exclude=""
+        fi
+    fi
+
+    # Per-drive rclone log: parsed right after the sync for COPY/UPDATE/DELETE,
+    # failures, and Excluded files (paths are drive-relative, so the drive name
+    # is added at parse time). DEBUG (not INFO) is required — rclone only logs
+    # ": Excluded" lines at DEBUG, and the report includes an excluded-files
+    # section. DEBUG is a superset of INFO, so the COPY/UPDATE/DELETE/FAIL
+    # lines still appear. Temp; the EXIT trap removes it.
+    drive_log=$(mktemp); temp_files+=("$drive_log")
+    log_args=(--log-level DEBUG --log-file "$drive_log")
+
     rclone_args=(
-        copy
+        sync
         "${remote}:"
         "$target"
         --drive-team-drive "$drive_id"
         --create-empty-src-dirs
+        # Per-drive subdir: --backup-dir preserves hierarchy relative to each
+        # sync's destination root ($target), NOT including the drive name, so
+        # without this two drives sharing a relative path would collide in the
+        # same backup_root/<subpath>.
+        --backup-dir "$backup_root/$safe_name"
+        --delete-after
         "${log_args[@]}"
     )
     ((dry_run)) && rclone_args+=(--dry-run)
+    [[ -n "$tmp_exclude" ]] && rclone_args+=(--exclude-from "$tmp_exclude")
+
+    # --- fail-fast: any transfer error aborts the whole run ------------------
+    # Known non-downloadable files are excluded above, so a non-zero exit here is
+    # a genuine failure (new protected file, network error, ...) — do NOT
+    # continue to the next drive. The report is still written with the failures.
     if ! rclone "${rclone_args[@]}"; then
-        printf 'Shared drive completed with transfer errors: %s\n' "$drive_name" >&2
-        failed_drives=$((failed_drives + 1))
+        printf 'FAIL: shared drive %s had transfer errors — aborting (fail-fast). See report for failing files; add new non-downloadable paths to %s.\n' "$drive_name" "$exclude_file" >&2
+        emit "FAIL: drive ${drive_name} had transfer errors — aborted (fail-fast)"
+        parse_drive_log
+        write_report_and_exit 1
     fi
+
+    parse_drive_log
 
     drive_files=0
     drive_bytes=0
@@ -134,65 +512,32 @@ while IFS=$'\t' read -r drive_id drive_name; do
         drive_bytes=$(du -sb -- "$target" | awk '{print $1}')
     fi
     drive_mb=$(awk -v bytes="$drive_bytes" 'BEGIN { printf "%.2f", bytes / 1000000 }')
-    emit "Drive report: ${drive_name} -> ${safe_name}: ${drive_files} files, ${drive_mb} MB local"
+    printf 'Drive report: %s -> %s: %s files, %s MB local (%s excluded of %s remote)\n' \
+        "$drive_name" "$safe_name" "$drive_files" "$drive_mb" "$drive_excl_count" "$remote_files"
+    total_remote=$((total_remote + remote_files))
+    total_local=$((total_local + drive_files))
+    total_bytes=$((total_bytes + drive_bytes))
+    # printf -v (not $(printf...)) preserves the trailing newline — command
+    # substitution would strip it and concatenate the rows.
+    printf -v __row '%s\t%s\t%s\t%s\t%s\n' "$drive_name" "$remote_files" "$drive_files" "$drive_excl_count" "$drive_dup_count"
+    drive_rows+="$__row"
 done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$drive_json")
 
-total_files=$(find "$destination" -mindepth 1 -maxdepth 1 -type d -exec find {} -type f \; -printf '.' | wc -c)
-total_bytes=$(du -sb -- "$destination" | awk '{print $1}')
+# Totals from the per-drive accumulators (NOT a fresh find/du on $destination —
+# that would double-count .sync-reports/*.report files at the destination root
+# and, with the old -exec form, count path-name BYTES instead of files). total_excl
+# is the EXCLUDE-tag count across all drives from $changes.
 total_mb=$(awk -v bytes="$total_bytes" 'BEGIN { printf "%.2f", bytes / 1000000 }')
-emit "Sync report: ${processed_drives} drives processed, ${total_files} files, ${total_mb} MB local"
+total_excl=$(awk -F'\t' '$1=="EXCLUDE"' <<<"$changes" | wc -l)
+total_dups=$(awk -F'\t' '$1=="DUP"' <<<"$changes" | wc -l)
+emit "Sync report: ${processed_drives} drives, ${total_remote} remote, ${total_local} local, ${total_excl} excluded, ${total_dups} duplicates, ${total_mb} MB local"
 
-# --- "Files not downloaded" — parse the rclone log --------------------------
-# Dedup by path keeping the LAST reason (rclone retries repeat a path); preserve
-# the full rclone message so the 403 download-restricted cause is visible.
-failures=$(python3 - "$logfile" <<'PY'
-import re, sys
-last = {}  # path -> "CATEGORY: reason"
-for ln in open(sys.argv[1], errors="replace"):
-    m = re.match(r'^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} (ERROR|NOTICE) ?: (.*)$', ln.rstrip("\n"))
-    if not m:
-        continue
-    cat, rest = m.group(1), m.group(2)
-    idx = rest.find(": ")
-    if idx < 0:
-        continue
-    path = rest[:idx]
-    reason = rest[idx + 2:]
-    # Skip rclone run-summary lines (not per-file paths).
-    if path.startswith(("Attempt ", "There were ", "Failed ")):
-        continue
-    last[path] = "%s: %s" % (cat, reason)
-for path in sorted(last):
-    print("%s\t%s" % (path, last[path]))
-PY
-)
-
-# --- write the report -------------------------------------------------------
-{
-    printf 'gdrive sync report\n'
-    printf 'remote: %s\n' "$remote"
-    printf 'destination: %s\n' "$destination"
-    printf 'started (UTC): %s\n' "$ts"
-    printf 'dry-run: %s\n\n' "$([ "$dry_run" = 1 ] && echo yes || echo no)"
-    printf '%s\n' "$summary"
-    printf 'Files not downloaded:\n'
-    if [[ -n "$failures" ]]; then
-        while IFS=$'\t' read -r fpath freason; do
-            [[ -n "$fpath" ]] || continue
-            printf '  %s — %s\n' "$fpath" "$freason"
-        done <<<"$failures"
-        fail_count=$(printf '%s\n' "$failures" | grep -c .)
-    else
-        printf '  (none)\n'
-        fail_count=0
-    fi
-} > "$report"
-
-emit "Files not downloaded: ${fail_count:-0} (see report)"
-
-if ((failed_drives > 0)); then
-    emit "Sync report: ${failed_drives} drive(s) had transfer errors"
-    printf 'Report written: %s\n' "$report" >&2
-    exit 1
+# Deleted/overwritten files rclone moved into --backup-dir (recovery net). Empty
+# when nothing changed or under --dry-run (sync does not move files then).
+backed_up=0
+if (( !dry_run )) && [[ -d "$backup_root" ]]; then
+    backed_up=$(find "$backup_root" -type f | wc -l)
 fi
-printf 'Report written: %s\n' "$report"
+emit "Files backed up (deleted/overwritten): ${backed_up} (in ${backup_root})"
+
+write_report_and_exit 0

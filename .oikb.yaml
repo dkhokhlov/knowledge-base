@@ -50,3 +50,10 @@ sources:
         - "*.[hH]"
         - "*.[iI][nN][cC]"
         - "*.[cC][fF][gG]"
+      exclude:
+        # Empty (0-byte) source files: OWUI POST /api/v1/files/ rejects a 0-byte
+        # upload with 400, and oikb has no min-size filter (only include/exclude
+        # globs + max-size), so without this it retries the 0-byte file every
+        # cycle. Generic test-runner basename (no PII); the single '*' spans '/'
+        # in fnmatch, so it matches at any depth including the source root.
+        - "*run_tests.py"

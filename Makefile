@@ -10,7 +10,7 @@ DATA_DIR := ./data
 .PHONY: help bootstrap preflight pull pull-models start stop restart logs ps config \
         health test test-e2e api-keys admin-signup rag-config \
         gdrive-sync gdrive-index-bootstrap gdrive-status \
-        shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
+        shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all clean
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -50,7 +50,13 @@ start: ## Start the stack detached (run `make bootstrap` first)
 	case "$$OLLAMA_HOST" in \
 	  *'<ollama-host>'*) echo "REFUSING start: OLLAMA_HOST is still the '<ollama-host>' placeholder — set OLLAMA_HOST (shell env or .env) to the real Ollama URL"; exit 1;; \
 	esac; \
-	$(COMPOSE) up -d
+	if [ -n "$${GDRIVE_KB_ID:-}" ]; then \
+	  echo "gdrive indexer provisioned (GDRIVE_KB_ID set) — starting stack with --profile gdrive"; \
+	  $(COMPOSE) --profile gdrive up -d; \
+	else \
+	  echo "gdrive indexer not provisioned (GDRIVE_KB_ID unset) — starting stack without it (run: make gdrive-index-bootstrap to add it)"; \
+	  $(COMPOSE) up -d; \
+	fi
 
 stop: ## Stop the stack (keeps containers + data)
 	@$(COMPOSE) stop
@@ -78,7 +84,7 @@ test: ## Run system integration tests against the running stack (run: make start
 	  echo; echo "=== $$t ==="; bash "$$t" || status=1; \
 	done; exit $$status
 
-test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch + full test suite + e2e
+test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch (incl. gdrive indexer) + full test suite + e2e
 	@set -e; \
 	echo "==> DESTRUCTIVE: wipes all data and re-provisions from scratch."; \
 	test -f .env.local || { echo "REFUSING: no .env.local (no admin creds to stash) — run make bootstrap + fill OPENWEBUI_TEST_USER/PASSWORD first" >&2; exit 1; }; \
@@ -89,7 +95,7 @@ test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch + full test suite + e
 	{ printf 'OPENWEBUI_TEST_USER=%s\nOPENWEBUI_TEST_PASSWORD=%s\n' "$$OPENWEBUI_TEST_USER" "$$OPENWEBUI_TEST_PASSWORD"; \
 	  [ -n "$${OPENWEBUI_USER:-}" ] && printf 'OPENWEBUI_USER=%s\n' "$$OPENWEBUI_USER" || true; } > $$stash; \
 	trap 'rm -f $$stash' EXIT; \
-	$(MAKE) clear-all && \
+	$(MAKE) clear-all && unset GDRIVE_KB_ID OIKB_API_KEY && \
 	$(MAKE) bootstrap && \
 	./scripts/e2e-restore-creds.sh $$stash && \
 	$(MAKE) preflight && \
@@ -100,6 +106,8 @@ test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch + full test suite + e
 	$(MAKE) admin-signup && \
 	$(MAKE) api-keys && \
 	$(MAKE) rag-config && \
+	$(MAKE) gdrive-index-bootstrap && \
+	./scripts/e2e-wait-indexer.sh && \
 	$(MAKE) test && \
 	echo "==> test-e2e PASS"
 
@@ -120,7 +128,7 @@ rag-config: ## Set the strict-grounding RAG template in Open WebUI (run after `m
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
 	@./scripts/rag-config.sh
 
-gdrive-sync: ## Download all shared-drive files into ./gdrive
+gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup)
 	@./scripts/gdrive-sync
 
 gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant agent read + start the indexer (run after `make api-keys`)
@@ -149,11 +157,16 @@ shell-caddy: ## Shell into the Caddy gateway container
 clear: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.local.
 	@$(COMPOSE) down --remove-orphans
 
-clear-all: ## Full wipe: clear + DELETE ./data + remove .env.local. Keeps .env and configs.
+clear-all: ## Full wipe: clear + DELETE ./data + ./.gdrive-backup + remove .env.local. Keeps .env and configs.
 	@$(COMPOSE) down --remove-orphans --volumes
 	@# Remove ./data as root via a throwaway container: OWUI (root) and Neo4j
 	@# (neo4j uid) write bind-mount files the host user cannot delete, so a host
 	@# `rm -rf` fails midway and never reaches `rm -f .env.local`.
 	@docker run --rm -v "$(CURDIR)/$(DATA_DIR):/data" alpine sh -c "rm -rf /data/*"
 	@rm -f .env.local
-	@echo "Wiped containers, ./data, and .env.local. .env, graphiti/config.yaml, caddy/Caddyfile are preserved."
+	@rm -rf ./.gdrive-backup
+	@echo "Wiped containers, ./data, ./.gdrive-backup, and .env.local. .env, graphiti/config.yaml, caddy/Caddyfile are preserved."
+
+clean: ## Remove the rclone --backup-dir retention tree (./.gdrive-backup). Non-destructive: does not touch the stack, ./data, or .env.local.
+	@rm -rf ./.gdrive-backup
+	@echo "Removed ./.gdrive-backup (rclone sync backup retention)."

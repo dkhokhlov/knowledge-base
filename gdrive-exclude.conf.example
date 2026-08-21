@@ -1,0 +1,31 @@
+# rclone exclude list for gdrive-sync (INI format) — TEMPLATE.
+# Copy to ./gdrive-exclude.conf (gitignored) and edit with your Drive's paths.
+# LOCAL ONLY: ./gdrive-exclude.conf holds Drive file paths (business-sensitive,
+# PII) and is deliberately NOT committed — keep this template generic.
+#
+# [<drive name>]   section: the patterns below apply ONLY to that shared drive,
+#                  matched by name. Name the section exactly as the drive
+#                  appears in Drive; the wrapper resolves the name to the drive
+#                  id at runtime (from `rclone backend drives`).
+# [*]              special section: patterns apply to EVERY drive (use for
+#                  content types you never want from any drive, e.g. *.tmp).
+# Patterns are passed VERBATIM to rclone --exclude-from (rclone-native):
+#   no "/"  -> matches the basename at ANY depth (file.pdf, *glob*, *.tmp,
+#              or a lone "*" = every file in the section);
+#   "/"     -> matches the full path relative to the drive root
+#              (sub/dir/file.pdf).
+# Per-drive entries are for permanently non-downloadable files: Drive-admin
+# download-forbidden (403 cannotDownloadFile / 'forbidden to download') or
+# dangling shortcuts (target gone). Append an entry when a sync fails fast on a
+# new non-downloadable file; delete it only when the file becomes downloadable.
+# Transient errors (network/5xx) are NOT listed here — those fail-fast.
+# The sync report includes a "Files excluded" section listing the Drive files
+# that matched these patterns (parsed from rclone's DEBUG log).
+
+[*]
+*.tmp
+
+[<drive name>]
+some-file.pdf
+some-glob*.*
+sub/dir/file.pdf

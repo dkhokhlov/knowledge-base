@@ -136,7 +136,8 @@ if not isinstance(src_state, dict):
 oikb_status = src_state.get("status", "?")
 last_sync = iso_from_epoch(src_state.get("last_sync"))
 next_sync = src_state.get("next_sync_in", "-")
-oikb_error = src_state.get("error")
+oikb_errors = src_state.get("errors") or []
+oikb_warnings = src_state.get("warnings") or []
 
 hist = oikb_get("/history?limit=20", auth=True)
 history_rate = None  # files/sec from last successful sync
@@ -151,9 +152,13 @@ if isinstance(hist, dict) and isinstance(hist.get("entries"), list):
 
 # --- report -----------------------------------------------------------------
 print("indexer container : %s" % (CONT_STATUS or "NOT RUNNING"))
+src_note = ""
+if oikb_errors:
+    src_note = "  errors=%d (%s)" % (len(oikb_errors), str(oikb_errors[0]).replace("\n", " ")[:140])
+elif oikb_warnings:
+    src_note = "  warnings=%d" % len(oikb_warnings)
 print("oikb source       : status=%s last_sync=%s next_in=%s%s" % (
-    oikb_status, last_sync, next_sync,
-    (" error=%s" % oikb_error) if oikb_error else ""))
+    oikb_status, last_sync, next_sync, src_note))
 idx0 = indexed_count()
 if idx0 is None:
     print("indexed (OWUI KB) : <not visible to agent key — run: make gdrive-index-bootstrap>")
@@ -163,7 +168,10 @@ if idx0 is None:
 print("source (gdrive/)  : %d allowlisted files" % source_count)
 remaining = source_count - idx0
 if remaining <= 0:
-    print("indexed (OWUI KB) : %d  |  sync COMPLETE (indexed >= source)" % idx0)
+    if oikb_errors:
+        print("indexed (OWUI KB) : %d  |  counts match but last sync had %d error(s) — see oikb source line" % (idx0, len(oikb_errors)))
+    else:
+        print("indexed (OWUI KB) : %d  |  sync COMPLETE (indexed >= source)" % idx0)
     sys.exit(0)
 
 # Not finished: sample the KB count over a short window to estimate rate.
@@ -181,11 +189,17 @@ if rate and rate > 0:
     print("ETA               : %s  (rate=%.2f files/s, %d newly indexed in %ds)" % (
         fmt_eta(eta), rate, (idx1 - idx0) if idx1 else 0, SAMPLE_SECS))
 elif oikb_status in ("ok", "partial") and idx1 is not None and idx1 == idx0:
-    # Plateaued with the source not fully indexed: the remaining files are not
-    # pending — they are duplicate-content (OWUI dedups by hash, rejects with
-    # 400) or over .oikb.yaml max-size, so oikb will never link them. status is
-    # "partial" permanently in that case; report done-with-skips, not an ETA.
-    print("remaining         : not pending — duplicate-content (OWUI dedups) or over max-size, skipped")
+    # Plateaued with the source not fully indexed and no progress in the sample
+    # window: the remaining files are not pending. If oikb logged per-cycle
+    # errors, those files are failing to link (e.g. OWUI rejects a file with
+    # 400) — see the oikb source line. Otherwise the remaining are duplicate-
+    # content (OWUI dedups by hash, rejects with 400) or over .oikb.yaml
+    # max-size, so oikb will never link them. status is "partial" permanently in
+    # either case; report done-with-skips, not an ETA.
+    if oikb_errors:
+        print("remaining         : not pending — %d file(s) failing to link (see errors above); the rest duplicate-content/over-max-size" % len(oikb_errors))
+    else:
+        print("remaining         : not pending — duplicate-content (OWUI dedups) or over max-size, skipped")
     print("ETA               : n/a (sync plateaued; no files in flight)")
 else:
     print("ETA               : unknown (no observed rate yet — first sync still running)")

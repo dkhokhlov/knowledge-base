@@ -162,6 +162,32 @@ printf 'OK    wrote GDRIVE_KB_ID + OIKB_API_KEY to .env.local\n'
 # --no-deps: openwebui is already running healthy; do NOT recreate it (or any other
 # service) just to satisfy gdrive-indexer's depends_on.
 set -a; . ./.env; . ./.env.local; set +a
-docker compose up -d --no-deps --force-recreate gdrive-indexer
+
+# Step 5a: ensure data/oikb is writable by the oikb runtime user BEFORE starting
+# the indexer. oikb persists history.db + config.yaml to OIKB_CONFIG_DIR, which
+# compose.yml sets to /data (the data/oikb bind mount) so state survives
+# container recreation. oikb runs as the image's default user (appuser), so the
+# host-owned data/oikb must be chowned to that uid:gid or appuser cannot write
+# /data/history.db. Detect the uid:gid dynamically from the image (NOT
+# hardcoded) and chown the dir to it. No fallback: a failure to detect or chown
+# aborts the bootstrap — a wrong-ownership dir would silently lose history.db
+# every restart rather than fail loudly.
+oikb_tag="${OIKB_IMAGE_TAG:-0.4.0}"
+if ! oikb_ugid="$(docker run --rm --entrypoint sh "ghcr.io/open-webui/oikb:${oikb_tag}" \
+        -c 'printf "%s:%s" "$(id -u)" "$(id -g)"')"; then
+  printf 'FAIL  cannot detect oikb runtime uid:gid from image %s (docker run failed — is the image pulled / is docker running?)\n' "$oikb_tag" >&2
+  exit 1
+fi
+if [ -z "$oikb_ugid" ] || [ "$oikb_ugid" = ":" ]; then
+  printf 'FAIL  oikb uid:gid detection returned empty ("%s") from image %s\n' "$oikb_ugid" "$oikb_tag" >&2
+  exit 1
+fi
+if ! chown "$oikb_ugid" data/oikb; then
+  printf 'FAIL  cannot chown data/oikb to %s (run this script as a user that can chown it, or with sudo)\n' "$oikb_ugid" >&2
+  exit 1
+fi
+printf 'OK    chowned data/oikb to %s (oikb runtime uid:gid)\n' "$oikb_ugid"
+
+docker compose --profile gdrive up -d --no-deps --force-recreate gdrive-indexer
 printf '\nDone. gdrive KB id: %s\n' "$KB_ID"
 printf 'Indexer status: make gdrive-status   |   logs: docker logs -f kb-gdrive-indexer\n'

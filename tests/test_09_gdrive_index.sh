@@ -66,25 +66,35 @@ else
 fi
 
 # --- oikb source sync status -------------------------------------------------
-# oikb /health source status is "ok" when every allowlisted file is indexed,
-# "partial" when some could not be linked (expected + permanent when the source
-# has duplicate-content files: OWUI dedups by content hash and rejects the
-# duplicate with 400, so oikb records it as a per-cycle error and never reaches
-# "ok"). "ok" and "partial" are both healthy steady states here; only "error"/
-# "running"-stuck is a failure. Extract just the status token (before the '|').
+# oikb 0.4.0 per-source status (daemon.py): "running" while a sync cycle is
+# active, "success" when the cycle completed with no errors, "partial" when it
+# completed with some per-file errors, "error" on an exception. The daemon
+# syncs on a 30s interval, so a one-shot read can land mid-cycle ("running") on
+# an otherwise-healthy indexer. Poll briefly (60s) for a completion state
+# (success/ok/partial); only a stuck "running" or "error" is a failure. ("ok" is
+# the top-level daemon health string, kept here defensively for older oikb.)
 section "oikb gdrive source status"
-src_state=$(docker exec "$CTN" python -c \
-  "import urllib.request,json; d=json.load(urllib.request.urlopen('http://localhost:8080/health',timeout=5)); s=d.get('sources',{}).get('/gdrive',{}); print(s.get('status','?'), '|', s.get('error',''))" \
-  2>/dev/null || true)
-oikb_status="${src_state%% *}"
-if [ "$oikb_status" = "ok" ] || [ "$oikb_status" = "partial" ]; then
-  pass "oikb source status=${oikb_status}"
-else
-  fail "oikb source status=${oikb_status} (${src_state})"
-  fail "first sync may still be running, or OWUI is unreachable from the sidecar; check: docker logs $CTN"
-  finish
-  exit 1
-fi
+oikb_status=""
+src_state=""
+for _ in $(seq 1 12); do
+  src_state=$(docker exec "$CTN" python -c \
+    "import urllib.request,json; d=json.load(urllib.request.urlopen('http://localhost:8080/health',timeout=5)); s=d.get('sources',{}).get('/gdrive',{}); print(s.get('status','?'), '|', s.get('error',''))" \
+    2>/dev/null || true)
+  oikb_status="${src_state%% *}"
+  case "$oikb_status" in
+    success|ok|partial) break;;
+  esac
+  sleep 5
+done
+case "$oikb_status" in
+  success|ok|partial) pass "oikb source status=${oikb_status}";;
+  *)
+    fail "oikb source status=${oikb_status} (${src_state})"
+    fail "indexer did not reach a completion state (success/partial) in 60s - stuck mid-cycle or error; check: docker logs $CTN"
+    finish
+    exit 1
+    ;;
+esac
 
 # --- OWUI KB has files indexed ----------------------------------------------
 # file_count is exposed only on the LIST endpoint (GET /api/v1/knowledge/), not

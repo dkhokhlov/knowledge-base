@@ -6,8 +6,133 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`gdrive-sync` now delta-syncs with backup retention.** Switched from
+  `rclone copy` (additive, never deleted) to `rclone sync --backup-dir
+  --delete-after`: files removed from Drive are deleted from `./gdrive` (and
+  oikb drops them from the KB on its next cycle), and deleted/overwritten files
+  are moved into a dated `./.gdrive-backup/<UTC-ISO>/` dir OUTSIDE `./gdrive` (so
+  oikb does not re-index them) as a recovery net. `sync` deletes to match the
+  source, so a bad/empty Drive mount empties `./gdrive` — but the removed files
+  are recoverable from `./.gdrive-backup/`, not gone. The sync report gains a
+  `backup-dir` header and a "Files backed up (deleted/overwritten)" line.
+  `./.gdrive-backup/` is gitignored; new `make clean` clears it (so does
+  `make clear-all`).
+- **`gdrive-sync` fail-fast + empty-source guard + non-downloadable exclude
+  list.** Any transfer error now aborts the run immediately (the report is still
+  written with the failing files + rclone reasons) instead of continuing to the
+  next drive. A per-drive hard guard lists the remote drive before its sync and
+  refuses to sync if it has 0 remote files (an empty remote — bad mount, revoked
+  access, transient API return — would mass-delete the local drive dir, since
+  `sync` deletes to match the source). Permanently non-downloadable files
+  (Drive-admin download-forbidden `403 cannotDownloadFile` / `forbidden to
+  download`, and dangling shortcuts) are listed in a new gitignored
+  `./gdrive-exclude.conf` (`<drive_id>\t<drive-relative-path>` rows, drive-id
+  keyed so per-drive `--exclude-from` scoping does not mis-exclude same-named
+  files in other drives); `gdrive-sync` extracts the current drive's rows at
+  runtime and passes them to rclone `--exclude-from`, so the rest of each drive
+  downloads cleanly (exit 0). Append a row when a sync fails fast on a new
+  non-downloadable file; transient errors (network/5xx) are NOT excluded (those
+  fail fast by design). The exclude file holds Drive file paths
+  (business-sensitive) and is deliberately NOT committed. Also fixed a log
+  parser bug: per-file failures are now split on the fixed rclone prefix
+  `": Failed to copy: "` instead of the first `": "` (filenames can contain
+  `": "`, e.g. `"Report: Q4 review - …"`, which truncated the path).
+- **`gdrive-sync` sets owner-only permissions.** After each sync, `./gdrive`
+  (and `./.gdrive-backup/`) are normalized to files `600` / dirs `700` (Drive
+  content is business-sensitive; rclone v1.60 has no `--umask`). The oikb
+  sidecar reads `./gdrive` read-only as uid 1000 (`appuser`) == host owner, so
+  owner-only is still readable by the container.
+- **`gdrive-sync` exclude file switched to an INI format; report gains
+  COPY/UPDATE/DELETE + Files-excluded sections.** `./gdrive-exclude.conf`
+  (gitignored — Drive paths are PII) is now an INI file: `[<drive name>]`
+  sections hold patterns scoped to that shared drive (matched by name; the
+  wrapper resolves name -> id at runtime from `rclone backend drives`), and a
+  `[*]` section holds all-drives patterns. Patterns are passed VERBATIM to
+  rclone `--exclude-from` (rclone-native: no `/` matches the basename at any
+  depth, `/` matches the full path), so a global pattern under `[*]` (e.g.
+  `*.tmp`) excludes that type from every drive and a lone `*` under a drive
+  excludes that whole
+  drive. The wrapper converts the INI file to `--exclude-from` per drive on the
+  fly (the file is no longer in the old `<drive_id>\t<path>` tab format). The
+  tracked `gdrive-exclude.conf.example` documents the format (the data file
+  stays gitignored — no PII in the repo). The per-run
+  `.sync-reports/sync-<UTC-ISO>.report` now lists every copied (`COPY`),
+  updated (`UPDATE`), and deleted (`DELETE`) file (one per line, prefixed with
+  its drive name), a "Files excluded" section (Drive files that matched the
+  exclude patterns, parsed from rclone's `DEBUG : …: Excluded` lines — the run
+  now logs at `--log-level DEBUG` for this), and a "Files not downloaded"
+  section (failing paths + rclone reasons). Filenames containing `": "` (e.g.
+  `"Report: Q4 review - …"`) are split on the fixed rclone message,
+  not the first `": "`, so the path is not truncated.
+- **`gdrive-sync` report gains a `dups` column + "Duplicates ignored" section;
+  COPY/UPDATE/DELETE now correct under `--backup-dir`; name-collision guard.**
+  The per-drive table adds a `dups` column and the report a "Duplicates ignored"
+  section: when Drive holds two files at the same path (Drive permits duplicate
+  names), rclone syncs one and ignores the rest (`Duplicate object found in
+  source - ignoring`). `remote` counts every object, `local` only the one rclone
+  keeps, so `dups` makes `remote − excluded − dups = local` reconcile (was an
+  unexplained 1-file gap). The COPY/UPDATE/DELETE classifier now handles the
+  `--backup-dir` verbs: an overwrite logs `Moved` (old to backup) + `Copied
+  (new)`, classified `UPDATE`; a delete logs `Moved` + `Moved into backup dir`,
+  classified `DELETE` — previously both were miscounted (overwrites as `COPY`,
+  deletes invisible), because the parser only recognized the no-backup-dir verbs
+  `Copied (replaced existing)` / `Deleted`. A name-collision guard aborts before
+  sync if two drives map to the same local dir name (same Drive name or a
+  sanitization collision like `A:B` -> `A_B`), preventing the second sync from
+  deleting the first drive's files in the shared dir.
+- **`gdrive-sync` takes a concurrency lock.** A hidden
+  `<destination>/.sync.lock` (holder PID) prevents two runs from racing on the
+  same destination — a second `rclone sync` would delete the first run's
+  in-flight files (sync deletes to match source). A stale lock whose PID is no
+  longer alive (crashed/killed holder) is retaken (`kill -0` liveness probe);
+  the run aborts with exit 1 if another live run holds the lock. Release is on
+  every exit path (the EXIT trap), gated by a `lock_held` flag so a contention
+  abort does not delete the other holder's lock. PID reuse is a residual.
+- **`make start` brings the gdrive indexer back when provisioned.** It now adds
+  `--profile gdrive` when `GDRIVE_KB_ID` is set in `.env.local`, so a
+  provisioned stack's `make restart` re-creates the indexer; with it unset,
+  `make start` still starts the core stack only (the indexer is started by
+  `make gdrive-index-bootstrap`). The `gdrive-indexer` compose service is now
+  profile-gated (`profiles: [gdrive]`): it cannot start unprovisioned
+  (`.oikb.yaml` interpolates `kb-id` to `''` -> oikb exits 1 -> restart loop),
+  so `make start` never creates a broken sidecar.
+- **`make test-e2e` provisions + waits for the gdrive indexer.** The
+  destructive e2e run now runs `gdrive-index-bootstrap` + the new
+  `e2e-wait-indexer` step after `rag-config`, then runs the full `make test`
+  suite against a synced gdrive KB (was: core stack only). It unsets
+  `GDRIVE_KB_ID`/`OIKB_API_KEY` before `clear-all` so the wipe re-provisions the
+  indexer from scratch (matches the "start from a clean state" rule).
+- **oikb state persists across container recreation.** The `gdrive-indexer`
+  service sets `OIKB_CONFIG_DIR=/data` (the `data/oikb` bind mount), so
+  `history.db` + `config.yaml` land on the host tree and survive recreation
+  (oikb's default `~/.config/oikb` is ephemeral in-container). `make
+  gdrive-index-bootstrap` chowns `data/oikb` to the oikb runtime uid:gid
+  (detected dynamically from the image, not hardcoded; no fallback — a wrong
+  owner would silently lose `history.db` every restart, so a detect/chown
+  failure aborts the bootstrap).
+
 ### Added
 
+- **Custom Open WebUI overlay image (path-aware dedup hash + upload
+  idempotency).** New `open-webui/` dir builds a thin overlay on the pinned
+  official OWUI 0.11.0 image (digest-pinned, not the rolling `:main` tag) that
+  applies two build-time backend patches via fail-loud apply scripts
+  (`apply_path_hash.py`, `apply_upload_idempotency.py`; anchors asserted
+  exactly-once, exit 1 on drift). See `open-webui/PATCH.md` for the why, the
+  anchors, and the rebase steps. `compose.yml` points the `openwebui` service at
+  `ghcr.io/dkhokhlov/open-webui:0.11.0-pathdedup-idem` (`pull_policy: never`;
+  built locally, not pushed). Revert to stock by setting
+  `OPENWEBUI_IMAGE_TAG=main` and removing the `build:` block; to run the dedup
+  patch only, set `0.11.0-pathdedup`. Build seconds, not minutes (no frontend
+  rebuild; two backend router files patched in place).
+- `scripts/e2e-wait-indexer.sh` — waits for the gdrive indexer (oikb) to reach a
+  healthy source-sync completion state (`success`/`ok`/`partial`) after
+  `gdrive-index-bootstrap`, so `test_09_gdrive_index` runs against a synced KB
+  instead of a first-sync-in-progress state. Fail-loud (exit 1) on a stuck
+  `running`/`error` within the timeout; skips cleanly when `./gdrive` has no
+  allowlisted files.
 - **gdrive auto-indexing into RAG (oikb sidecar).** New `gdrive-indexer` compose
   service runs Open WebUI's official sync companion
   (`ghcr.io/open-webui/oikb:0.4.0`) as a daemon, auto-syncing the host `./gdrive`
@@ -34,6 +159,74 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixes
 
+- **oikb gdrive-indexer churn — unbounded disk growth (the "2b" bug).** oikb
+  re-uploads files every `GDRIVE_INDEX_INTERVAL` cycle, and OWUI's upload
+  handler minted a new uuid + on-disk blob + `FileModel` row on every POST with
+  no lookup for an existing file at the same `(knowledge_id, directory_id,
+  filename)`. Two failure modes piled up new storage items every cycle and never
+  cleaned them up, so disk grew without bound:
+  (a) **`DUPLICATE_CONTENT`** — OWUI dedups a KB by the SHA-256 of the extracted
+  text only, so two source files with the same content at different paths
+  collided; the second was rejected and never linked as a member. oikb has no
+  per-file skip memory, so it re-uploaded the rejected file every cycle.
+  (b) **`EMPTY_CONTENT`** — files that fail extraction (genuinely text-empty:
+  image-only PDFs/slides, empty office docs) never become KB members, so
+  `sync/diff` (which builds its known-set from members only) always reported
+  them `added`, oikb re-uploaded them every cycle, and `sync/cleanup` (which
+  runs only for `modified`/`deleted` members) never reached them. The dedup
+  hash is computed after the `EMPTY_CONTENT` check, so the dedup fix alone
+  could not help. Fixed with two build-time patches in the custom OWUI overlay
+  image:
+  - **Path-aware dedup hash** (`retrieval.py`, 2 sites): the dedup hash now
+  includes the KB directory UUID + filename, so same-content-different-path
+  files get different hashes and both index. Same path + name + content stays
+  idempotent (same hash -> no re-process). When there is no `directory_id`
+  (non-KB uploads, STT, `/file/add`), the hash is filename-aware — a safe
+  improvement, no caller breaks.
+  - **Upload idempotency** (`files.py`, 1 site): before minting a new uuid,
+  the handler looks for an existing `FileModel` matching the same logical
+  identity `(meta.data.knowledge_id, meta.data.directory_id, filename)`. Same
+  identity + same byte hash -> reuse the existing `FileModel` + blob (no new
+  storage, no re-extract); same identity + different hash (a failed file later
+  edited to have content) -> reclaim the stale orphan and fall through to a
+  normal new upload (self-heal); no match -> normal new upload. Guarded to oikb
+  KB uploads only (metadata carries both `knowledge_id` and `file_hash`); every
+  other caller is unchanged. Identity is path-based, not byte-hash, so it is
+  orthogonal to the dedup patch (same-content-different-path files keep
+  distinct identities and still upload as separate members).
+  Verified on a clean state (`make test-e2e`): disk stays flat across sync
+  cycles (one storage item per file, no per-cycle pile-up), the failed files
+  are reused (logged `upload-idempotency reuse`), and same-content-different-
+  path files both link as members. oikb still re-POSTs the non-member files
+  each cycle, but each re-POST is now a cheap idempotent return (no new blob,
+  no re-extract) — disk does not grow. The `oikb-side` alternative (skip
+  already-attempted files in oikb) was rejected: oikb does not generate the
+  file ids (OWUI does), and oikb's `history` is per-sync not per-file, so a
+  skip fix needs new per-file tracking + a custom oikb image — more invasive
+  than the one-file OWUI upload fix. Residual: failed-to-index files stay
+  unlinked (they are genuinely text-empty and will not extract without OCR);
+  if an extraction engine / OCR is enabled later, delete those orphans once
+  and the next cycle re-uploads + extracts them. Deferred follow-up (not
+  applied): patch `sync_knowledge_diff` to index orphan `FileModel`s by
+  `meta.data.knowledge_id` so failed files are reported `unchanged` and oikb
+  stops re-POSTing them entirely (eliminates the cheap no-op cycle); same
+  JSON-on-SQLite scaling concern as the idempotency lookup — acceptable for
+  this single-KB overlay, not for a large multi-tenant instance.
+- **oikb retries a 0-byte source file every cycle.** OWUI `POST /api/v1/files/`
+  rejects a 0-byte upload with `400`, and oikb has no min-size filter (only
+  include/exclude globs + max-size), so a 0-byte source file was re-attempted
+  every cycle. `.oikb.yaml` now excludes the generic 0-byte test-runner
+  basename `*run_tests.py` (no PII; the `*` spans `/` in fnmatch so it matches
+  at any depth).
+- **oikb `history.db` lost on container recreation.** With the default
+  `OIKB_CONFIG_DIR` (`~/.config/oikb`, ephemeral in-container), oikb's sync
+  history was lost every recreation, so every restart re-synced from scratch.
+  Fixed by the `OIKB_CONFIG_DIR=/data` + `data/oikb` chown change above.
+- **`test_09_gdrive_index` could read oikb status mid-cycle.** The oikb source
+  status check was a one-shot read; the daemon syncs every 30s, so it could
+  land on `running` (transient) on an otherwise-healthy indexer and fail the
+  test. It now polls up to 60s for a completion state
+  (`success`/`ok`/`partial`); only a stuck `running` or `error` is a failure.
 - **OWUI Chroma fd exhaustion under bulk ingest.** OWUI's RAG store (Chroma
   1.5.x, rust backend) opens a SQLite db per collection; the first gdrive sync
   creates 100s of collections and exhausted the default 1024 fd soft limit →
@@ -61,6 +254,37 @@ project adheres to [Semantic Versioning](https://semver.org/).
 - **`gdrive-status` ETA wording when plateaued.** When the sync plateaus at
   `status=partial` (duplicate-content / over-max-size files OWUI/oikb skip, not
   pending), it now reports "not pending" instead of "first sync still running".
+- **`gdrive-status` did not surface oikb sync errors (wrong field name).** It
+  read `src_state.get("error")` (singular) but oikb's `/health` returns `errors`
+  (a list) and `warnings` (a list), so the error was always dropped — a sync
+  stuck at `status=partial` with a per-cycle file-link error (e.g. OWUI rejects
+  a file with `400`) reported nothing wrong. `gdrive-status` now reads
+  `errors`/`warnings`, prints `errors=N (<first error>)` on the oikb source
+  line, notes the error count in the "counts match" branch, and attributes a
+  no-progress plateau to failing-to-link files (not to duplicate-content) when
+  errors are present. Exit code is unchanged (`partial` stays a healthy steady
+  state).
+- **`gdrive-sync` report crashed on fail-fast (`total_excl` unbound).**
+  `total_excl`/`total_dups` were computed only after the loop, but `print_drive_table`
+  runs (via `write_report_and_exit`) on the fail-fast / empty-source paths inside
+  the loop — under `set -u` that is an unbound-variable exit, so the required
+  failure report was not written. They are now initialized before the loop.
+- **`gdrive-sync` miscounted overwrites as COPY and missed deletes under
+  `--backup-dir`.** The log parser only matched `Copied (replaced existing)` /
+  `Deleted`, but `rclone sync --backup-dir` logs overwrites as `Moved` + `Copied
+  (new)` and deletes as `Moved` + `Moved into backup dir`. So `UPDATE` was always
+  0, deletes invisible, and `COPY` inflated by overwrites. The classifier now
+  treats `Moved` as pending and resolves it to `UPDATE` (a fresh `Copied (new)`
+  follows) or `DELETE` (nothing follows), keeping the old verbs as a fallback.
+  Verified against a local `--backup-dir` sync.
+- **`gdrive-sync` dropped failures whose path began with `Failed `.** The retry-
+  summary skip used bare prefixes (`Attempt `, `There were `, `Failed `), so a
+  real file named e.g. `Failed invoice.pdf` was dropped from "Files not
+  downloaded". Now matched on the rclone summary's numeric form
+  (`Attempt N/M`, `There were N …`) so real paths are kept.
+- **`gdrive-sync` report file was mode `0644`, not owner-only.** Written after
+  `normalize_perms` under umask `022`, the report was `0644` despite the stated
+  owner-only policy. Now `chmod 600` after writing (parent dir is `0700`).
 
 ## [v1.1.0] — 2026-08-20
 

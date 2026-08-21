@@ -162,13 +162,75 @@ RAG the KB (`write_access=False`).
 
 ### Populating the source
 
-`make gdrive-sync` runs `rclone copy` of the shared drive into `./gdrive`
-(manual; `gdrive/` is gitignored except a `.gitkeep` marker). It writes
-`./gdrive/.sync-reports/sync-<UTC-ISO>.report` with the transfer summary and a
-"Files not downloaded" section — admin-protected / download-restricted Drive
-files surface with their 403 reason. The exit code is non-zero if a drive had
-transfer errors; downloadable files are not lost. oikb picks up new/changed
-files on its next cycle (≤ `GDRIVE_INDEX_INTERVAL`).
+`make gdrive-sync` runs `rclone sync --backup-dir --delete-after` of the shared
+drive into `./gdrive` (manual; `gdrive/` is gitignored except a `.gitkeep`
+marker). `sync` is delta: files removed from Drive are deleted from `./gdrive`
+(and oikb drops them from the KB on its next cycle). Deleted/overwritten files
+are NOT lost — rclone moves them (in their original hierarchy) into a dated
+`./.gdrive-backup/<UTC-ISO>/` dir, which sits OUTSIDE `./gdrive` so oikb does not
+re-index them. That backup dir is the recovery net for a bad/empty mount: `sync`
+deletes to match the source, so an empty Drive mount empties `./gdrive` — but
+the removed files are in `./.gdrive-backup/`, not gone. `make clean` clears the
+backup tree (so does `make clear-all`).
+
+**Fail-fast + empty-source guard.** Any transfer error aborts the run
+immediately (the report is still written with the failing files + rclone
+reasons) — the script does NOT continue to the next drive. Before each drive's
+sync, a per-drive hard guard lists the remote drive and refuses to sync if it
+has 0 remote files (an empty remote — bad mount, revoked access, transient API
+return — would mass-delete the local drive dir, since `sync` deletes to match
+the source). The account-wide "no drives visible" case is caught earlier
+(`drive_count == 0`); the per-drive guard catches a single drive coming back
+empty. A name-collision guard aborts before sync if two drives map to the same
+local dir name (same Drive name, or a sanitization collision like `A:B` ->
+`A_B`); without it, the second sync would delete the first drive's files in the
+shared dir.
+
+**Exclude list (INI format).** `./gdrive-exclude.conf` (gitignored — Drive
+file paths are business-sensitive, no PII in the repo; the tracked
+`gdrive-exclude.conf.example` documents the format) is an INI file:
+`[<drive name>]` sections list patterns that apply only to that shared drive,
+matched by name; a `[*]` section lists patterns that apply to every drive.
+`gdrive-sync` resolves each section name to the drive id at runtime (from
+`rclone backend drives`) and converts the current drive's section plus the
+`[*]` section into rclone `--exclude-from` on the fly, so the rest of each
+drive downloads cleanly (exit 0). Patterns are passed VERBATIM (rclone-native):
+a pattern with no `/` matches the basename at any depth (`file.pdf`,
+`*draft*`, `*.tmp`, or a lone `*` = every file in the section); a pattern
+with `/` matches the full path relative to the drive root
+(`sub/dir/file.pdf`). Per-drive scoping by name avoids mis-excluding same-named
+files in other drives. Per-drive entries are for permanently non-downloadable
+files: admin download-forbidden (`403 cannotDownloadFile` / `forbidden to
+download`) or dangling shortcuts (target gone). When a sync fails fast on a NEW
+non-downloadable file, append an entry to `./gdrive-exclude.conf` and re-run;
+delete it only when the file becomes downloadable. Transient errors
+(network/5xx) are NOT excluded — those fail fast by design. (Detection: run
+`rclone copy gdrive: ./<scratch> --drive-team-drive <id> --log-level DEBUG
+--log-file <log>` per drive; the 403/shortcut paths in the log are the exclude
+entries. Which drives/files are affected is specific to your Drive and is NOT
+recorded here — it lives only in the gitignored `./gdrive-exclude.conf`.)
+
+**Global excludes.** The `[*]` section of `./gdrive-exclude.conf` holds
+all-drives patterns applied verbatim to every drive's `--exclude-from` — a
+basename glob with no `/` matches at any depth, so a type you never want
+(e.g. `*.tmp` temp files) is never downloaded into `./gdrive` or the backup
+dir. Globals live in the gitignored file (not the tracked script).
+
+The sync writes `./gdrive/.sync-reports/sync-<UTC-ISO>.report` (mode `0600`) with
+the transfer summary, a per-drive `remote` / `local` / `excluded` / `dups` table,
+a "Files changed" breakdown (`COPY` / `UPDATE` / `DELETE`, one line per file
+with its drive prefix), a "Files excluded" section (Drive files that matched the
+exclude patterns, parsed from rclone's `DEBUG : …: Excluded` log lines — this is
+why the run logs at `--log-level DEBUG`), a "Duplicates ignored" section (Drive
+files rclone skipped because another file shares the same path — Drive permits
+duplicate names; `remote` counts every object, `local` only the one rclone
+keeps, so `dups` makes the table reconcile), and a "Files not downloaded"
+section (failing paths + their rclone reason). The `COPY` / `UPDATE` / `DELETE`
+classification handles `--backup-dir` verbs: an overwrite logs `Moved` (old copy
+to backup) then `Copied (new)`, classified `UPDATE`; a delete logs `Moved` then
+`Moved into backup dir`, classified `DELETE` — not the no-backup-dir `Copied
+(replaced existing)` / `Deleted` verbs. oikb picks up new/changed files on its
+next cycle (≤ `GDRIVE_INDEX_INTERVAL`).
 
 ### Monitoring
 
@@ -177,7 +239,9 @@ files on its next cycle (≤ `GDRIVE_INDEX_INTERVAL`).
 key) vs `source` (allowlisted `gdrive/` file count), and an ETA while the sync
 is in progress. `file_count` is read from the list endpoint
 (`GET /api/v1/knowledge/`); the detail endpoint has neither `file_count` nor a
-populated `files` array.
+populated `files` array. The oikb source line also surfaces per-cycle
+`errors`/`warnings` (e.g. a file failing to link — OWUI rejects it with `400`)
+as `errors=N (<first error>)`, so a `partial` plateau is diagnosable, not mute.
 
 ### File types and skips
 
@@ -189,7 +253,9 @@ depth; `**/*` would miss root-level files — fnmatch has no globstar). Binaries
 by content hash: a file whose content already exists in the KB is rejected with
 `400 Duplicate content`, so oikb reports the source `status=partial`
 **permanently** when `gdrive/` has duplicate-content files (same content,
-different paths). `partial` with `file_count > 0` is a healthy steady state,
+different paths). `partial` can also come from a file that fails to link (OWUI
+returns a non-dedup `400`); that cause shows as `errors=N (...)` on the oikb
+source line. `partial` with `file_count > 0` is a healthy steady state,
 not a failure.
 
 ### Open-file limit (Chroma)
@@ -256,16 +322,18 @@ dependency is down.
 | `health` | probe kb-gateway `/health` (via Caddy) and Open Web UI `/health` |
 | `test` | run system integration tests against the running stack (see [testing.md](testing.md)) |
 | `rag-config` | set the strict-grounding RAG template + sync `rag.ollama.base_url` to `OLLAMA_HOST` (run after `make api-keys`; re-run after a DB reset or an `OLLAMA_HOST` change) |
-| `gdrive-sync` | rclone copy the shared drive into `./gdrive`; writes `./gdrive/.sync-reports/sync-<iso>.report` with not-downloaded files + their reasons |
+| `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./gdrive-exclude.conf` (`[<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections |
 | `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, generate `OIKB_API_KEY`, write `GDRIVE_KB_ID` + `OIKB_API_KEY` to `.env.local`, start the indexer (run after `make api-keys`; idempotent) |
 | `gdrive-status` | gdrive RAG indexing status: indexer + oikb source health, indexed vs source counts, ETA if syncing |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clear` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
-| `clear-all` | `down --volumes` + delete `./data` + delete `.env.local` |
+| `clear-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + delete `.env.local` |
+| `clean` | remove the `./.gdrive-backup/` rclone sync retention tree (non-destructive: does not touch the stack, `./data`, or `.env.local`) |
 
 - `clear` preserves all state (clean recreate).
-- `clear-all` wipes data and the generated secret.
+- `clear-all` wipes data, the generated secret, and the gdrive backup retention.
 - `clear-all` keeps `.env`, `graphiti/config.yaml`, and `caddy/Caddyfile`.
+- `clean` removes only `./.gdrive-backup/` (rclone sync retention); it does not tear down the stack.
 
 ## Hardening reference
 
