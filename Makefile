@@ -9,6 +9,7 @@ DATA_DIR := ./data
 
 .PHONY: help bootstrap preflight pull pull-models start stop restart logs ps config \
         health test test-e2e api-keys admin-signup rag-config \
+        gdrive-sync gdrive-index-bootstrap gdrive-status \
         shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all
 
 help: ## Show this help
@@ -45,7 +46,7 @@ start: ## Start the stack detached (run `make bootstrap` first)
 	  . ./.env.local 2>/dev/null || { echo "MISSING secret — run: make bootstrap"; exit 1; }; \
 	  [ -n "$${WEBUI_SECRET_KEY:-}" ] \
 	    || { echo "MISSING secret — run: make bootstrap"; exit 1; }
-	@set -a; . ./.env; set +a; \
+	@set -a; . ./.env; . ./.env.local; set +a; \
 	case "$$OLLAMA_HOST" in \
 	  *'<ollama-host>'*) echo "REFUSING start: OLLAMA_HOST is still the '<ollama-host>' placeholder — set OLLAMA_HOST (shell env or .env) to the real Ollama URL"; exit 1;; \
 	esac; \
@@ -63,7 +64,8 @@ ps: ## Show container status (with health)
 	@$(COMPOSE) ps
 
 config: ## Render effective compose config (secrets redacted)
-	@$(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPENWEBUI_USER_API_KEY|OPENWEBUI_USER_PASSWORD|OPENWEBUI_TEST_PASSWORD): .*/\1: <redacted>/'
+	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
+	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OIKB_API_KEY|OPENWEBUI_USER_PASSWORD|OPENWEBUI_TEST_PASSWORD): .*/\1: <redacted>/'
 
 health: ## Probe the stack /health (Caddy -> kb-gateway aggregated, reflects OWUI)
 	@set -a; . ./.env; set +a; \
@@ -117,6 +119,20 @@ rag-config: ## Set the strict-grounding RAG template in Open WebUI (run after `m
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
 	@./scripts/rag-config.sh
+
+gdrive-sync: ## Download all shared-drive files into ./gdrive
+	@./scripts/gdrive-sync
+
+gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant agent read + start the indexer (run after `make api-keys`)
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
+	@grep -qE '^OPENWEBUI_USER_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (the read-scoped agent key; run: make api-keys)"; exit 1; }
+	@./scripts/gdrive-index-bootstrap.sh
+
+gdrive-status: ## Show gdrive RAG indexing status (indexed vs source, ETA if syncing)
+	@./scripts/gdrive-status.sh
 
 shell-owui: ## Shell into the Open WebUI container
 	@docker exec -it kb-openwebui sh

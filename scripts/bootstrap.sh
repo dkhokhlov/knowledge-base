@@ -74,8 +74,8 @@ ensure_secret .env.local WEBUI_SECRET_KEY
 chmod 600 .env.local
 printf '  set .env.local permissions to 0600\n'
 
-mkdir -p data/neo4j/data data/neo4j/logs data/openwebui
-printf '  ensured ./data/{neo4j/data,neo4j/logs,openwebui} exist\n'
+mkdir -p data/neo4j/data data/neo4j/logs data/openwebui data/oikb
+printf '  ensured ./data/{neo4j/data,neo4j/logs,openwebui,oikb} exist\n'
 
 printf '\nBootstrap done. Next: make preflight && make start\n'
 printf 'After start + admin signup: make api-keys (admin + shared-agent keys),\n'

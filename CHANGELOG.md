@@ -4,6 +4,64 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **gdrive auto-indexing into RAG (oikb sidecar).** New `gdrive-indexer` compose
+  service runs Open WebUI's official sync companion
+  (`ghcr.io/open-webui/oikb:0.4.0`) as a daemon, auto-syncing the host `./gdrive`
+  tree into the OWUI `gdrive` knowledge base every `GDRIVE_INDEX_INTERVAL`
+  (default 30s). Files copied/updated in `gdrive/` are indexed automatically.
+  Incremental SHA-256 diffing, retries, bounded concurrency, include/exclude
+  glob filters + max-size (`.oikb.yaml`), and fail-closed on an empty source
+  (no mass-delete on a bad mount). Additive service; no existing service changed.
+- `make gdrive-index-bootstrap` — creates the `gdrive` KB, grants the agent user
+  read access (merged with existing grants), generates `OIKB_API_KEY`, writes
+  `GDRIVE_KB_ID` + `OIKB_API_KEY` to `.env.local`, starts the indexer.
+- `make gdrive-status` — indexer container + oikb source status/last sync,
+  `indexed` (OWUI KB file count) vs `source` (allowlisted `gdrive/` file count),
+  and an ETA while the sync is not yet finished.
+- `gdrive-sync` now writes `./gdrive/.sync-reports/sync-<UTC-ISO>.report` with
+  the transfer summary and a "Files not downloaded" section (e.g. admin-
+  protected / download-restricted Drive files, surfaced with their 403 reason).
+- `gdrive/` directory tracked via `.gitkeep` (contents still gitignored).
+- `tests/test_09_gdrive_index.sh` — tolerant indexer + RAG indexing check
+  (passes on `status=ok` OR `partial`; skips clean when unprovisioned).
+- `docs/operations.md` — new "KB RAG indexing (gdrive → Open WebUI)" section
+  (provisioning, populating, monitoring, file types/skips, Chroma fd limit,
+  persistent state) + gdrive env-var, make-target, and troubleshooting rows.
+
+### Fixes
+
+- **OWUI Chroma fd exhaustion under bulk ingest.** OWUI's RAG store (Chroma
+  1.5.x, rust backend) opens a SQLite db per collection; the first gdrive sync
+  creates 100s of collections and exhausted the default 1024 fd soft limit →
+  `SQLITE_CANTOPEN "unable to open database file"` on every insert (KB
+  `file_count` stayed 0, oikb uploads timed out, OWUI went unhealthy). Raised
+  `ulimits.nofile.soft` to 65536 (hard 524288) on the `openwebui` service.
+  Latent bug — OWUI RAG was not exercised at scale before.
+- **oikb `concurrency` type crash.** oikb's `${VAR:-default}` interpolation
+  returns env values as strings; the daemon compares `concurrency > 1` without
+  coercing, so an interpolated `concurrency: ${OIKB_CONCURRENCY:-4}` crashed
+  every sync with `'>' not supported between instances of 'str' and 'int'`.
+  `concurrency` is now a literal YAML int (4) in `.oikb.yaml`; `interval` and
+  `max-size` stay env-tunable (oikb string-parses them). `OIKB_CONCURRENCY`
+  removed from compose/env.
+- **`gdrive-status` / `test_09` read `file_count` from the wrong endpoint.**
+  `GET /api/v1/knowledge/{id}` (detail) has neither `file_count` nor a populated
+  `files` array; `file_count` is exposed only on the list endpoint
+  (`GET /api/v1/knowledge/`). Both now read it from the list endpoint (with the
+  read-scoped agent key), fixing a permanent `file_count=0` / "not visible to
+  agent key" misreport.
+- **`test_09` allowlist regex matched 0 files.** `find -iregex` with `(a|b)`
+  alternation uses Emacs regex by default (find's default), where `()` and `|`
+  are literal. Added `-regextype posix-extended` so the source-count check and
+  search query match the allowlist (was a false-SKIP).
+- **`gdrive-status` ETA wording when plateaued.** When the sync plateaus at
+  `status=partial` (duplicate-content / over-max-size files OWUI/oikb skip, not
+  pending), it now reports "not pending" instead of "first sync still running".
+
 ## [v1.1.0] — 2026-08-20
 
 Graphiti memory is now functional with Ollama. v1.0.0's memory stack never

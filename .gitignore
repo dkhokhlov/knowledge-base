@@ -32,3 +32,11 @@ __pycache__/
 .env.*.local
 
 .opencode/index/
+
+# Local Google Drive export and generated shared-drive aliases.
+# Ignore gdrive/ CONTENTS but keep the directory itself tracked via .gitkeep
+# (so the compose bind-mount target exists in a fresh checkout; rclone and
+# oikb populate it at runtime). .sync-reports/ under it is ignored too.
+/gdrive/*
+!/gdrive/.gitkeep
+/shared-drives.conf

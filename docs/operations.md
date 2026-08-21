@@ -1,8 +1,8 @@
 # Operations
 
 Operator reference for the KnowledgeBase stack: prerequisites, configuration,
-the Ollama host service, persistent data / RAID, make targets, and the full
-hardening reference. For the trust model and architecture see the
+the Ollama host service, persistent data / RAID, KB RAG indexing, make targets,
+and the full hardening reference. For the trust model and architecture see the
 [README](../README.md); for tests see [testing.md](testing.md).
 
 ## Prerequisites
@@ -76,6 +76,7 @@ Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on 
 | `OPENAI_BASE_URL` / `EMBEDDING_MODEL_NAME` | set on the graphiti service in `compose.yml` (from `OLLAMA_HOST` / `EMBEDDER_MODEL`); not in `.env` |
 | `ENV` / `ENABLE_SIGNUP` / `DEFAULT_USER_ROLE` / `ENABLE_API_KEYS` / `USER_PERMISSIONS_FEATURES_API_KEYS` / `RAG_EMBEDDING_MODEL` | Open Web UI behavior |
 | `USER_PERMISSIONS_*` / `ENABLE_OPENAI_API` / `ENABLE_WEB_SEARCH` / `ENABLE_COMMUNITY_SHARING` / `ENABLE_EVALUATION_ARENA_MODELS` / `ENABLE_VERSION_UPDATE_CHECK` / `ENABLE_OTEL` / `WEBUI_FAVICON_URL` | attack-surface + phone-home reduction (full set in `.env.example`) |
+| `OIKB_IMAGE_TAG` / `GDRIVE_INDEX_INTERVAL` / `OIKB_MAX_SIZE` | gdrive auto-index (oikb sidecar): pinned oikb image tag, sync interval (default 30s), max file size (default 50mb). Sync concurrency is hardcoded (4) in `.oikb.yaml`, NOT an env var — oikb interpolates `${VAR:-default}` as strings and compares `concurrency > 1` without coercing, so an env value crashes every sync |
 
 `.env.local` — gitignored (`chmod 0600`); secrets + generated keys:
 
@@ -86,6 +87,7 @@ Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on 
 | `OPENWEBUI_ADMIN_API_KEY` | `make api-keys` | admin key (`role=admin`) — a valid `KB_API_KEY` |
 | `OPENWEBUI_USER_API_KEY` | `make api-keys` | agent key (read-scoped) — a valid `KB_API_KEY` |
 | `OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` | by hand | existing OWUI user for `make test` |
+| `GDRIVE_KB_ID` / `OIKB_API_KEY` | `make gdrive-index-bootstrap` | the `gdrive` KB id oikb syncs into + the bearer that secures oikb's own daemon endpoints |
 
 Notes:
 - `KB_API_KEY` is an Open Web UI per-account API key, carried as an **env var**. It is set on the agent host (in that host's env file or shell); on the stack host it may also live in `.env.local`. Its value is one of:
@@ -134,6 +136,77 @@ Host: a CUDA GPU host with enough VRAM for the chat model weights plus the 12-sl
   ```
 - `DATA_ROOT=./data` resolves through the symlink, so no `.env` edit is needed.
 
+## KB RAG indexing (gdrive → Open WebUI)
+
+The `gdrive-indexer` sidecar runs [oikb][oikb] (Open WebUI's official sync
+companion) as a daemon, auto-syncing the host `./gdrive` tree into the OWUI
+`gdrive` knowledge base every `GDRIVE_INDEX_INTERVAL` (default 30s). Files
+copied or updated in `gdrive/` are indexed automatically — no manual trigger.
+oikb does incremental SHA-256 diffing over OWUI's `sync/diff` endpoints,
+retries, bounded concurrency, include/exclude glob filters + max-size
+(`.oikb.yaml`), and **fails closed on an empty source** (logs "Source is empty
+— nothing to sync" and returns without deleting KB files, so a bad mount cannot
+mass-delete the KB). It is an additive service; no existing service is changed.
+oikb references a pre-existing KB by id — it does not create KBs.
+
+### Provisioning (one-time, after `make api-keys`)
+
+`make gdrive-index-bootstrap` creates the `gdrive` KB (find-or-create), grants
+the agent user read access (merged with existing grants so admin-added group
+grants are preserved), generates `OIKB_API_KEY`, writes `GDRIVE_KB_ID` +
+`OIKB_API_KEY` to `.env.local`, and (re)creates the `gdrive-indexer` service. It
+is idempotent. The agent user id is resolved from `OPENWEBUI_USER_API_KEY` via
+`GET /api/v1/auths/` (the same identity-from-key pattern the kb-gateway uses —
+no email env var needed); the read grant lets the read-scoped agent key search /
+RAG the KB (`write_access=False`).
+
+### Populating the source
+
+`make gdrive-sync` runs `rclone copy` of the shared drive into `./gdrive`
+(manual; `gdrive/` is gitignored except a `.gitkeep` marker). It writes
+`./gdrive/.sync-reports/sync-<UTC-ISO>.report` with the transfer summary and a
+"Files not downloaded" section — admin-protected / download-restricted Drive
+files surface with their 403 reason. The exit code is non-zero if a drive had
+transfer errors; downloadable files are not lost. oikb picks up new/changed
+files on its next cycle (≤ `GDRIVE_INDEX_INTERVAL`).
+
+### Monitoring
+
+`make gdrive-status` reports the indexer container state, oikb `/health`
+(source status, last sync), `indexed` (OWUI KB file count, read with the agent
+key) vs `source` (allowlisted `gdrive/` file count), and an ETA while the sync
+is in progress. `file_count` is read from the list endpoint
+(`GET /api/v1/knowledge/`); the detail endpoint has neither `file_count` nor a
+populated `files` array.
+
+### File types and skips
+
+`.oikb.yaml` allowlists office/text documents + source-code extensions (single-
+star bracket patterns `*.[xX][yY]...` for case-insensitive `fnmatch` at any
+depth; `**/*` would miss root-level files — fnmatch has no globstar). Binaries
+(`.npy`, audio/video, images, archives, `.svg`/`.drawio`) are simply not listed
+→ excluded. `OIKB_MAX_SIZE` (default 50mb) skips oversized files. OWUI dedups
+by content hash: a file whose content already exists in the KB is rejected with
+`400 Duplicate content`, so oikb reports the source `status=partial`
+**permanently** when `gdrive/` has duplicate-content files (same content,
+different paths). `partial` with `file_count > 0` is a healthy steady state,
+not a failure.
+
+### Open-file limit (Chroma)
+
+OWUI's RAG vector store is [Chroma][chroma] 1.5.x (rust backend), which opens a
+SQLite db per collection. Bulk ingest (the first gdrive sync) creates 100s of
+collections and exhausts the default 1024 fd soft limit → `SQLITE_CANTOPEN
+"unable to open database file"` on every insert (KB `file_count` stays 0, oikb
+uploads time out, OWUI goes `unhealthy`). `compose.yml` sets
+`ulimits.nofile.soft=65536` (hard 524288) on the `openwebui` service to fix
+this — do not remove it.
+
+### Persistent state
+
+oikb daemon state (`history.db`) lives under `${DATA_ROOT}/oikb` (created by
+`make bootstrap`), so it survives restarts and moves with `./data` to RAID.
+
 ## Troubleshooting
 
 Symptom → likely cause → fix. Run `make health` first; it probes the kb-gateway
@@ -161,6 +234,9 @@ dependency is down.
 | Need to reach Open WebUI directly (it is behind Caddy; no direct host port) | OWUI is internal-only on `owui_net` | `docker exec kb-openwebui curl -s localhost:8080/...`, or a temporary `docker compose run --rm -p 3001:8080 openwebui` (avoid `:3000` — that is Caddy) |
 | RAG chat is slow; `ollama ps` shows a CPU/GPU split | `MODEL_NAME` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; keep `MODEL_NAME` and `OPENWEBUI_MODEL` in sync |
 | `make health` says `degraded` but the UI works | OWUI `/health` returned non-2xx | inspect the `openwebui` logs; the gateway reports degraded whenever the identity dependency is not healthy |
+| gdrive KB `file_count` stays 0; oikb uploads `time out`; OWUI `unhealthy`; `docker logs kb-openwebui` shows `chromadb ... unable to open database file` | `openwebui` service `ulimits.nofile` lowered or removed → [Chroma][chroma] 1.5.x (rust backend) exhausts the fd limit creating one SQLite db per RAG collection under bulk ingest | restore `ulimits.nofile.soft=65536` (hard 524288) on `openwebui` in `compose.yml`; `docker compose up -d --no-deps --force-recreate openwebui`; oikb retries the sync on its next cycle (≤ `GDRIVE_INDEX_INTERVAL`) |
+| `make gdrive-status` shows oikb `status=partial` permanently with `file_count > 0` | `gdrive/` has duplicate-content files (same content, different paths); OWUI dedups by content hash and rejects the duplicate with `400 Duplicate content` | expected, not a failure — `partial` with files indexed is the healthy steady state; the unique-content files are indexed |
+| oikb sync crashes with `'>' not supported between instances of 'str' and 'int'` right after `sync/diff` | `.oikb.yaml` `concurrency` set via `${VAR:-default}` — oikb interpolates env values as strings and the daemon compares `concurrency > 1` without coercing | keep `concurrency` a literal YAML int in `.oikb.yaml` (hardcoded 4); `interval` and `max-size` are string-parsed and stay env-tunable |
 
 ## Make targets
 
@@ -180,6 +256,9 @@ dependency is down.
 | `health` | probe kb-gateway `/health` (via Caddy) and Open Web UI `/health` |
 | `test` | run system integration tests against the running stack (see [testing.md](testing.md)) |
 | `rag-config` | set the strict-grounding RAG template + sync `rag.ollama.base_url` to `OLLAMA_HOST` (run after `make api-keys`; re-run after a DB reset or an `OLLAMA_HOST` change) |
+| `gdrive-sync` | rclone copy the shared drive into `./gdrive`; writes `./gdrive/.sync-reports/sync-<iso>.report` with not-downloaded files + their reasons |
+| `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, generate `OIKB_API_KEY`, write `GDRIVE_KB_ID` + `OIKB_API_KEY` to `.env.local`, start the indexer (run after `make api-keys`; idempotent) |
+| `gdrive-status` | gdrive RAG indexing status: indexer + oikb source health, indexed vs source counts, ETA if syncing |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clear` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
 | `clear-all` | `down --volumes` + delete `./data` + delete `.env.local` |
@@ -303,3 +382,5 @@ Notes:
 [mcp]: https://modelcontextprotocol.io/
 [huggingface]: https://huggingface.co/
 [nomic-embed-text]: https://huggingface.co/nomic-ai/nomic-embed-text
+[oikb]: https://github.com/open-webui/oikb
+[chroma]: https://www.trychroma.com/

@@ -1,0 +1,52 @@
+# oikb config — auto-syncs the local gdrive/ tree into the Open WebUI "gdrive"
+# knowledge base. Run by the `gdrive-indexer` compose sidecar (`oikb daemon`).
+#
+# oikb reads this file from its working dir (/app/.oikb.yaml, bind-mounted below)
+# and interpolates ${VAR} / ${VAR:-default} from its process env, which the
+# `gdrive-indexer` service sets in compose.yml. GDRIVE_KB_ID + OIKB_API_KEY are
+# generated into .env.local by `make gdrive-index-bootstrap`.
+#
+# NOTE on `concurrency` / numeric fields: oikb's ${VAR:-default} interpolation
+# returns env values as STRINGS, and the daemon uses `concurrency` raw in a
+# `concurrency > 1` comparison without coercing — so an interpolated value
+# ("4") raises TypeError and every sync crashes. `concurrency` MUST be a literal
+# YAML int. `interval` and `max-size` are safe to interpolate: oikb parses them
+# via parse_interval / parse_size (string-tolerant). Do NOT make `concurrency`
+# an interpolated env var.
+#
+# File-type allowlist: oikb filters with fnmatch (case-sensitive on Linux), so
+# each extension is a single-star bracket pattern `*.[lL][oO][wW][eE][rR]` that
+# matches at ANY depth (fnmatch '*' spans '/') AND case-insensitively. Use a
+# single star, NOT '**/*' — fnmatch has no globstar, so '**/*.<ext>' would miss
+# files at the source root. Binaries (.npy, .onnx, audio/video, images, .pyc,
+# archives, .svg/.drawio) are simply not listed here, so oikb never syncs them.
+defaults:
+  interval: ${GDRIVE_INDEX_INTERVAL:-30s}
+  concurrency: 4
+  filter:
+    max-size: ${OIKB_MAX_SIZE:-50mb}
+sources:
+  - name: gdrive
+    source: /gdrive
+    kb-id: ${GDRIVE_KB_ID}
+    filter:
+      include:
+        # office / text documents
+        - "*.[dD][oO][cC][xX]"
+        - "*.[pP][dD][fF]"
+        - "*.[pP][pP][tT][xX]"
+        - "*.[xX][lL][sS][xX]"
+        - "*.[tT][xX][tT]"
+        - "*.[mM][dD]"
+        - "*.[cC][sS][vV]"
+        - "*.[hH][tT][mM][lL]"
+        - "*.[jJ][sS][oO][nN]"
+        - "*.[lL][oO][gG]"
+        - "*.[tT][eE][xX]"
+        # source / plain-text code
+        - "*.[pP][yY]"
+        - "*.[sS]"
+        - "*.[cC]"
+        - "*.[hH]"
+        - "*.[iI][nN][cC]"
+        - "*.[cC][fF][gG]"

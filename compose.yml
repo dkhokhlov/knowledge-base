@@ -179,6 +179,16 @@ services:
     image: ghcr.io/open-webui/open-webui:${OPENWEBUI_IMAGE_TAG:-main}
     container_name: kb-openwebui
     restart: unless-stopped
+    # Chroma 1.5.x (rust backend) opens a SQLite db per RAG collection. Bulk
+    # ingest (oikb syncing the gdrive tree) creates 100s of collections and
+    # exhausts the default 1024 fd soft limit -> SQLITE_CANTOPEN "unable to open
+    # database file" on every insert (KB file_count stays 0, uploads time out,
+    # OWUI goes unhealthy). Raise nofile so collection creation under load does
+    # not hit the ceiling. Hard 524288 matches the existing kernel hard limit.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 524288
     networks: [owui_net]
     security_opt:
       - no-new-privileges:true
@@ -235,6 +245,64 @@ services:
       timeout: 5s
       retries: 10
       start_period: 40s
+
+  gdrive-indexer:
+    # Open WebUI's official sync companion (oikb) running as a daemon. Auto-syncs
+    # the host's ./gdrive tree into the OWUI "gdrive" knowledge base every
+    # GDRIVE_INDEX_INTERVAL. oikb does incremental SHA-256 diffing over OWUI's
+    # sync/diff endpoints, retries, bounded concurrency, include/exclude glob
+    # filters, max-size, and FAILS CLOSED on an empty source (logs "Source is
+    # empty — nothing to sync" and returns without deleting KB files — so a bad
+    # mount cannot mass-delete the KB). See .oikb.yaml and scripts/gdrive-index-
+    # bootstrap.sh. The KB itself is created + RBAC-granted by `make
+    # gdrive-index-bootstrap` (oikb references a pre-existing KB by id; it does
+    # not create KBs). Additive service: no existing service is changed.
+    image: ghcr.io/open-webui/oikb:${OIKB_IMAGE_TAG:-0.4.0}
+    container_name: kb-gdrive-indexer
+    restart: unless-stopped
+    networks: [owui_net]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Needs OWUI up (it syncs against openwebui:8080). Does NOT need kb-gateway
+    # or graphiti. Internal to owui_net only; NO `ports:` — gdrive-status reaches
+    # oikb's /health via `docker exec`, not a published port.
+    depends_on:
+      openwebui:
+        condition: service_healthy
+    # No env_file: only the interpolated vars below enter the container env, so
+    # the rest of .env.local's secrets are NOT loaded into this sidecar (codex
+    # #5). ${OPENWEBUI_ADMIN_API_KEY}, ${OIKB_API_KEY}, ${GDRIVE_KB_ID} resolve at
+    # compose-config time because `make start`/`make config` source .env.local.
+    environment:
+      - OPEN_WEBUI_URL=http://openwebui:8080
+      - OPEN_WEBUI_API_KEY=${OPENWEBUI_ADMIN_API_KEY}
+      - OIKB_API_KEY=${OIKB_API_KEY}
+      - GDRIVE_KB_ID=${GDRIVE_KB_ID}
+      - GDRIVE_INDEX_INTERVAL=${GDRIVE_INDEX_INTERVAL:-30s}
+      - OIKB_MAX_SIZE=${OIKB_MAX_SIZE:-50mb}
+      - LOG_FORMAT=json
+    volumes:
+      # Source tree, read-only. rclone (gdrive-sync) writes here on the host;
+      # oikb only reads + hashes + uploads to OWUI via API.
+      - ./gdrive:/gdrive:ro
+      # oikb reads its config from its working dir (/app); bind-mount the tracked
+      # .oikb.yaml there. ${VAR} interpolation happens inside oikb at load time.
+      - ./.oikb.yaml:/app/.oikb.yaml:ro
+      # oikb daemon state (history.db) on the bind-mount tree so it survives
+      # restarts and moves with ./data to RAID. Created by `make bootstrap`.
+      - ${DATA_ROOT:-./data}/oikb:/data
+    command: ["daemon"]
+    healthcheck:
+      # oikb ships python in its venv (on PATH). /health/ready reflects daemon
+      # liveness (not source sync success — that is reported by /health, which
+      # `make gdrive-status` reads via docker exec).
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/ready',timeout=5).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 networks:
   # graphiti + neo4j are internal-only: reachable only by kb-gateway, never

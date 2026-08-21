@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: gdrive-sync [options]
+
+Download all accessible Google Drive shared drives into a local directory.
+
+Options:
+  -r, --remote NAME       rclone remote name (default: gdrive)
+  -d, --destination DIR  local destination (default: ./gdrive)
+      --dry-run           show transfers without downloading files
+  -h, --help              show this help
+
+The destination contains one directory per shared drive. The command uses
+rclone copy, so it does not delete local files.
+
+A sync report is written to <destination>/.sync-reports/sync-<UTC-ISO>.report
+containing the per-drive + total summary and a "Files not downloaded" section
+(one line per file that failed to transfer, with the rclone reason — e.g.
+admin-protected / download-restricted Drive files surface as a 403). Downloadable
+files are still transferred; the exit code is non-zero if any drive had errors.
+EOF
+}
+
+remote="gdrive"
+destination="./gdrive"
+dry_run=0
+
+while (($# > 0)); do
+    case "$1" in
+        -r|--remote)
+            (($# >= 2)) || { echo "error: --remote needs a value" >&2; exit 2; }
+            remote="$2"
+            shift 2
+            ;;
+        -d|--destination)
+            (($# >= 2)) || { echo "error: --destination needs a value" >&2; exit 2; }
+            destination="$2"
+            shift 2
+            ;;
+        --dry-run)
+            dry_run=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "error: unknown option: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+command -v rclone >/dev/null 2>&1 || {
+    echo "error: rclone is not installed or is not in PATH" >&2
+    exit 127
+}
+command -v jq >/dev/null 2>&1 || {
+    echo "error: jq is not installed or is not in PATH" >&2
+    exit 127
+}
+
+drive_json=$(rclone backend --json drives "${remote}:") || {
+    echo "error: cannot list shared drives through rclone remote '${remote}'" >&2
+    exit 1
+}
+
+drive_count=$(jq 'length' <<<"$drive_json")
+if [[ "$drive_count" == 0 ]]; then
+    echo "error: no shared drives are visible through rclone remote '${remote}'" >&2
+    exit 1
+fi
+
+mkdir -p -- "$destination"
+
+# --- sync report setup ------------------------------------------------------
+# rclone logs each failed transfer with its path + cause at INFO level; we parse
+# that log after the run to list files that were NOT downloaded and why. The
+# report lives under the (gitignored) destination in a hidden dir rclone never
+# writes into (rclone copy targets per-drive subdirs, not the destination root).
+reports_dir="$destination/.sync-reports"
+mkdir -p -- "$reports_dir"
+ts=$(date -u +%Y%m%dT%H%M%SZ)
+report="$reports_dir/sync-${ts}.report"
+logfile=$(mktemp)
+# Keep INFO log lines: "YYYY/MM/DD HH:MM:SS ERROR : <path>: <reason>".
+log_args=(--log-level INFO --log-file "$logfile")
+cleanup() { rm -f -- "$logfile"; }
+trap cleanup EXIT
+
+# summary accumulates the report-worthy lines (also printed to stdout).
+summary=""
+emit() { printf '%s\n' "$*"; summary+="$*"$'\n'; }
+
+processed_drives=0
+failed_drives=0
+
+while IFS=$'\t' read -r drive_id drive_name; do
+    [[ -n "$drive_id" && -n "$drive_name" ]] || continue
+
+    # Drive names can contain path separators. Keep them as safe local names.
+    safe_name=$(printf '%s' "$drive_name" | tr '/\\:' '___' | tr -d '\000-\037')
+    safe_name=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"$safe_name")
+    [[ -n "$safe_name" ]] || safe_name="$drive_id"
+
+    target="$destination/$safe_name"
+    printf 'Syncing shared drive %s -> %s\n' "$drive_name" "$target"
+    processed_drives=$((processed_drives + 1))
+
+    rclone_args=(
+        copy
+        "${remote}:"
+        "$target"
+        --drive-team-drive "$drive_id"
+        --create-empty-src-dirs
+        "${log_args[@]}"
+    )
+    ((dry_run)) && rclone_args+=(--dry-run)
+    if ! rclone "${rclone_args[@]}"; then
+        printf 'Shared drive completed with transfer errors: %s\n' "$drive_name" >&2
+        failed_drives=$((failed_drives + 1))
+    fi
+
+    drive_files=0
+    drive_bytes=0
+    if [[ -d "$target" ]]; then
+        drive_files=$(find "$target" -type f -printf '.' | wc -c)
+        drive_bytes=$(du -sb -- "$target" | awk '{print $1}')
+    fi
+    drive_mb=$(awk -v bytes="$drive_bytes" 'BEGIN { printf "%.2f", bytes / 1000000 }')
+    emit "Drive report: ${drive_name} -> ${safe_name}: ${drive_files} files, ${drive_mb} MB local"
+done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$drive_json")
+
+total_files=$(find "$destination" -mindepth 1 -maxdepth 1 -type d -exec find {} -type f \; -printf '.' | wc -c)
+total_bytes=$(du -sb -- "$destination" | awk '{print $1}')
+total_mb=$(awk -v bytes="$total_bytes" 'BEGIN { printf "%.2f", bytes / 1000000 }')
+emit "Sync report: ${processed_drives} drives processed, ${total_files} files, ${total_mb} MB local"
+
+# --- "Files not downloaded" — parse the rclone log --------------------------
+# Dedup by path keeping the LAST reason (rclone retries repeat a path); preserve
+# the full rclone message so the 403 download-restricted cause is visible.
+failures=$(python3 - "$logfile" <<'PY'
+import re, sys
+last = {}  # path -> "CATEGORY: reason"
+for ln in open(sys.argv[1], errors="replace"):
+    m = re.match(r'^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} (ERROR|NOTICE) ?: (.*)$', ln.rstrip("\n"))
+    if not m:
+        continue
+    cat, rest = m.group(1), m.group(2)
+    idx = rest.find(": ")
+    if idx < 0:
+        continue
+    path = rest[:idx]
+    reason = rest[idx + 2:]
+    # Skip rclone run-summary lines (not per-file paths).
+    if path.startswith(("Attempt ", "There were ", "Failed ")):
+        continue
+    last[path] = "%s: %s" % (cat, reason)
+for path in sorted(last):
+    print("%s\t%s" % (path, last[path]))
+PY
+)
+
+# --- write the report -------------------------------------------------------
+{
+    printf 'gdrive sync report\n'
+    printf 'remote: %s\n' "$remote"
+    printf 'destination: %s\n' "$destination"
+    printf 'started (UTC): %s\n' "$ts"
+    printf 'dry-run: %s\n\n' "$([ "$dry_run" = 1 ] && echo yes || echo no)"
+    printf '%s\n' "$summary"
+    printf 'Files not downloaded:\n'
+    if [[ -n "$failures" ]]; then
+        while IFS=$'\t' read -r fpath freason; do
+            [[ -n "$fpath" ]] || continue
+            printf '  %s — %s\n' "$fpath" "$freason"
+        done <<<"$failures"
+        fail_count=$(printf '%s\n' "$failures" | grep -c .)
+    else
+        printf '  (none)\n'
+        fail_count=0
+    fi
+} > "$report"
+
+emit "Files not downloaded: ${fail_count:-0} (see report)"
+
+if ((failed_drives > 0)); then
+    emit "Sync report: ${failed_drives} drive(s) had transfer errors"
+    printf 'Report written: %s\n' "$report" >&2
+    exit 1
+fi
+printf 'Report written: %s\n' "$report"

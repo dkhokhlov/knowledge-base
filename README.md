@@ -133,6 +133,17 @@ An admin tells an agent **"create a new KB user alice\@example.com named Alice"*
 - To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field of `/api/chat/completions` as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds.
 - `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
 
+### gdrive auto-indexing
+
+The `gdrive-indexer` sidecar runs [oikb][oikb] (Open WebUI's official sync companion) as a daemon and auto-syncs the host `./gdrive` tree into the OWUI `gdrive` knowledge base every `GDRIVE_INDEX_INTERVAL` (default `30s`). Files copied or updated in `gdrive/` are indexed automatically — no manual trigger.
+
+- `make gdrive-sync` populates `./gdrive` (rclone copy of all shared drives; manual). It writes a per-run report to `./gdrive/.sync-reports/sync-<UTC-ISO>.report` with the transfer summary and a "Files not downloaded" section (e.g. admin-protected / download-restricted Drive files, surfaced with their 403 reason). Downloadable files still transfer; exit code is non-zero if any drive had errors.
+- `make gdrive-index-bootstrap` (one-time, after `make api-keys`) creates the `gdrive` KB, grants the agent user read access (so the read-scoped agent key can search/RAG it), generates `OIKB_API_KEY`, writes `GDRIVE_KB_ID` + `OIKB_API_KEY` to `.env.local`, and starts the indexer. Idempotent.
+- `make gdrive-status` reports indexing state: indexer container, oikb source status + last sync, `indexed` (OWUI KB file count) vs `source` (allowlisted `gdrive/` file count), and an ETA while the sync is not yet finished.
+- Indexed file types + max-size are set in [`.oikb.yaml`](.oikb.yaml) (documents + source code; `.npy`, audio/video, images, archives, `.svg`/`.drawio` are excluded). oikb does incremental SHA-256 diffing and **fails closed on an empty source** (logs "Source is empty — nothing to sync" and returns without deleting KB files), so a bad/empty mount cannot mass-delete the KB.
+- The sidecar reaches OWUI internally (`openwebui:8080` on `owui_net`) with only the admin key in its env (the rest of `.env.local` is not loaded into it). Daemon state (`history.db`) persists under `./data/oikb`. No host port is published; `gdrive-status` reads oikb's `/health` + `/history` via `docker exec`.
+- Until `make gdrive-index-bootstrap` runs, the indexer has no `kb-id` and logs sync errors harmlessly (it restarts and converges once provisioned).
+
 For per-tool agent integration (skill install, CLI examples), see [docs/agents.md](docs/agents.md).
 
 ## Quick start
@@ -171,9 +182,17 @@ A generated JWT signing key (`make bootstrap`), the API keys (`make api-keys`), 
    ```
    Re-run after a DB reset/rebuild or an `OLLAMA_HOST` change.
 
-Provisioning sequence: `make start` → (admin signs up in UI) → `make api-keys` → `make rag-config`.
+7. **(Optional) Auto-index `gdrive/` into RAG** — populate the dir, then provision the KB:
+   ```
+   make gdrive-sync            # rclone pull into ./gdrive (writes a sync report)
+   make gdrive-index-bootstrap # create the gdrive KB + grant agent read + start the indexer
+   make gdrive-status          # indexed vs source, ETA while syncing
+   ```
+   See [gdrive auto-indexing](#gdrive-auto-indexing). The `gdrive-indexer` sidecar then keeps the `gdrive` KB in sync automatically.
 
-7. (Optional) Close signup: set `ENABLE_SIGNUP=false` in `.env` and `make restart`.
+Provisioning sequence: `make start` → (admin signs up in UI) → `make api-keys` → `make rag-config` → (`make gdrive-sync` + `make gdrive-index-bootstrap`).
+
+8. (Optional) Close signup: set `ENABLE_SIGNUP=false` in `.env` and `make restart`.
 
 ## Performance
 
@@ -230,7 +249,7 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 | `graphiti/bootstrap.py` | mounted into the `graphiti` container and run as the command; injects `OpenAIGenericClient` + `nomic` embedder (768) so Ollama extraction works, runs a robust `/messages` worker, owns the app lifespan |
 | `graphiti/config.yaml` | UNUSED — config for the retired MCP image; kept for reference (not mounted) |
 | `Modelfile_qwen2_5` | reference Modelfile for the custom ctx-baked `MODEL_NAME` (`FROM qwen2.5:14b` + `PARAMETER num_ctx 8192`); see [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant) |
-| `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `rag-config.sh` |
+| `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `rag-config.sh`, `gdrive-sync`, `gdrive-index-bootstrap.sh`, `gdrive-status.sh` |
 | `skills/` | per-tool `kb` agent skill (`claude/` primary; `codex/`, `opencode/`, `pi/` symlink `scripts/` to it) — see [docs/agents.md](docs/agents.md) |
 | `tests/` | `test_01`..`test_08` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
 | `docs/` | `operations.md`, `testing.md`, `agents.md`, favicon assets |
@@ -252,6 +271,7 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 
 [graphiti]: https://github.com/getzep/graphiti
 [open-webui]: https://github.com/open-webui/open-webui
+[oikb]: https://github.com/open-webui/oikb
 [neo4j]: https://neo4j.com/
 [caddy]: https://caddyserver.com/
 [ollama]: https://ollama.com/
