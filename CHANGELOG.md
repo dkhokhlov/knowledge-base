@@ -159,6 +159,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixes
 
+- **kb skill `file` command no longer crashes on binary files (PDF/DOCX/PPTX/
+  XLSX/images).** The `/api/v1/files/{id}/content` endpoint returns the RAW file
+  for binary formats, not extracted text, so `file <pdf-id>` raised
+  `UnicodeDecodeError` (the shared `call()` did `r.read().decode()`). `cmd_file`
+  now fetches directly, prints text files unchanged, and on a binary body saves
+  the raw bytes to a temp file (extension inferred from `Content-Type`) with a
+  note pointing at `pdftotext` / `search <kb>`. Only `cmd_file` changed;
+  `call()`/`jget()` (JSON-only) are untouched. Also redeployed the wrapper to
+  `~/.claude/skills/kb/scripts/owui.py` (it was stale at the old
+  `OPENWEBUI_BASE_URL` env name; the source had moved to `KB_HOST`), so the
+  wrapper now resolves `KB_HOST` from `.env`/the shell with no `--base-url`.
 - **oikb gdrive-indexer churn — unbounded disk growth (the "2b" bug).** oikb
   re-uploads files every `GDRIVE_INDEX_INTERVAL` cycle, and OWUI's upload
   handler minted a new uuid + on-disk blob + `FileModel` row on every POST with

@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -183,10 +184,53 @@ def cmd_rag(base, key, a):
     print(content or "(empty response)")
 
 
+def _content_ext(ctype):
+    """Map a Content-Type to a file extension for saving a binary /content
+    response. Returns '' when there is no useful mapping (the caller saves the
+    raw bytes with no extension)."""
+    c = (ctype or "").split(";")[0].strip().lower()
+    return {
+        "application/pdf": ".pdf",
+        "application/msword": ".doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.ms-excel": ".xls",
+        "application/vnd.ms-powerpoint": ".ppt",
+        "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+        "image/bmp": ".bmp", "image/tiff": ".tiff", "image/webp": ".webp",
+    }.get(c, "")
+
+
 def cmd_file(base, key, a):
-    code, txt = call(base, key, "GET", "/api/v1/files/%s/content" % a.id)
-    if code != 200:
-        sys.exit("FAIL  GET /api/v1/files/%s/content -> HTTP %s: %s" % (a.id, code, txt[:300]))
+    # Fetch directly (not via call()) so we keep the Content-Type and can handle
+    # a binary body. The /content endpoint returns the RAW file for binary
+    # formats (PDF/DOCX/PPTX/XLSX/images), not the extracted text — so the old
+    # call() path (r.read().decode()) raised UnicodeDecodeError on every PDF.
+    # Text files decode and print; binary files are saved to a temp file with a
+    # note pointing the caller at an extractor. The extracted (searchable) text
+    # for a binary file is also available via `search <kb> "<query>"`.
+    url = base + "/api/v1/files/%s/content" % a.id
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key}, method="GET")
+    try:
+        with urllib.request.urlopen(req) as r:
+            raw = r.read()
+            ctype = r.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as e:
+        sys.exit("FAIL  GET /api/v1/files/%s/content -> HTTP %s: %s"
+                 % (a.id, e.code, e.read().decode(errors="replace")[:300]))
+    try:
+        txt = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        ext = _content_ext(ctype)
+        fd, path = tempfile.mkstemp(prefix="owui-file-", suffix=ext)
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        sys.exit("NOTE  file %s is binary (Content-Type: %s, %d bytes); the /content\n"
+                 "  endpoint returns the RAW file, not extracted text. Saved to: %s\n"
+                 "  PDF -> pdftotext -layout %s -  |  Office/image -> `search <kb> \"<query>\"`\n"
+                 "  for the extracted text chunks, or open the saved file."
+                 % (a.id, ctype or "?", len(raw), path, path))
     sys.stdout.write(txt if not txt.endswith("\n") else txt)
 
 
