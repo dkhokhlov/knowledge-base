@@ -91,6 +91,18 @@ _KIND_BY_EXT = {
 # the raw bytes directly).
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
 
+# Plain-text / code suffixes handled directly (decode UTF-8), NOT via markitdown.
+# markitdown 0.1.7's PlainTextConverter does file_stream.read().decode(
+# stream_info.charset), and stream_info.charset is wrongly detected as 'ascii'
+# for UTF-8 text/code files -> UnicodeDecodeError -> 500 -> orphan. Decoding
+# UTF-8 ourselves (errors="replace" so no file can 500) fixes it. .csv/.html/.json
+# are NOT here: they have dedicated markitdown converters (CsvConverter/
+# HtmlConverter/JsonConverter) that handle UTF-8 and produce structured output.
+_TEXT_EXTS = {
+    ".txt", ".text", ".md", ".markdown", ".log", ".tex", ".jsonl",
+    ".py", ".s", ".S", ".c", ".h", ".inc", ".cfg",
+}
+
 _EXT_BY_MIME = {
     "application/pdf": ".pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
@@ -273,11 +285,17 @@ def _suffix(filename, content_type):
 
 
 def _kind_of(suffix, content_type):
-    """Infer the input kind. Returns 'image' for standalone images, else the
+    """Infer the input kind. Returns 'image' for standalone images, 'text' for
+    plain-text/code files (handled directly, not via markitdown), else the
     document kind in _KIND_BY_EXT, else None."""
     if suffix in _IMAGE_EXTS or (content_type or "").startswith("image/"):
         return "image"
-    return _KIND_BY_EXT.get(suffix)
+    if suffix in _KIND_BY_EXT:
+        return _KIND_BY_EXT[suffix]
+    ct = (content_type or "").split(";")[0].strip().lower()
+    if suffix in _TEXT_EXTS or ct == "text/plain":
+        return "text"
+    return None
 
 
 def extract(file_bytes, filename, content_type, md, service):
@@ -293,6 +311,13 @@ def extract(file_bytes, filename, content_type, md, service):
     if kind == "image":
         ocr = service.extract_text(io.BytesIO(file_bytes))
         return {"page_content": ocr.text or "", "metadata": {}}
+
+    if kind == "text":
+        # Plain-text/code: decode UTF-8 directly (see _TEXT_EXTS). markitdown
+        # 0.1.7's PlainTextConverter mis-detects charset as 'ascii' and raises
+        # UnicodeDecodeError on UTF-8 -> 500 -> orphan. errors="replace" so no
+        # file can 500; valid UTF-8 (em-dash, CJK, etc.) decodes cleanly.
+        return {"page_content": file_bytes.decode("utf-8", errors="replace"), "metadata": {}}
 
     import tempfile
 

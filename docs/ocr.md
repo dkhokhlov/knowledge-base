@@ -96,7 +96,13 @@ would orphan every ingest).
 - **Global + all-or-nothing.** When the engine is enabled, OWUI routes **every**
   ingest to markitdown-ocr — no per-type fallback; an empty result orphans.
   Covered: PDF/DOCX/PPTX/XLSX (OCR converters), standalone images (direct OCR),
-  text/csv/json/html (built-in converters). **Not covered:** audio/video (no
+  csv/json/html (markitdown built-in converters). Plain-text / code
+  (`.txt`/`.md`/`.py`/`.S`/`.c`/`.h`/`.inc`/`.cfg`/`.log`/`.tex`/`.jsonl`) is
+  decoded UTF-8 directly in the service — **not** via markitdown's
+  `PlainTextConverter`, which mis-detects `stream_info.charset` as `ascii` and
+  raises `UnicodeDecodeError` on UTF-8 text (orphaning ~12 UTF-8 docs in the
+  first sync). `.csv`/`.html`/`.json` keep their dedicated converters (they
+  handle UTF-8 and structure the output). **Not covered:** audio/video (no
   ffmpeg in v1) → would orphan. Keep those out of the synced set (`.oikb.yaml`
   already excludes audio/video).
 - **API key required.** An empty `EXTERNAL_DOCUMENT_LOADER_API_KEY` makes OWUI
