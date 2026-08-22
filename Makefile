@@ -9,6 +9,7 @@ DATA_DIR := ./data
 
 .PHONY: help bootstrap preflight pull pull-models start stop restart logs ps config \
         health test test-e2e api-keys admin-signup rag-config \
+        ocr-bootstrap ocr-config ocr-disable \
         gdrive-sync gdrive-index-bootstrap gdrive-status \
         shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all clean
 
@@ -50,13 +51,20 @@ start: ## Start the stack detached (run `make bootstrap` first)
 	case "$$OLLAMA_HOST" in \
 	  *'<ollama-host>'*) echo "REFUSING start: OLLAMA_HOST is still the '<ollama-host>' placeholder — set OLLAMA_HOST (shell env or .env) to the real Ollama URL"; exit 1;; \
 	esac; \
+	PROFILES=""; \
 	if [ -n "$${GDRIVE_KB_ID:-}" ]; then \
-	  echo "gdrive indexer provisioned (GDRIVE_KB_ID set) — starting stack with --profile gdrive"; \
-	  $(COMPOSE) --profile gdrive up -d; \
+	  echo "gdrive indexer provisioned (GDRIVE_KB_ID set) — adding --profile gdrive"; \
+	  PROFILES="$$PROFILES --profile gdrive"; \
 	else \
-	  echo "gdrive indexer not provisioned (GDRIVE_KB_ID unset) — starting stack without it (run: make gdrive-index-bootstrap to add it)"; \
-	  $(COMPOSE) up -d; \
-	fi
+	  echo "gdrive indexer not provisioned (GDRIVE_KB_ID unset) — not starting it (run: make gdrive-index-bootstrap to add it)"; \
+	fi; \
+	if [ "$${MARKITDOWN_OCR_PROVISIONED:-0}" = "1" ]; then \
+	  echo "markitdown-ocr provisioned (MARKITDOWN_OCR_PROVISIONED=1) — adding --profile ocr"; \
+	  PROFILES="$$PROFILES --profile ocr"; \
+	else \
+	  echo "markitdown-ocr not provisioned (MARKITDOWN_OCR_PROVISIONED!=1) — not starting it (run: make ocr-bootstrap to add it)"; \
+	fi; \
+	$(COMPOSE) $$PROFILES up -d
 
 stop: ## Stop the stack (keeps containers + data)
 	@$(COMPOSE) stop
@@ -71,7 +79,7 @@ ps: ## Show container status (with health)
 
 config: ## Render effective compose config (secrets redacted)
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
-	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OIKB_API_KEY|OPENWEBUI_USER_PASSWORD|OPENWEBUI_TEST_PASSWORD): .*/\1: <redacted>/'
+	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OIKB_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_TEST_PASSWORD): .*/\1: <redacted>/'
 
 health: ## Probe the stack /health (Caddy -> kb-gateway aggregated, reflects OWUI)
 	@set -a; . ./.env; set +a; \
@@ -127,6 +135,37 @@ rag-config: ## Set the strict-grounding RAG template in Open WebUI (run after `m
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
 	@./scripts/rag-config.sh
+
+ocr-bootstrap: ## Build + start markitdown-ocr, point OWUI at it, set MARKITDOWN_OCR_PROVISIONED=1 (run after `make api-keys`)
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
+	@./scripts/ocr-bootstrap.sh
+
+ocr-config: ## Set OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-ocr (run after `make ocr-bootstrap`)
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
+	@grep -qE '^OCR_SERVICE_TOKEN=.+$$' .env.local \
+	  || { echo "MISSING OCR_SERVICE_TOKEN in .env.local (run: make ocr-bootstrap)"; exit 1; }
+	@./scripts/ocr-config.sh enable
+
+ocr-disable: ## Clear the external extraction engine + remove the marker + recreate openwebui (no KB reset)
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
+	@./scripts/ocr-config.sh disable
+	@python3 - <<'PY'
+import os
+f = ".env.local"; key = "MARKITDOWN_OCR_PROVISIONED"
+out = [ln for ln in open(f).read().splitlines() if not ln.startswith(key + "=")]
+open(f, "w").write("\n".join(out) + "\n"); os.chmod(f, 0o600)
+print("OK    removed %s marker from .env.local" % key)
+PY
+	@set -a; . ./.env; . ./.env.local; set +a; \
+	  echo "recreating openwebui so it reloads the cleared extraction config"; \
+	  $(COMPOSE) --profile ocr up -d --no-deps --force-recreate openwebui
+	@echo "Done. New uploads use OWUI's default loaders. Existing OCR'd members are unchanged until re-ingested."
 
 gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup)
 	@./scripts/gdrive-sync

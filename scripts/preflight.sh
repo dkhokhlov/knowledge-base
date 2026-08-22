@@ -110,3 +110,57 @@ if [ "$emb_warn" -eq 1 ]; then
 else
   printf '\nPreflight OK. Next: make start && make health\n'
 fi
+
+# --- markitdown-ocr provisioned? check engine drift + OCR model -------------
+# Only runs when MARKITDOWN_OCR_PROVISIONED=1 in .env.local. Reads
+# rag.content_extraction_engine straight from webui.db (read-only) and WARNs if
+# it is not "external" (drift -> OWUI uses its default loaders, not the engine).
+# Also WARNs if the OCR model is not pulled in host Ollama (ingest would orphan).
+ocr_prov=0
+(
+  set -a; . ./.env.local 2>/dev/null; set +a
+  [ "${MARKITDOWN_OCR_PROVISIONED:-0}" = "1" ] && echo yes
+) | grep -q yes && ocr_prov=1
+
+if [ "$ocr_prov" -eq 1 ]; then
+  ok "markitdown-ocr provisioned (MARKITDOWN_OCR_PROVISIONED=1)"
+  OCR_MODEL="${OCR_MODEL:-deepseek-ocr}"
+  if ! echo "$TAGS" | grep -q "\"${OCR_MODEL}\""; then
+    warn "OCR model '${OCR_MODEL}' not pulled in host Ollama — ingest via the external engine would orphan"
+    warn "       pull it: ollama pull ${OCR_MODEL}"
+  else
+    ok "Ollama has OCR model '${OCR_MODEL}'"
+  fi
+  if ocr_msg="$(python3 - 2>&1 <<'PY'
+import sqlite3, json, os, sys
+db = "./data/openwebui/webui.db"
+if not os.path.exists(db):
+    print("rag.content_extraction_engine: webui.db not present (first boot) - nothing to check")
+    sys.exit(0)
+try:
+    con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    row = con.execute("SELECT value FROM config WHERE key='rag.content_extraction_engine'").fetchone()
+    con.close()
+except Exception as e:
+    print("rag.content_extraction_engine: unreadable webui.db (%s) - skipping" % e)
+    sys.exit(0)
+if not row or not row[0]:
+    print("rag.content_extraction_engine: not yet persisted (first boot) - nothing to check")
+    sys.exit(0)
+try:
+    val = json.loads(row[0])
+except Exception:
+    val = row[0]
+if val == "external":
+    print("rag.content_extraction_engine=external (in sync)")
+    sys.exit(0)
+print("rag.content_extraction_engine DRIFT: persisted=%r != 'external' (OWUI will not use the engine)" % (val,))
+sys.exit(1)
+PY
+)"; then
+    ok "$ocr_msg"
+  else
+    warn "$ocr_msg"
+    warn "       after 'make start', run: make ocr-config  (sets CONTENT_EXTRACTION_ENGINE=external)"
+  fi
+fi

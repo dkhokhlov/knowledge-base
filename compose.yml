@@ -330,6 +330,67 @@ services:
       retries: 5
       start_period: 20s
 
+  markitdown-ocr:
+    # External extraction engine for Open WebUI: runs microsoft/markitdown-ocr
+    # with the OCR service replaced by OllamaNativeOCRService (Ollama native
+    # /api/chat, which applies deepseek-ocr's Gundam preprocessing; the /v1 shim
+    # does not and collapses on large images). Exposes PUT /process (the OWUI
+    # external-extraction contract) and returns per-page/per-slide/per-sheet
+    # documents. OWUI routes EVERY ingest to it when
+    # CONTENT_EXTRACTION_ENGINE=external + URL + a non-empty API key are set in
+    # the OWUI DB (`make ocr-config`). See markitdown/oursvc.py + the plan.
+    image: ghcr.io/dkhokhlov/markitdown-ocr:${MARKITDOWN_OCR_IMAGE_TAG:-0.1.0-ollama-native}
+    build:
+      context: ./markitdown
+    pull_policy: never
+    container_name: markitdown-ocr
+    # Profile-gated (no-fallback), like gdrive-indexer. With the `ocr` profile
+    # off, `make start` never creates this service; it is started ONLY by `make
+    # ocr-bootstrap` (--profile ocr), which first builds, waits /health, runs
+    # `make ocr-config`, then writes MARKITDOWN_OCR_PROVISIONED=1. `make start`
+    # adds --profile ocr when that marker is already in .env.local, so a
+    # provisioned stack's `make restart` brings it back.
+    profiles: [ocr]
+    restart: unless-stopped
+    networks: [owui_net]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    user: "1000:1000"
+    # Starts after OWUI (it does not call OWUI; the ordering only keeps startup
+    # logs linear). Reaches Ollama on the Docker host via the
+    # host-gateway, the same path openwebui uses.
+    depends_on:
+      openwebui:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # No env_file: only the interpolated vars below enter the container env, so
+    # the rest of .env.local's secrets are NOT loaded into this sidecar.
+    # ${OCR_SERVICE_TOKEN} resolves at compose-config time because `make start`/
+    # `make config` source .env.local.
+    environment:
+      - OLLAMA_BASE_URL=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - OCR_MODEL=${OCR_MODEL:-deepseek-ocr}
+      - OCR_PROMPT=${OCR_PROMPT}
+      - OCR_SERVICE_TOKEN=${OCR_SERVICE_TOKEN}
+      - OCR_MIN_DIM=${OCR_MIN_DIM:-64}
+      - OCR_TIMEOUT=${OCR_TIMEOUT:-120}
+      - OCR_KEEP_ALIVE=${OCR_KEEP_ALIVE:-5m}
+      - PORT=8080
+    # No `ports:` — internal to owui_net only; OWUI reaches it as
+    # http://markitdown-ocr:8080. No data mounts: the service is stateless
+    # (config via env only; temp files are written to /tmp and unlinked).
+    healthcheck:
+      # python:3.13-slim has no curl/wget — use the stdlib (mirror graphiti at
+      # compose.yml:93 and kb-gateway at compose.yml:172).
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health',timeout=5).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
 networks:
   # graphiti + neo4j are internal-only: reachable only by kb-gateway, never
   # by Caddy/OWUI/each other's attackers (codex #1). kb-gateway is the sole bridge.
