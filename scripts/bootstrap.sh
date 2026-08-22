@@ -6,7 +6,7 @@
 # Agents authenticate with KB_API_KEY (an Open Web UI per-account key); the
 # kb-gateway validates it against Open Web UI and authorizes per call. See
 # README "KB_API_KEY & the kb-gateway".
-set -eu
+set -euo pipefail
 
 cd "$(dirname "$0")/.."
 

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Provision the markitdown-ocr external extraction engine for Open WebUI:
 #   1. ensure OCR_SERVICE_TOKEN is in .env.local (generate one if missing);
+#   1b. ensure the OCR vision model (OCR_MODEL, default deepseek-ocr) is pulled
+#       on the Ollama host (idempotent; a failed pull aborts so the marker is
+#       NOT written — no half-provisioned engine that silently empties image
+#       docs);
 #   2. build the markitdown-ocr image;
 #   3. (re)create the markitdown-ocr compose service (--profile ocr);
 #   4. wait for its /health (via the compose healthcheck) to go green;
@@ -66,6 +70,18 @@ if [ -z "${OCR_SERVICE_TOKEN:-}" ]; then
 else
   printf 'OK    OCR_SERVICE_TOKEN already set (kept)\n'
 fi
+
+# Step 1b: ensure the OCR vision model is present on the Ollama host. The
+# service fail-opens on a missing/unreachable model (returns an empty OCR
+# result -> an image-only file orphans with no text). `ollama pull` is
+# idempotent (a manifest re-fetch when already present); a failed pull aborts
+# provisioning so the marker is NOT written (no half-provisioned engine that
+# silently empties image docs). OLLAMA_HOST is sourced from .env.
+: "${OCR_MODEL:?FAIL  OCR_MODEL not set in .env (expected deepseek-ocr)}"
+: "${OLLAMA_HOST:?FAIL  OLLAMA_HOST not set in .env (Ollama base URL for the CLI)}"
+printf '==> ensuring OCR vision model %s is present on Ollama (%s)\n' "$OCR_MODEL" "$OLLAMA_HOST"
+ollama pull "$OCR_MODEL"
+printf 'OK    OCR model %s present\n' "$OCR_MODEL"
 
 # Step 2: build the image.
 printf '==> building markitdown-ocr image\n'

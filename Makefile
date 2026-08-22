@@ -26,45 +26,10 @@ pull: ## Pull all images
 	@$(COMPOSE) pull
 
 pull-models: ## Pull base LLM, create the ctx-baked variant (MODEL_NAME), pull embedder
-	@set -euo pipefail; \
-	set -a; . ./.env; set +a; \
-	: "$${OLLAMA_MODEL_BASE:?OLLAMA_MODEL_BASE not set in .env}"; \
-	: "$${MODEL_NAME:?MODEL_NAME not set in .env}"; \
-	case "$${OLLAMA_MODEL_CONTEXT:-}" in ''|*[!0-9]*) \
-	  echo "REFUSING: OLLAMA_MODEL_CONTEXT must be a positive integer (got '$${OLLAMA_MODEL_CONTEXT:-<unset>}')" >&2; exit 1;; esac; \
-	[ "$$OLLAMA_MODEL_CONTEXT" -gt 0 ] || { echo "REFUSING: OLLAMA_MODEL_CONTEXT must be > 0" >&2; exit 1; }; \
-	echo "Pulling base LLM: $$OLLAMA_MODEL_BASE"; ollama pull "$$OLLAMA_MODEL_BASE"; \
-	mf=$$(mktemp); printf 'FROM %s\nPARAMETER num_ctx %s\n' "$$OLLAMA_MODEL_BASE" "$$OLLAMA_MODEL_CONTEXT" > $$mf; \
-	echo "Creating ctx variant: $$MODEL_NAME (num_ctx=$$OLLAMA_MODEL_CONTEXT)"; \
-	ollama rm "$$MODEL_NAME" >/dev/null 2>&1 || true; \
-	ollama create "$$MODEL_NAME" -f $$mf; rm -f $$mf; \
-	echo "Pulling embedder: nomic-embed-text"; ollama pull nomic-embed-text; \
-	echo "Done. If the stack is running, restart it so Ollama reloads the new manifest: make restart"
+	@./scripts/pull-models.sh
 
 start: ## Start the stack detached (run `make bootstrap` first)
-	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
-	@unset WEBUI_SECRET_KEY; \
-	  . ./.env.local 2>/dev/null || { echo "MISSING secret — run: make bootstrap"; exit 1; }; \
-	  [ -n "$${WEBUI_SECRET_KEY:-}" ] \
-	    || { echo "MISSING secret — run: make bootstrap"; exit 1; }
-	@set -a; . ./.env; . ./.env.local; set +a; \
-	case "$$OLLAMA_HOST" in \
-	  *'<ollama-host>'*) echo "REFUSING start: OLLAMA_HOST is still the '<ollama-host>' placeholder — set OLLAMA_HOST (shell env or .env) to the real Ollama URL"; exit 1;; \
-	esac; \
-	PROFILES=""; \
-	if [ -n "$${GDRIVE_KB_ID:-}" ]; then \
-	  echo "gdrive indexer provisioned (GDRIVE_KB_ID set) — adding --profile gdrive"; \
-	  PROFILES="$$PROFILES --profile gdrive"; \
-	else \
-	  echo "gdrive indexer not provisioned (GDRIVE_KB_ID unset) — not starting it (run: make gdrive-index-bootstrap to add it)"; \
-	fi; \
-	if [ "$${MARKITDOWN_OCR_PROVISIONED:-0}" = "1" ]; then \
-	  echo "markitdown-ocr provisioned (MARKITDOWN_OCR_PROVISIONED=1) — adding --profile ocr"; \
-	  PROFILES="$$PROFILES --profile ocr"; \
-	else \
-	  echo "markitdown-ocr not provisioned (MARKITDOWN_OCR_PROVISIONED!=1) — not starting it (run: make ocr-bootstrap to add it)"; \
-	fi; \
-	$(COMPOSE) $$PROFILES up -d
+	@./scripts/start.sh
 
 stop: ## Stop the stack (keeps containers + data)
 	@$(COMPOSE) stop
@@ -92,32 +57,8 @@ test: ## Run system integration tests against the running stack (run: make start
 	  echo; echo "=== $$t ==="; bash "$$t" || status=1; \
 	done; exit $$status
 
-test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch (incl. gdrive indexer) + full test suite + e2e
-	@set -e; \
-	echo "==> DESTRUCTIVE: wipes all data and re-provisions from scratch."; \
-	test -f .env.local || { echo "REFUSING: no .env.local (no admin creds to stash) — run make bootstrap + fill OPENWEBUI_TEST_USER/PASSWORD first" >&2; exit 1; }; \
-	set -a; . ./.env; . ./.env.local; set +a; \
-	[ -n "$${OPENWEBUI_TEST_USER:-}" ] && [ -n "$${OPENWEBUI_TEST_PASSWORD:-}" ] \
-	  || { echo "REFUSING: OPENWEBUI_TEST_USER/PASSWORD not set in .env.local (admin account) — fill them first" >&2; exit 1; }; \
-	stash=$$(mktemp); chmod 600 $$stash; \
-	{ printf 'OPENWEBUI_TEST_USER=%s\nOPENWEBUI_TEST_PASSWORD=%s\n' "$$OPENWEBUI_TEST_USER" "$$OPENWEBUI_TEST_PASSWORD"; \
-	  [ -n "$${OPENWEBUI_USER:-}" ] && printf 'OPENWEBUI_USER=%s\n' "$$OPENWEBUI_USER" || true; } > $$stash; \
-	trap 'rm -f $$stash' EXIT; \
-	$(MAKE) clear-all && unset GDRIVE_KB_ID OIKB_API_KEY && \
-	$(MAKE) bootstrap && \
-	./scripts/e2e-restore-creds.sh $$stash && \
-	$(MAKE) preflight && \
-	$(MAKE) start && \
-	{ H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; i=0; \
-	  until curl -sf "$$H/health" >/dev/null; do i=$$((i+1)); [ $$i -lt 60 ] || { echo "stack did not become healthy in 120s ($$H/health)" >&2; exit 1; }; sleep 2; done; \
-	  echo "stack healthy ($$H/health)"; } && \
-	$(MAKE) admin-signup && \
-	$(MAKE) api-keys && \
-	$(MAKE) rag-config && \
-	$(MAKE) gdrive-index-bootstrap && \
-	./scripts/e2e-wait-indexer.sh && \
-	$(MAKE) test && \
-	echo "==> test-e2e PASS"
+test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch (incl. OCR engine + gdrive indexer) + full test suite + e2e
+	@./scripts/test-e2e.sh
 
 api-keys: ## Provision admin + agent-user API keys into .env.local (run after `make start` + admin signup)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
@@ -151,21 +92,7 @@ ocr-config: ## Set OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-ocr (ru
 	@./scripts/ocr-config.sh enable
 
 ocr-disable: ## Clear the external extraction engine + remove the marker + recreate openwebui (no KB reset)
-	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
-	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
-	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
-	@./scripts/ocr-config.sh disable
-	@python3 - <<'PY'
-import os
-f = ".env.local"; key = "MARKITDOWN_OCR_PROVISIONED"
-out = [ln for ln in open(f).read().splitlines() if not ln.startswith(key + "=")]
-open(f, "w").write("\n".join(out) + "\n"); os.chmod(f, 0o600)
-print("OK    removed %s marker from .env.local" % key)
-PY
-	@set -a; . ./.env; . ./.env.local; set +a; \
-	  echo "recreating openwebui so it reloads the cleared extraction config"; \
-	  $(COMPOSE) --profile ocr up -d --no-deps --force-recreate openwebui
-	@echo "Done. New uploads use OWUI's default loaders. Existing OCR'd members are unchanged until re-ingested."
+	@./scripts/ocr-disable.sh
 
 gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup)
 	@./scripts/gdrive-sync

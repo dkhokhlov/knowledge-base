@@ -7,6 +7,8 @@
 [![Ollama](https://img.shields.io/badge/Ollama-host_LLM-000000)](https://ollama.com/)
 [![embed](https://img.shields.io/badge/embed-nomic--embed--text-brightgreen)](https://huggingface.co/nomic-ai/nomic-embed-text)
 [![LLM](https://img.shields.io/badge/LLM-qwen2.5_14b-blueviolet)](https://ollama.com/library/qwen2.5)
+[![OCR](https://img.shields.io/badge/OCR-deepseek--ocr-76b900)](https://ollama.com/library/deepseek-ocr)
+[![extraction](https://img.shields.io/badge/extraction-markitdown--ocr-5c2d91)](https://github.com/microsoft/markitdown/tree/main/packages/markitdown-ocr)
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED)](https://docs.docker.com/compose/)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
 

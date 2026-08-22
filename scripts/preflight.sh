@@ -2,7 +2,7 @@
 # Read-only checks: docker compose plugin, .env.local + WEBUI_SECRET_KEY,
 # ./data tree, host Ollama reachability, and required models. Exits non-zero
 # on FAIL.
-set -u
+set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
@@ -51,7 +51,7 @@ ok "Ollama has LLM model '${MODEL_NAME}'"
 # to CPU (extraction crawls) — so this is a hard fail, not a warning.
 EXP_CTX="${OLLAMA_MODEL_CONTEXT:-8192}"
 GOT_CTX="$(curl -sf --connect-timeout 3 "${OLLAMA}/api/show" -d "{\"name\":\"${MODEL_NAME}\"}" 2>/dev/null \
-  | python3 -c 'import sys,json,re; p=json.load(sys.stdin).get("parameters",""); m=re.search(r"(?m)^\s*num_ctx\s+(\d+)", p); print(m.group(1) if m else "")' 2>/dev/null)"
+  | python3 -c 'import sys,json,re; p=json.load(sys.stdin).get("parameters",""); m=re.search(r"(?m)^\s*num_ctx\s+(\d+)", p); print(m.group(1) if m else "")' 2>/dev/null)" || true
 [ -n "$GOT_CTX" ] \
   || fail "model '${MODEL_NAME}' has no num_ctx (not a ctx variant — run: make pull-models)"
 [ "$GOT_CTX" = "$EXP_CTX" ] \
