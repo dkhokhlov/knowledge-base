@@ -58,15 +58,20 @@ if MODE == "enable":
         "CONTENT_EXTRACTION_ENGINE": "external",
         "EXTERNAL_DOCUMENT_LOADER_URL": ENGINE_URL,
         "EXTERNAL_DOCUMENT_LOADER_API_KEY": TOKEN,
-        "EXTERNAL_DOCUMENT_LOADER_HEADERS": "{}",
+        # OWUI validates HEADERS as a dict (OpenAPI anyOf: object|null), NOT a
+        # string. Posting "{}" (a string) -> HTTP 422 dict_type. Empty dict =
+        # no custom headers (the default).
+        "EXTERNAL_DOCUMENT_LOADER_HEADERS": {},
     }
 else:
-    # Clear: empty values drop OWUI back to its default loaders.
+    # Clear: empty values drop OWUI back to its default loaders. HEADERS is
+    # dict-typed (OWUI anyOf: object|null) so clear it to {} (the default), not
+    # a string (posting "" -> HTTP 422 dict_type).
     WANT = {
         "CONTENT_EXTRACTION_ENGINE": "",
         "EXTERNAL_DOCUMENT_LOADER_URL": "",
         "EXTERNAL_DOCUMENT_LOADER_API_KEY": "",
-        "EXTERNAL_DOCUMENT_LOADER_HEADERS": "",
+        "EXTERNAL_DOCUMENT_LOADER_HEADERS": {},
     }
 
 def call(method, path, body=None):
