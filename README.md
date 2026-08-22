@@ -37,6 +37,7 @@ README:
 Sub-documents:
 
 - [docs/operations.md](docs/operations.md) — prerequisites, configuration (env vars), Ollama host service, persistent data / RAID, make targets, troubleshooting, full hardening reference.
+- [docs/ocr.md](docs/ocr.md) — markitdown-OCR external extraction engine: per-figure `deepseek-ocr` via native Ollama `/api/chat`, per-page/per-slide/per-sheet metadata, provisioning + scope + reversion.
 - [docs/testing.md](docs/testing.md) — integration test suite + matrix.
 - [docs/agents.md](docs/agents.md) — agent integration per tool (Claude Code, Codex, OpenCode, Pi): install the `kb` skill, set `KB_HOST` + `KB_API_KEY`, example flows.
 
@@ -143,6 +144,10 @@ The `gdrive-indexer` sidecar runs [oikb][oikb] (Open WebUI's official sync compa
 - Indexed file types + max-size are set in [`.oikb.yaml`](.oikb.yaml) (documents + source code; `.npy`, audio/video, images, archives, `.svg`/`.drawio` are excluded). oikb does incremental SHA-256 diffing and **fails closed on an empty source** (logs "Source is empty — nothing to sync" and returns without deleting KB files), so a bad/empty mount cannot mass-delete the KB.
 - The sidecar reaches OWUI internally (`openwebui:8080` on `owui_net`) with only the admin key in its env (the rest of `.env.local` is not loaded into it). Daemon state (`history.db`) persists under `./data/oikb`. No host port is published; `gdrive-status` reads oikb's `/health` + `/history` via `docker exec`.
 - Until `make gdrive-index-bootstrap` runs, the indexer has no `kb-id` and logs sync errors harmlessly (it restarts and converges once provisioned).
+
+### OCR extraction (image-bearing documents)
+
+The `markitdown-ocr` sidecar is an **external extraction engine** that OCRs image-bearing documents (PDF/DOCX/PPTX/XLSX) and standalone images via `deepseek-ocr` on Ollama's native `/api/chat`, so image-only PDFs and embedded figures/diagrams become searchable instead of orphaning. Off by default; profile-gated (`--profile ocr`); no per-type fallback (global + all-or-nothing). Provision with `make ocr-bootstrap` (after `make api-keys`); revert with `make ocr-disable` (no KB reset). A hit carries `file_id` + `page` → the exact original page/slide/sheet. Full design, scope, and service guards: [docs/ocr.md](docs/ocr.md).
 
 For per-tool agent integration (skill install, CLI examples), see [docs/agents.md](docs/agents.md).
 

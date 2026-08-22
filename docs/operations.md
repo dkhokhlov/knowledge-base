@@ -276,83 +276,12 @@ oikb daemon state (`history.db`) lives under `${DATA_ROOT}/oikb` (created by
 
 ## markitdown-OCR external extraction service
 
-The `markitdown-ocr` sidecar is an **external extraction engine** for Open WebUI.
-It runs [markitdown-ocr][markitdown-ocr] with the OCR service replaced by an
-Ollama-native `/api/chat` client (`markitdown/oursvc.py`), so embedded figures
-and image-only pages are OCR'd by `deepseek-ocr` and become searchable KB
-members. Off by default; profile-gated (`--profile ocr`); no fallback.
-
-**Data flow:** `gdrive → oikb → Open WebUI → markitdown-ocr → deepseek-ocr (Ollama)
-→ per-page/per-slide/per-sheet chunks`.
-
-**Why native `/api/chat`:** `deepseek-ocr` needs its Gundam image preprocessing
-(a 1024×1024 global view + dynamic 640×640 tiles). Ollama's native `/api/chat`
-applies it; the OpenAI-compatible `/v1` shim does not, and large images
-collapse into a repetition loop through `/v1`. See the plan.
-
-**Per-unit metadata.** The PDF converter emits `## Page N`; the PPTX converter
-emits `<!-- Slide number: N -->`; the XLSX converter emits `## {sheet}`. The
-service splits on the marker that matches the input type and returns a JSON
-list of `{page_content, metadata}`: PDF → `{page: N}`; PPTX → `{page: N}`;
-XLSX → `{page: <sheet index>, sheet: <name>}`; DOCX/text/csv/json/html → one
-document (`file_id` only). OWUI `filter_metadata` keeps `page` (+ `sheet`), so a
-hit carries `file_id` + `page` → the exact original page/slide/sheet. (The PPTX
-upstream converter emits literal `\n`; the service normalizes it before
-splitting, or the per-slide split and the slide text would both break.)
-
-**Standalone images.** markitdown-ocr OCRs only images embedded in documents.
-A standalone `.png`/`.jpg` is OCR'd directly by the service (one document), not
-routed through markitdown's image converter (which would return near-empty
-content and orphan).
-
-### Provisioning (one-time, after `make api-keys`)
-
-`make ocr-bootstrap` generates `OCR_SERVICE_TOKEN` (if missing) into
-`.env.local`, builds the image, (re)creates the `markitdown-ocr` service, waits
-for `/health`, runs `make ocr-config` (sets `CONTENT_EXTRACTION_ENGINE=external`
-+ `EXTERNAL_DOCUMENT_LOADER_URL=http://markitdown-ocr:8080` + the API key in the
-OWUI DB), and writes `MARKITDOWN_OCR_PROVISIONED=1` to `.env.local` **only on
-success**. `make start`/`make restart` then add `--profile ocr` automatically.
-
-### Scope and limits
-
-- **Global + all-or-nothing.** When the engine is enabled, OWUI routes **every**
-  ingest to markitdown-ocr — no per-type fallback; an empty result orphans.
-  Covered: PDF/DOCX/PPTX/XLSX (OCR converters), standalone images (direct OCR),
-  text/csv/json/html (built-in converters). **Not covered:** audio/video (no
-  ffmpeg in v1) → would orphan. Keep those out of the synced set.
-- **API key required.** An empty `EXTERNAL_DOCUMENT_LOADER_API_KEY` makes OWUI
-  silently skip the external engine and fall back to its default loaders.
-  `make ocr-bootstrap` sets a non-empty `OCR_SERVICE_TOKEN`.
-- **No silent fallback.** If `markitdown-ocr` is down, OWUI extraction fails
-  (logged, greppable) and the file orphans — it does not fall back to a default
-  loader. This is by design (the operator sees the outage).
-- **GPU.** `deepseek-ocr` (~6.7 GB) evicts `qwen2.5:14b` on a single-GPU host
-  during OCR. Ollama serializes; the service lock + `OCR_KEEP_ALIVE` bound the
-  thrash. OCR is ingest-time only — run the first sync off-peak (it is a
-  one-time bulk OCR of all image-bearing files; later syncs OCR only
-  changed/new files via the idem byte-dedup).
-- **Reindex caveat.** A reindex rebuilds one document per file from stored
-  metadata (no `page` key) → per-unit `page` metadata is lost, `file_id`
-  survives. After a reindex, round-trip by `file_id` only.
-
-### Monitoring
-
-- `docker logs -f markitdown-ocr` — per-request log + OCR errors.
-- `make preflight` — when provisioned, warns if `deepseek-ocr` is not pulled or
-  `rag.content_extraction_engine` has drifted from `external` (fix: `make
-  ocr-config`).
-- `GET /api/v1/retrieval/config` (admin key) — confirm the engine is set.
-
-### Reversion (no KB reset)
-
-`make ocr-disable` clears `CONTENT_EXTRACTION_ENGINE` in the OWUI DB, removes
-the `MARKITDOWN_OCR_PROVISIONED` marker, and recreates `openwebui`. New uploads
-then use OWUI's default loaders. Existing OCR'd members keep their content
-until re-ingested; re-ingested image-only files return to orphans (the pre-OCR
-state). No full KB reset.
-
-[markitdown-ocr]: https://github.com/microsoft/markitdown/tree/main/packages/markitdown-ocr
+The `markitdown-ocr` sidecar is an **external extraction engine** for Open WebUI
+that OCRs image-bearing documents (and standalone images) via `deepseek-ocr` on
+Ollama's native `/api/chat`. Off by default; profile-gated (`--profile ocr`);
+no fallback. Provision with `make ocr-bootstrap`; revert with `make
+ocr-disable`. Full design, data flow, per-unit metadata, scope/limits, and
+service guards are in [docs/ocr.md](ocr.md).
 
 ## Troubleshooting
 
