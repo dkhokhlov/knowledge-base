@@ -43,7 +43,7 @@ GDRIVE_DIR = "./gdrive"
 SAMPLE_SECS = int(os.environ.get("GDRIVE_STATUS_SAMPLE_SECS", "6"))
 
 # Same allowlist as .oikb.yaml (extensions, compared case-insensitively).
-ALLOW = {"docx","pdf","pptx","xlsx","txt","md","csv","html","json","log","tex",
+ALLOW = {"docx","pdf","pptx","xlsx","txt","md","html","json","log","tex",
          "py","s","c","h","inc","cfg"}
 
 def http_json(url, token=None, timeout=15):

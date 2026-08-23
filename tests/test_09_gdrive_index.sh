@@ -19,7 +19,7 @@ CTN="kb-gdrive-indexer"
 # Allowlist must match scripts/gdrive-status.sh (Python set) + .oikb.yaml. find's
 # default Emacs regex treats (a|b) as LITERAL (matches 0 files), so every -iregex
 # call below MUST use -regextype posix-extended for the alternation to work.
-ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|csv|html|json|log|tex|py|s|c|h|inc|cfg)$'
+ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex|py|s|c|h|inc|cfg)$'
 
 # --- skip conditions ---------------------------------------------------------
 if [ -z "${GDRIVE_KB_ID:-}" ]; then
