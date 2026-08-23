@@ -63,6 +63,11 @@ services:
     # the authz). NO `ports:`; not exposed by Caddy.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Override Docker's forced ndots:0 so bare OLLAMA_HOST (mini4) is resolved
+    # search-first (mini4.khokhlovgroup.com) instead of absolute-first, which
+    # sent a wasted bare `mini4.` NXDOMAIN upstream to the router on every
+    # resolution. Verified: dns_opt overrides the internal ndots:0 cleanly.
+    dns_opt: [ndots:1]
     env_file:
       - .env
       - .env.local
@@ -209,6 +214,11 @@ services:
     # openwebui` (avoid :3000 — that is Caddy).
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Override Docker's forced ndots:0 so bare OLLAMA_HOST (mini4) is resolved
+    # search-first (mini4.khokhlovgroup.com) instead of absolute-first, which
+    # sent a wasted bare `mini4.` NXDOMAIN upstream to the router on every
+    # resolution. Verified: dns_opt overrides the internal ndots:0 cleanly.
+    dns_opt: [ndots:1]
     env_file:
       - .env
       - .env.local
@@ -366,6 +376,11 @@ services:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Override Docker's forced ndots:0 so bare OLLAMA_HOST (mini4) is resolved
+    # search-first (mini4.khokhlovgroup.com) instead of absolute-first, which
+    # sent a wasted bare `mini4.` NXDOMAIN upstream to the router on every
+    # resolution. Verified: dns_opt overrides the internal ndots:0 cleanly.
+    dns_opt: [ndots:1]
     # No env_file: only the interpolated vars below enter the container env, so
     # the rest of .env.local's secrets are NOT loaded into this sidecar.
     # ${OCR_SERVICE_TOKEN} resolves at compose-config time because `make start`/
