@@ -51,10 +51,12 @@ not installed). Pillow (a core markitdown-ocr dep) is used for the min-size skip
 import base64
 import io
 import json
+import logging
 import os
 import re
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -345,6 +347,30 @@ def extract(file_bytes, filename, content_type, md, service):
     return {"page_content": markdown, "metadata": {}}
 
 
+class _UtcISOFormatter(logging.Formatter):
+    """ISO-8601 UTC timestamp on every log line, matching the rest of the stack
+    (oikb JSON ts, loguru, neo4j). Standard logging -> level support + filtering."""
+    converter = time.gmtime
+
+    def formatTime(self, record, datefmt=None):
+        return time.strftime("%Y-%m-%dT%H:%M:%S", self.converter(record.created)) + ".%03dZ" % (record.msecs)
+
+
+def _configure_logging():
+    """One stderr handler with the ISO-UTC formatter on the root logger. The
+    handler replaces any pre-existing root handler (deterministic), so every
+    line - including third-party records (markitdown, urllib) - is timestamped.
+    Level from LOG_LEVEL (default INFO)."""
+    h = logging.StreamHandler()  # stderr
+    h.setFormatter(_UtcISOFormatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+    root = logging.getLogger()
+    root.handlers = [h]
+    root.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+
+
+log = logging.getLogger("markitdown-ocr")
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "markitdown-ocr/1.0"
     _md = None  # set by serve()
@@ -378,15 +404,20 @@ class _Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         content_type = self.headers.get("Content-Type")
         filename = urllib.parse.unquote(self.headers.get("X-Filename", "") or "")
+        t0 = time.monotonic()
+        log.info("/process filename=%r content_type=%r bytes=%d", filename, content_type, length)
         try:
             result = extract(body, filename, content_type, self._md, self._service)
         except Exception as e:  # noqa: BLE001 - fail to OWUI (orphan, greppable), no fallback
+            log.error("/process filename=%r ms=%d err=%s", filename, (time.monotonic() - t0) * 1000, e)
             self._send(500, {"error": "extraction failed: " + str(e)})
             return
+        n = len(result) if isinstance(result, list) else 1
+        log.info("/process OK filename=%r units=%d ms=%d", filename, n, (time.monotonic() - t0) * 1000)
         self._send(200, result)
 
-    def log_message(self, fmt, *args):  # stderr, one line per request
-        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+    def log_message(self, fmt, *args):  # access log via logging (level-aware; .access child inherits root handler)
+        logging.getLogger("markitdown-ocr.access").info("%s - %s", self.address_string(), fmt % args)
 
 
 def serve(host, port, service, md, token):
@@ -394,7 +425,7 @@ def serve(host, port, service, md, token):
     _Handler._service = service
     _Handler._token = token
     httpd = ThreadingHTTPServer((host, port), _Handler)
-    sys.stderr.write("markitdown-ocr listening on %s:%d\n" % (host, port))
+    log.info("listening on %s:%d", host, port)
     httpd.serve_forever()
 
 
@@ -412,9 +443,10 @@ def _build_service_from_env():
 
 
 def main():
+    _configure_logging()
     base_url = os.environ.get("OLLAMA_BASE_URL")
     if not base_url:
-        sys.stderr.write("OLLAMA_BASE_URL is required\n")
+        log.error("OLLAMA_BASE_URL is required")
         sys.exit(2)
     service = _build_service_from_env()
     md = build_markitdown(service)

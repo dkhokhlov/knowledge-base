@@ -135,7 +135,7 @@ would orphan every ingest).
 
 ## Monitoring
 
-- `docker logs -f markitdown-ocr` — per-request log + OCR errors.
+- `docker logs -f kb-markitdown-ocr` — per-request log + OCR errors.
 - `make preflight` — when provisioned, warns if `deepseek-ocr` is not pulled or
   `rag.content_extraction_engine` has drifted from `external` (fix: `make
   ocr-config`).

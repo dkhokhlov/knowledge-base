@@ -24,7 +24,7 @@ defaults:
   interval: ${GDRIVE_INDEX_INTERVAL:-30s}
   concurrency: 4
   filter:
-    max-size: ${OIKB_MAX_SIZE:-50mb}
+    max-size: ${OIKB_MAX_SIZE:-100mb}
 sources:
   - name: gdrive
     source: /gdrive

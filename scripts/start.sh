@@ -19,9 +19,10 @@ unset WEBUI_SECRET_KEY
 [ -n "${WEBUI_SECRET_KEY:-}" ] || { echo "MISSING secret — run: make bootstrap"; exit 1; }
 
 set -a; . ./.env; . ./.env.local; set +a
-case "$OLLAMA_HOST" in
-  *'<ollama-host>'*) echo "REFUSING start: OLLAMA_HOST is still the '<ollama-host>' placeholder — set OLLAMA_HOST (shell env or .env) to the real Ollama URL"; exit 1;;
-esac
+# Preflight: docker, secrets, ./data tree, Ollama running + required models.
+# Fails fast before `docker compose up` if Ollama is down or a required model
+# is missing (a stack that can't reach Ollama is worse than refusing to start).
+./scripts/preflight.sh
 
 PROFILES=""
 if [ -n "${GDRIVE_KB_ID:-}" ]; then

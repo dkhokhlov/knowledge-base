@@ -33,12 +33,13 @@ ok "./data tree exists"
 # Load config-of-record (non-secret).
 set -a; . ./.env; set +a
 
-OLLAMA="${OLLAMA_HOST:-http://host.docker.internal:11434}"
+: "${OLLAMA_HOST:?OLLAMA_HOST is required (set in shell env or uncomment in .env; see .env.example)}"
+OLLAMA="${OLLAMA_HOST%/}"
 # Probe the configured Ollama from the host side (it must be reachable from
 # the host AND from the containers; compose points both services at $OLLAMA).
 TAGS="$(curl -sf --connect-timeout 3 "${OLLAMA}/api/tags" 2>/dev/null)" \
-  || fail "Ollama not reachable at ${OLLAMA} (is it running? check OLLAMA_HOST in shell env or .env)"
-ok "Ollama reachable at ${OLLAMA}"
+  || fail "Ollama not running at ${OLLAMA} (is it up? check OLLAMA_HOST in shell env or .env)"
+ok "Ollama running at ${OLLAMA}"
 
 MODEL_NAME="${MODEL_NAME:-qwen2.5:14b-ctx8192}"
 echo "$TAGS" | grep -q "\"${MODEL_NAME}\"" \
@@ -125,7 +126,9 @@ ocr_prov=0
 if [ "$ocr_prov" -eq 1 ]; then
   ok "markitdown-ocr provisioned (MARKITDOWN_OCR_PROVISIONED=1)"
   OCR_MODEL="${OCR_MODEL:-deepseek-ocr}"
-  if ! echo "$TAGS" | grep -q "\"${OCR_MODEL}\""; then
+  # Match "deepseek-ocr" or "deepseek-ocr:latest" (ollama pull appends :latest;
+  # the bare "\"${OCR_MODEL}\"" pattern misses the :latest form -> false WARN).
+  if ! echo "$TAGS" | grep -qE "\"${OCR_MODEL}(:|\")"; then
     warn "OCR model '${OCR_MODEL}' not pulled in host Ollama — ingest via the external engine would orphan"
     warn "       pull it: ollama pull ${OCR_MODEL}"
   else

@@ -10,9 +10,11 @@ destructive ops require owning the target group or admin; reads see all
 groups (discovered from Neo4j).
 """
 import json
+import logging
 import os
 import secrets
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,6 +35,29 @@ PROVISIONING_MISSING = []
 _concurrency = threading.Semaphore(MAX_CONCURRENCY)
 
 
+class _UtcISOFormatter(logging.Formatter):
+    """ISO-8601 UTC timestamp on every log line, matching the rest of the stack
+    (oikb JSON ts, loguru, neo4j). Standard logging -> level support + filtering."""
+    converter = time.gmtime
+
+    def formatTime(self, record, datefmt=None):
+        return time.strftime("%Y-%m-%dT%H:%M:%S", self.converter(record.created)) + ".%03dZ" % (record.msecs)
+
+
+def _configure_logging():
+    """One stderr handler with the ISO-UTC formatter on the root logger
+    (deterministic: replaces any pre-existing handler). Level from LOG_LEVEL
+    (default INFO)."""
+    h = logging.StreamHandler()  # stderr
+    h.setFormatter(_UtcISOFormatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+    root = logging.getLogger()
+    root.handlers = [h]
+    root.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+
+
+log = logging.getLogger("kb-gateway")
+
+
 class GatewayError(Exception):
     """Carries an HTTP status + message out of a handler."""
     def __init__(self, status, message):
@@ -47,8 +72,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "kb-gateway/1"
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, *a):
-        pass  # quiet; the stack logs elsewhere
+    def log_message(self, fmt, *args):  # access log: the edge Caddy has no access_log, so log the auth boundary here
+        logging.getLogger("kb-gateway.access").info("%s - %s", self.address_string(), fmt % args)
 
     # -- response helpers --
     def _send(self, code, obj):
@@ -289,11 +314,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 owui.revoke_api_key(jwt)
             except Exception as e:
-                print("rollback: key revoke failed for user %s: %s" % (user_id, e), flush=True)
+                log.error("rollback: key revoke failed for user %s: %s", user_id, e)
         try:
             owui.delete_user(admin_key, user_id)
         except Exception as e:
-            print("rollback: user delete failed for user %s: %s" % (user_id, e), flush=True)
+            log.error("rollback: user delete failed for user %s: %s", user_id, e)
 
 
 # --- utils ---
@@ -334,6 +359,7 @@ def _qs_int(qs, key, default):
 
 def main():
     global PROVISIONING_OK, PROVISIONING_MISSING
+    _configure_logging()
     # Probe the deployed OWUI image's provisioning endpoints.
     try:
         PROVISIONING_OK, PROVISIONING_MISSING, perr = owui.provisioning_capabilities()
@@ -341,7 +367,7 @@ def main():
         PROVISIONING_OK, PROVISIONING_MISSING, perr = False, [], str(e)
     prov = "ok" if PROVISIONING_OK else ("missing %s" % (PROVISIONING_MISSING or [perr]))
     port = int(os.environ.get("KB_GATEWAY_PORT", "8010"))
-    print("kb-gateway on :%s (provisioning=%s)" % (port, prov), flush=True)
+    log.info("kb-gateway on :%s (provisioning=%s)", port, prov)
     httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     httpd.serve_forever()
 

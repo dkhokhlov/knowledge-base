@@ -98,7 +98,7 @@ docker compose --profile ocr up -d --no-deps --force-recreate markitdown-ocr
 # healthcheck probes /health inside the container).
 printf '==> waiting for markitdown-ocr /health\n'
 i=0
-until [ "$(docker inspect -f '{{.State.Health.Status}}' markitdown-ocr 2>/dev/null || echo none)" = "healthy" ]; do
+until [ "$(docker inspect -f '{{.State.Health.Status}}' kb-markitdown-ocr 2>/dev/null || echo none)" = "healthy" ]; do
   i=$((i+1))
   [ "$i" -lt 60 ] || { echo "FAIL  markitdown-ocr did not become healthy in 120s" >&2; exit 1; }
   sleep 2
@@ -112,4 +112,4 @@ printf '==> configuring Open WebUI external extraction engine\n'
 # Step 6: write the marker so `make start`/`make restart` add --profile ocr.
 update_env_local MARKITDOWN_OCR_PROVISIONED 1
 printf '\nDone. markitdown-ocr is OWUI'\''s external extraction engine.\n'
-printf 'Logs: docker logs -f markitdown-ocr   |   Disable: make ocr-disable\n'
+printf 'Logs: docker logs -f kb-markitdown-ocr   |   Disable: make ocr-disable\n'

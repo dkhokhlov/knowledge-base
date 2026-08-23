@@ -30,8 +30,9 @@ Lifecycle (codex review):
     `app.dependency_overrides[get_graphiti]`, the documented override path.
 """
 import asyncio
+import logging
 import os
-import traceback
+import time
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -46,6 +47,46 @@ from graph_service.config import get_settings
 from graph_service.routers import ingest, retrieve
 from graph_service.routers.ingest import async_worker
 from graph_service.zep_graphiti import ZepGraphiti, get_graphiti
+
+
+class _UtcISOFormatter(logging.Formatter):
+    """logging.Formatter that stamps every line with a UTC ISO-8601 time, so
+    the graphiti container's uvicorn access + error lines are timestamped like
+    the rest of the stack (oikb JSON ts, loguru, neo4j)."""
+    converter = time.gmtime
+
+    def formatTime(self, record, datefmt=None):
+        return time.strftime("%Y-%m-%dT%H:%M:%S", self.converter(record.created)) + ".%03dZ" % (record.msecs)
+
+
+# uvicorn dictConfig: route every uvicorn logger (and the bootstrap worker
+# logger) through the ISO-UTC formatter. Without this the access log has no
+# timestamp at all (it prints "INFO:     127.0.0.1 ..."), unlike the rest of the
+# stack. The formatter factory is passed as the class object directly (not a
+# dotted string), so it does not depend on this file running as __main__.
+_lvl = os.environ.get("LOG_LEVEL", "INFO").upper()
+LOGGING_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "iso": {"()": _UtcISOFormatter,
+                "fmt": "%(asctime)s %(levelname)s %(name)s - %(message)s"},
+    },
+    "handlers": {
+        "default": {"class": "logging.StreamHandler", "formatter": "iso",
+                    "stream": "ext://sys.stderr"},
+    },
+    "loggers": {
+        "uvicorn": {"handlers": ["default"], "level": _lvl, "propagate": False},
+        "uvicorn.error": {"handlers": ["default"], "level": _lvl, "propagate": False},
+        "uvicorn.access": {"handlers": ["default"], "level": _lvl, "propagate": False},
+        "bootstrap": {"handlers": ["default"], "level": _lvl, "propagate": False},
+    },
+}
+
+
+log = logging.getLogger("bootstrap")
+
 
 # Process-level Graphiti client. Built once at startup, returned to every
 # request via the dependency override, closed once at shutdown.
@@ -127,8 +168,7 @@ async def _worker_loop():
         except asyncio.CancelledError:
             break
         except Exception as e:
-            print("bootstrap: /messages job failed (continuing): %s\n%s" % (
-                e, traceback.format_exc()), flush=True)
+            log.error("/messages job failed (continuing): %s", e, exc_info=True)
 
 
 _worker_task = None
@@ -189,4 +229,4 @@ app.dependency_overrides[get_graphiti] = _get_graphiti_override
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_config=LOGGING_CONFIG)
