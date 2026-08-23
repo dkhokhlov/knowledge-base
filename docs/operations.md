@@ -77,7 +77,7 @@ Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on 
 | `OPENAI_BASE_URL` / `EMBEDDING_MODEL_NAME` | set on the graphiti service in `compose.yml` (from `OLLAMA_HOST` / `EMBEDDER_MODEL`); not in `.env` |
 | `ENV` / `ENABLE_SIGNUP` / `DEFAULT_USER_ROLE` / `ENABLE_API_KEYS` / `USER_PERMISSIONS_FEATURES_API_KEYS` / `RAG_EMBEDDING_MODEL` | Open Web UI behavior |
 | `USER_PERMISSIONS_*` / `ENABLE_OPENAI_API` / `ENABLE_WEB_SEARCH` / `ENABLE_COMMUNITY_SHARING` / `ENABLE_EVALUATION_ARENA_MODELS` / `ENABLE_VERSION_UPDATE_CHECK` / `ENABLE_OTEL` / `WEBUI_FAVICON_URL` | attack-surface + phone-home reduction (full set in `.env.example`) |
-| `OIKB_IMAGE_TAG` / `GDRIVE_INDEX_INTERVAL` / `OIKB_MAX_SIZE` | gdrive auto-index (oikb sidecar): pinned oikb image tag, sync interval (default 30s), max file size (default 50mb). Sync concurrency is hardcoded (4) in `.oikb.yaml`, NOT an env var — oikb interpolates `${VAR:-default}` as strings and compares `concurrency > 1` without coercing, so an env value crashes every sync |
+| `OIKB_IMAGE_TAG` / `GDRIVE_INDEX_INTERVAL` / `OIKB_MAX_SIZE` | gdrive auto-index (oikb sidecar): pinned oikb image tag, sync interval (default 30s), max file size (default 100mb). Sync concurrency is hardcoded (4) in `.oikb.yaml`, NOT an env var — oikb interpolates `${VAR:-default}` as strings and compares `concurrency > 1` without coercing, so an env value crashes every sync |
 
 `.env.local` — gitignored (`chmod 0600`); secrets + generated keys:
 
@@ -250,7 +250,7 @@ as `errors=N (<first error>)`, so a `partial` plateau is diagnosable, not mute.
 star bracket patterns `*.[xX][yY]...` for case-insensitive `fnmatch` at any
 depth; `**/*` would miss root-level files — fnmatch has no globstar). Binaries
 (`.npy`, audio/video, images, archives, `.svg`/`.drawio`) are simply not listed
-→ excluded. `OIKB_MAX_SIZE` (default 50mb) skips oversized files. OWUI dedups
+→ excluded. `OIKB_MAX_SIZE` (default 100mb) skips oversized files. OWUI dedups
 by content hash: a file whose content already exists in the KB is rejected with
 `400 Duplicate content`, so oikb reports the source `status=partial`
 **permanently** when `gdrive/` has duplicate-content files (same content,

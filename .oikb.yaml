@@ -20,6 +20,8 @@
 # single star, NOT '**/*' — fnmatch has no globstar, so '**/*.<ext>' would miss
 # files at the source root. Binaries (.npy, .onnx, audio/video, images, .pyc,
 # archives, .svg/.drawio) are simply not listed here, so oikb never syncs them.
+# Source code (.py, .s, .c, .h, .inc, .cfg, ...) is also deliberately not
+# listed: this KB indexes documents only. Code is handled by open-codebase-index.
 defaults:
   interval: ${GDRIVE_INDEX_INTERVAL:-30s}
   concurrency: 4
@@ -42,17 +44,3 @@ sources:
         - "*.[jJ][sS][oO][nN]"
         - "*.[lL][oO][gG]"
         - "*.[tT][eE][xX]"
-        # source / plain-text code
-        - "*.[pP][yY]"
-        - "*.[sS]"
-        - "*.[cC]"
-        - "*.[hH]"
-        - "*.[iI][nN][cC]"
-        - "*.[cC][fF][gG]"
-      exclude:
-        # Empty (0-byte) source files: OWUI POST /api/v1/files/ rejects a 0-byte
-        # upload with 400, and oikb has no min-size filter (only include/exclude
-        # globs + max-size), so without this it retries the 0-byte file every
-        # cycle. Generic test-runner basename (no PII); the single '*' spans '/'
-        # in fnmatch, so it matches at any depth including the source root.
-        - "*run_tests.py"

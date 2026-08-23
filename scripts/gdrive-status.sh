@@ -10,6 +10,17 @@
 # sync history entry (files_added+modified / duration). If neither is available
 # (cold first sync, no completed history yet), ETA is "unknown".
 #
+# Pending detection: file_count (above) only reflects files LINKED to the KB,
+# not files whose text has been extracted. A file can be linked and still sit
+# at data.status=pending if the extraction sidecar (markitdown-ocr) hasn't
+# finished it yet — invisible to semantic search but also invisible to the
+# indexed/source delta. GET /api/v1/knowledge/{id}/files/pending lists exactly
+# these files (name, status, age since linked). A long age is NOT proof of a
+# hang by itself — extraction runs one file at a time, so age also grows while
+# the pipeline is legitimately busy on other files. Cross-check with
+# `docker logs kb-markitdown-ocr` (recent /process activity = pipeline alive)
+# before assuming a given file is wedged.
+#
 # Preconditions: `make gdrive-index-bootstrap` has run (GDRIVE_KB_ID + OIKB_API_KEY
 # in .env.local, agent user granted read on the KB). Reads the KB with the
 # read-scoped agent key (OPENWEBUI_USER_API_KEY). Reaches oikb's /health and
@@ -43,8 +54,7 @@ GDRIVE_DIR = "./gdrive"
 SAMPLE_SECS = int(os.environ.get("GDRIVE_STATUS_SAMPLE_SECS", "6"))
 
 # Same allowlist as .oikb.yaml (extensions, compared case-insensitively).
-ALLOW = {"docx","pdf","pptx","xlsx","txt","md","html","json","log","tex",
-         "py","s","c","h","inc","cfg"}
+ALLOW = {"docx","pdf","pptx","xlsx","txt","md","html","json","log","tex"}
 
 def http_json(url, token=None, timeout=15):
     headers = {}
@@ -105,6 +115,13 @@ def indexed_count():
             return k.get("file_count")
     return None
 
+# --- pending: files linked to the KB but not yet extracted -------------------
+def pending_files():
+    st, d = http_json("%s/api/v1/knowledge/%s/files/pending" % (O, KB_ID), token=UK)
+    if st != 200 or not isinstance(d, list):
+        return None
+    return d
+
 # --- oikb daemon: /health (no auth) + /history (bearer) via docker exec -----
 def oikb_get(path, auth=False):
     inner = (
@@ -164,6 +181,22 @@ if idx0 is None:
     print("indexed (OWUI KB) : <not visible to agent key — run: make gdrive-index-bootstrap>")
     print("source (gdrive/)  : %d allowlisted files" % source_count)
     sys.exit(0)
+
+pending = pending_files()
+if pending is None:
+    print("pending (OWUI)    : <endpoint unavailable>")
+elif not pending:
+    print("pending (OWUI)    : 0 files awaiting extraction")
+else:
+    now = time.time()
+    pending.sort(key=lambda f: f.get("created_at") or now)  # oldest (longest-pending) first
+    print("pending (OWUI)    : %d file(s) awaiting extraction" % len(pending))
+    for f in pending[:20]:
+        age = now - (f.get("created_at") or now)
+        status = (f.get("data") or {}).get("status", "?")
+        print("  %-50s age=%-10s status=%s" % (f.get("filename", "?")[:50], fmt_eta(age), status))
+    if len(pending) > 20:
+        print("  ... and %d more" % (len(pending) - 20))
 
 print("source (gdrive/)  : %d allowlisted files" % source_count)
 remaining = source_count - idx0
