@@ -159,7 +159,7 @@ Full prerequisites, configuration, and env vars are in [docs/operations.md](docs
 
 **Minimum env vars to set** — everything else has a working default or is auto-generated:
 
-- `.env` → `OLLAMA_HOST`: the only hard blocker. `make start` refuses the `<ollama-host>` placeholder. Set your Ollama URL (`http://host.docker.internal:11434` if Ollama runs on the Docker host) in shell env or `.env` (shell overrides `.env`).
+- `.env` → `OLLAMA_HOST`: the only hard blocker. `make start` fails fast if `OLLAMA_HOST` is unset — compose uses `${OLLAMA_HOST:?…}` (no `host.docker.internal` fallback; `make preflight` checks it too). Set your Ollama URL (`http://host.docker.internal:11434` if Ollama runs on the Docker host) in shell env or `.env` (shell overrides `.env`). Do NOT use `localhost`/`127.0.0.1` — the value is used inside the containers, where localhost is the container's own loopback (no Ollama there).
 - `.env` → `KB_HOST`: the single public URL agents/clients point at (default `http://localhost:3000`). `KB_HOST_PORT` (default `3000`) is the only host-published port. Change `KB_HOST` for remote agents (HTTPS/VPN).
 
 A generated JWT signing key (`make bootstrap`), the API keys (`make api-keys`), and Neo4j auth are generated or default locally. Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
