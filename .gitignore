@@ -24,7 +24,8 @@ __pycache__/
 /data/
 
 # Deployment config + secrets are all gitignored. .env.example is the tracked
-# template (no secrets; <ollama-host> placeholder). `make bootstrap` copies it
+# template (no secrets; OLLAMA_HOST is commented out — set it in shell env or
+# uncomment + set in .env). `make bootstrap` copies it
 # to .env. .env holds the live config incl. OLLAMA_BASE_URL (host-specific).
 # .env.local holds WEBUI_SECRET_KEY and GRAPHITI_API_TOKEN (generated).
 .env

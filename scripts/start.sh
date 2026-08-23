@@ -4,8 +4,8 @@
 #   - --profile gdrive  when GDRIVE_KB_ID is set (run: make gdrive-index-bootstrap);
 #   - --profile ocr     when MARKITDOWN_OCR_PROVISIONED=1 (run: make ocr-bootstrap).
 #
-# Refuses to start without .env.local + a WEBUI_SECRET_KEY, or while OLLAMA_HOST
-# is still the '<ollama-host>' placeholder.
+# Refuses to start without .env.local + a WEBUI_SECRET_KEY, and fails fast if
+# OLLAMA_HOST is unset (compose `${OLLAMA_HOST:?...}` + `./scripts/preflight.sh`).
 #
 # Usage: make start   (or: scripts/start.sh)
 set -euo pipefail
