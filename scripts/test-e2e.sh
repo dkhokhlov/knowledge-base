@@ -66,4 +66,9 @@ make ocr-bootstrap
 make gdrive-index-bootstrap
 make gdrive-sync
 GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" make test
+# test_09 (full real-gdrive drain) is not in the `make test` glob (it is slow
+# and coupled to the live rclone-synced corpus); run it explicitly here, where
+# the corpus is freshly synced and the gdrive KB is provisioned.
+echo "==> full real-gdrive drain (test_09)"
+GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" bash tests/test_09_gdrive_index.sh
 echo "==> test-e2e PASS"

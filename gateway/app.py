@@ -351,9 +351,10 @@ class Handler(BaseHTTPRequestHandler):
     # -- gdrive index: stateless sync drive + status --
 
     def _index(self, identity, qs):
-        """POST /index?source=gdrive&kb_id=<id>[&force=1][&dry_run=1]
-        [&reindex_all=1][&retry_pending=1]. Admin-only. Walks the source mount,
-        drives OWUI's sync/diff protocol with the gateway's held admin key,
+        """POST /index?source=gdrive&kb_id=<id>[&path=<relpath>][&force=1]
+        [&dry_run=1][&reindex_all=1][&retry_pending=1]. Admin-only. Walks the
+        source mount (or the `path` subpath under it), drives OWUI's sync/diff
+        protocol with the gateway's held admin key,
         returns per-file results. Stateless: the KB is the state (no manifest
         file). dry_run never mutates (returns the plan only). New source subdirs
         are created via dirs/create before their files are uploaded (sync/diff's
@@ -361,7 +362,13 @@ class Handler(BaseHTTPRequestHandler):
         would land at KB root). The gateway does NOT link files itself — OWUI's
         per-upload background task is the sole linker (extract -> embed -> link)
         — and re-triggers failed files (plus stalled pending with
-        retry_pending=1) by deleting + re-uploading them."""
+        retry_pending=1) by deleting + re-uploading them. `path` is a SOURCE
+        FILTER only: it scopes the walk (and thus the manifest) to a subpath;
+        the reconcile is a FULL reconcile of that manifest (sync/diff `deleted`
+        + `rmdir` flow through unscoped), so files removed from the source under
+        that subpath ARE removed from the KB. Use a KB whose whole scope is that
+        path (a dedicated/subpath KB, e.g. a throwaway test KB) — on a SHARED KB
+        `path` would delete every KB file outside the subpath."""
         if not authorize.is_admin(identity):
             raise GatewayError(403, "admin role required for /index")
         admin_key = owui._admin_key()  # OwuiError -> 503 if unset
@@ -375,6 +382,7 @@ class Handler(BaseHTTPRequestHandler):
         dry_run = _qs_bool(qs, "dry_run", False)
         reindex_all = _qs_bool(qs, "reindex_all", False)
         retry_pending = _qs_bool(qs, "retry_pending", False)
+        path = _normalize_path(_qs(qs, "path", ""))
         root = os.environ.get("GDRIVE_ROOT", "/gdrive")
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
@@ -382,7 +390,7 @@ class Handler(BaseHTTPRequestHandler):
         # walk_source fails closed on any read/stat/hash error (a silently
         # dropped file would reappear as `deleted` in sync/diff -> cleanup
         # removes its KB entry: data loss on a transient I/O error).
-        files = walk_source(root, allow, max_size)  # [{filename,path,checksum,size,abspath}]
+        files = walk_source(root, allow, max_size, path)  # [{filename,path,checksum,size,abspath}]
         if not files and not force:
             raise GatewayError(422, "source walk yielded 0 files - refusing "
                                     "(mount failure?). Use force=1 to proceed.")
@@ -428,8 +436,8 @@ class Handler(BaseHTTPRequestHandler):
         deleted = diff.get("deleted") or []
         rmdir = diff.get("rmdir") or []
         unmodified = diff.get("unmodified_count") or 0
-        log.info("/index kb=%s added=%d modified=%d deleted=%d unmodified=%d",
-                 kb_id, len(added), len(modified), len(deleted), unmodified)
+        log.info("/index kb=%s path=%s added=%d modified=%d deleted=%d unmodified=%d",
+                 kb_id, path or "-", len(added), len(modified), len(deleted), unmodified)
 
         # errors is initialized BEFORE the mkdir loop so a create_directory
         # failure inside that loop records an error (an append before
@@ -564,7 +572,7 @@ class Handler(BaseHTTPRequestHandler):
                   "retried": retried, "errors": errors, "ok": len(errors) == 0})
 
     def _status(self, identity, qs):
-        """GET /status?source=gdrive&kb_id=<id>[&file=<relpath>][&json=1].
+        """GET /status?source=gdrive&kb_id=<id>[&path=<relpath>][&file=<relpath>][&json=1].
         Read-only. Reports real per-file progress from OWUI file.data.status
         (via GET /files/?content=false, paged). OWUI's status vocabulary:
           pending    = extraction phase (the slow GPU/OCR work) or queued —
@@ -577,7 +585,10 @@ class Handler(BaseHTTPRequestHandler):
         Re-derived live; no stored last-run state. Uses the gateway's held
         admin key for the file scan (GET /files/ is user-scoped — a read-scoped
         caller key sees only its own files, but the KB files were uploaded by
-        the admin); the caller's KB_API_KEY is authorization only."""
+        the admin); the caller's KB_API_KEY is authorization only. `path` scopes
+        source_count to a subpath (the walk filter). The file-status counts are
+        KB-wide (accurate when the KB's whole scope is `path`, the `path` use
+        case)."""
         source = _qs(qs, "source", "gdrive")
         if source != "gdrive":
             raise GatewayError(400, "unknown source %r (Phase 1: 'gdrive' only)" % source)
@@ -587,10 +598,16 @@ class Handler(BaseHTTPRequestHandler):
         as_json = _qs_bool(qs, "json", False)
         relpath = _qs(qs, "file", "")
         admin_key = owui._admin_key()  # OwuiError -> 503 if unset
+        # `path` scopes source_count to a subpath (the walk filter). The
+        # file-status counts are KB-wide (list_file_status is KB-scoped by
+        # knowledge_id already): accurate when the KB's whole scope is `path`
+        # (a dedicated/subpath KB — the `path` use case); on a shared KB they
+        # cover the whole KB, not just the subpath.
+        path = _normalize_path(_qs(qs, "path", ""))
         root = os.environ.get("GDRIVE_ROOT", "/gdrive")
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
-        files = walk_source(root, allow, max_size)
+        files = walk_source(root, allow, max_size, path)
         source_count = len(files)
         file_status = owui.list_file_status(admin_key, kb_id)
         completed = sum(1 for s in file_status if s.get("status") == "completed")
@@ -649,56 +666,102 @@ class Handler(BaseHTTPRequestHandler):
 # open-codebase-index, not the OWUI KB.
 DEFAULT_ALLOW = {"docx", "pdf", "pptx", "xlsx", "txt", "md", "html", "json", "log", "tex"}
 
-_SKIP_NAMES = {".sync-reports", ".sync.lock"}
+def _normalize_path(path):
+    """Normalize a `path` query value relative to the source root. Return "" for
+    no path. Reject an absolute path and a `..` segment (fail closed). Strip a
+    leading `./`, collapse a repeated `/`, strip a trailing `/`, and map `.` to
+    "". Return the POSIX relpath (segments joined by `/`)."""
+    p = (path or "").strip()
+    if not p or p == ".":
+        return ""
+    if os.path.isabs(p) or p.startswith("/"):
+        raise GatewayError(400, "path must be relative to the source root: %r" % path)
+    parts = []
+    for seg in p.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            raise GatewayError(400, "path must not escape the source root: %r" % path)
+        parts.append(seg)
+    return "/".join(parts)
 
 
-def walk_source(root, allow, max_size):
-    """Walk `root` and return one entry per allowlisted, in-size file:
-    [{filename, path, checksum, size, abspath}]. `filename` is the basename,
-    `path` is the directory relpath from `root` (POSIX, "" at root) — the shape
-    OWUI sync/diff expects. `checksum` is the raw-file sha256. Skips symlinks,
-    .sync-reports, .sync.lock. Empty list if root missing/empty (caller guards).
+def _entry_for(abspath, root, allow, max_size):
+    """Build one walk_source entry for `abspath`, or return None when the file is
+    skipped (symlink, non-regular, wrong extension, over size). `path` is the
+    directory relpath from `root` (POSIX, "" at root) — the key OWUI sync/diff
+    uses. Raise GatewayError(500) on a stat or hash OSError (fail closed). Do not
+    apply the dot-name skip here: a single-file `path` opts into a dot-file."""
+    fn = os.path.basename(abspath)
+    ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
+    if ext not in allow:
+        return None
+    try:
+        if os.path.islink(abspath) or not os.path.isfile(abspath):
+            return None
+        size = os.path.getsize(abspath)
+    except OSError as e:
+        raise GatewayError(500, "stat failed for %s: %s" % (abspath, e))
+    if size > max_size:
+        return None
+    try:
+        h = hashlib.sha256()
+        with open(abspath, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        checksum = h.hexdigest()
+    except OSError as e:
+        raise GatewayError(500, "hash failed for %s: %s" % (abspath, e))
+    rel = os.path.relpath(abspath, root)
+    d_rel = os.path.dirname(rel).replace(os.sep, "/")
+    return {"filename": fn, "path": d_rel, "checksum": checksum,
+            "size": size, "abspath": abspath}
+
+
+def walk_source(root, allow, max_size, path=""):
+    """Walk `root` (or the `path` subpath under it) and return one entry per
+    allowlisted, in-size file: [{filename, path, checksum, size, abspath}].
+    `filename` is the basename; `path` is the directory relpath from `root`
+    (POSIX, "" at root) — the shape OWUI sync/diff expects, and the key a full
+    walk produces. `checksum` is the raw-file sha256. Skip symlinks and dot-names
+    (hidden dirs and files). `path` opts into a dot-subtree: the walk starts at
+    the subpath, so the requested dot-dir is entered even though the default
+    walk prunes dot-names, while deeper dot-children stay pruned. Return an empty
+    list when the root or subpath is missing or empty (the caller guards).
 
     Fails CLOSED on any OSError (stat, read, hash, or os.walk descent): a
     silently dropped file would reappear as `deleted` in sync/diff, and
     sync/cleanup would then remove its KB entry — data loss on a transient
     I/O/permission error. Raises GatewayError(500) so /index aborts instead."""
+    path = _normalize_path(path)
     out = []
-    if not os.path.isdir(root):
+    walk_root = os.path.join(root, path) if path else root
+
+    # Single-file path: return the one file (if allowlisted and in size) with
+    # its dir relpath from `root`, so the key matches a full walk.
+    if path and os.path.isfile(walk_root):
+        entry = _entry_for(walk_root, root, allow, max_size)
+        if entry:
+            out.append(entry)
         return out
+
+    if not os.path.isdir(walk_root):
+        return out  # missing root/subroot -> empty (caller guards)
 
     def _walk_err(err):
         raise GatewayError(500, "source walk failed: %s" % err)
 
-    for dirpath, dirs, filenames in os.walk(root, onerror=_walk_err):
-        dirs[:] = [d for d in dirs if d not in _SKIP_NAMES]
+    for dirpath, dirs, filenames in os.walk(walk_root, onerror=_walk_err):
+        # Prune dot-dirs: hidden/auxiliary trees (.sync-reports, .sync.lock,
+        # .tests) are excluded from a full walk. `path` enters one explicitly.
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
         for fn in filenames:
-            if fn in _SKIP_NAMES:
-                continue
-            ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
-            if ext not in allow:
+            if fn.startswith("."):
                 continue
             abspath = os.path.join(dirpath, fn)
-            try:
-                if os.path.islink(abspath) or not os.path.isfile(abspath):
-                    continue
-                size = os.path.getsize(abspath)
-            except OSError as e:
-                raise GatewayError(500, "stat failed for %s: %s" % (abspath, e))
-            if size > max_size:
-                continue
-            rel = os.path.relpath(abspath, root)
-            d_rel = os.path.dirname(rel).replace(os.sep, "/")
-            try:
-                h = hashlib.sha256()
-                with open(abspath, "rb") as fh:
-                    for chunk in iter(lambda: fh.read(1 << 20), b""):
-                        h.update(chunk)
-                checksum = h.hexdigest()
-            except OSError as e:
-                raise GatewayError(500, "hash failed for %s: %s" % (abspath, e))
-            out.append({"filename": fn, "path": d_rel, "checksum": checksum,
-                        "size": size, "abspath": abspath})
+            entry = _entry_for(abspath, root, allow, max_size)
+            if entry:
+                out.append(entry)
     return out
 
 

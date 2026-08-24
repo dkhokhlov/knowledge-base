@@ -19,6 +19,12 @@ Options:
                           files; use this after a drain stalls (a pending file
                           stuck in OCR). Interrupts in-flight OCR, so it is not
                           the default.
+      --path RELPATH      index only a subpath of ./gdrive (a dir or a single
+                          file; relative to the gdrive root). The reconcile is a
+                          FULL reconcile of that subpath: use a KB whose whole
+                          scope is that path (a dedicated/subpath KB). On the
+                          shared gdrive KB this deletes every KB file outside
+                          the subpath, so do not use it there.
   -h, --help              show this help
 
 The destination contains one directory per shared drive. The command uses
@@ -70,6 +76,7 @@ exclude_file="./gdrive-exclude.conf"
 dry_run=0
 index_all=0
 retry_pending=0
+path=""
 
 while (($# > 0)); do
     case "$1" in
@@ -81,6 +88,11 @@ while (($# > 0)); do
         -d|--destination)
             (($# >= 2)) || { echo "error: --destination needs a value" >&2; exit 2; }
             destination="$2"
+            shift 2
+            ;;
+        --path)
+            (($# >= 2)) || { echo "error: --path needs a value" >&2; exit 2; }
+            path="$2"
             shift 2
             ;;
         --dry-run)
@@ -581,6 +593,12 @@ if (( !dry_run )); then
         idx_q="source=gdrive&kb_id=${GDRIVE_KB_ID}"
         (( index_all )) && idx_q="${idx_q}&reindex_all=1"
         (( retry_pending )) && idx_q="${idx_q}&retry_pending=1"
+        if [[ -n "${path}" ]]; then
+            # URL-encode the subpath (gdrive paths may contain spaces) before
+            # appending it to the query string.
+            path_enc=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$path")
+            idx_q="${idx_q}&path=${path_enc}"
+        fi
         if (( index_all )); then
             emit "Indexing synced tree into OWUI KB (via kb-gateway /index, full re-index)..."
         else

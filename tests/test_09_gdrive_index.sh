@@ -35,6 +35,10 @@ set -u
 load_env
 require_stack_up
 
+# Not part of `make test` (slow: up to GDRIVE_TEST_WAIT of GPU OCR over the
+# whole live rclone-synced corpus). `make test` covers the gdrive index path
+# fast + deterministically via test_11_gdrive_index_fixture.sh. This full
+# real-gdrive drain runs under `make test-e2e` (which invokes it by path).
 O="$(kb_host)"
 # Allowlist must match gateway DEFAULT_ALLOW (gateway/app.py). find's default
 # Emacs regex treats (a|b) as LITERAL (matches 0 files), so every -iregex call

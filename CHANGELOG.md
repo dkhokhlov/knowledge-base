@@ -8,6 +8,50 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`make test` is fast and deterministic; the full real-gdrive drain moved to
+  `make test-e2e` only.** `tests/test_09_gdrive_index.sh` (the full real-gdrive
+  `/index` + drain audit — slow, coupled to the live rclone-synced corpus) is
+  no longer in the `make test` glob (the Makefile skips it with a notice); it
+  runs under `make test-e2e`, which invokes it by path after the fresh
+  `gdrive-sync`. New `tests/test_11_gdrive_index_fixture.sh` indexes a small,
+  committed fixture set under `gdrive/.tests/` into a throwaway temp KB via
+  `POST /index?path=.tests`, polls `GET /status?path=.tests` to terminal,
+  audits failures (hard-fails on a "Failed to link" double-link race), and runs
+  a deterministic marker-token semantic search. Self-contained: creates +
+  grants `*` read + deletes the temp KB on EXIT (its files too, enumerated via
+  `/api/v1/files/?content=false` filtered by `knowledge_id` so uploaded-but-
+  unlinked orphans are caught); the committed fixture files are NOT deleted.
+  Fixtures are small text files (`.txt`/`.md`/`.json`) plus minimal binary files
+  (`.pdf`/`.docx`/`.pptx`) so the binary extraction path is exercised; when
+  markitdown-ocr is not provisioned the binary fixtures fail extraction and
+  surface as a genuine-failure notice (the text fixtures + marker search carry
+  the test). `.gitignore` gains `!/gdrive/.tests/` + `!/gdrive/.tests/**` so the
+  fixtures are tracked despite `/gdrive/*`. No compose/mount change, and no
+  test-only env-var knob (`GDRIVE_FULL_DRAIN`) is introduced.
+- **`/index` + `/status` gain a `path` query param; `walk_source` skips
+  dot-names; `path` is exposed as a `gdrive-sync`/`gdrive-index`/`gdrive-status`
+  parameter.** `POST /index?path=<relpath>` and `GET /status?path=<relpath>`
+  target a subpath of the gdrive root (a directory or a single file; relative,
+  normalized — absolute and `..` rejected). `path` is a SOURCE FILTER only: it
+  scopes the `walk_source` manifest to the subpath. The reconcile is a FULL
+  reconcile of that manifest — `sync/diff` `deleted` + `rmdir` flow through
+  unscoped, so files removed from the source under that subpath ARE removed from
+  the KB. Use a KB whose whole scope is that `path` (a dedicated/subpath KB,
+  e.g. a throwaway test KB): on a SHARED KB `path` would delete every KB file
+  outside the subpath. Entry `path` keys stay relative to the original root, so
+  a subpath index and a later full `/index` see `unmodified` (not re-`added`).
+  `path` on `/status` scopes `source_count` to the subpath; the file-status
+  counts are KB-wide (`list_file_status` is KB-scoped by `knowledge_id`
+  already), accurate when the KB's whole scope is `path`. The operator surface
+  is `make gdrive-sync --path <relpath>` / `make gdrive-index PATH=<relpath>` /
+  `make gdrive-status PATH=<relpath>` (the REST `?path=` is an internal detail).
+  `walk_source` now skips dot-dirs and dot-files (replacing the hardcoded
+  `{".sync-reports", ".sync.lock"}` set) — a full walk no longer indexes hidden
+  files, and `path` opts into a dot-subtree (e.g. `.tests`).
+  Production behavior change: verified `./gdrive` has 0 dot-named allowlisted
+  files today; a future dot-named corpus doc would be skipped (caught by
+  review).
+
 - **`/index` no longer links files; `/status` reports real per-file progress.**
   The gateway stopped calling `files/batch/add` (link): `POST /files/` with
   `metadata.knowledge_id` queues OWUI's per-upload background task that runs the

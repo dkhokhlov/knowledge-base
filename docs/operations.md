@@ -169,6 +169,24 @@ opaque daemon aggregate). `ok=false` means a real upload/extract error (the
 upload-idempotency + path-aware-dedup patches make duplicate-content 400s not
 occur). kb-gateway references a pre-existing KB by id — it does not create KBs.
 
+**Subpath reconcile (`?path=<relpath>`).** `/index` and `/status` accept an
+optional `path` query param: a path relative to the gdrive root (a directory or
+a single file; normalized — absolute and `..` rejected with 400). `path` is a
+SOURCE FILTER only: it scopes the `walk_source` manifest to that subpath (entry
+keys stay relative to the original root, so a subpath index and a later full
+`/index` see `unmodified`, not re-`added`). The reconcile is a FULL reconcile of
+that manifest — `sync/diff` `deleted` + `rmdir` flow through unscoped, so files
+removed from the source under that subpath ARE removed from the KB. Use a KB
+whose whole scope is that `path` (a dedicated/subpath KB, e.g. a throwaway test
+KB): on a SHARED KB `path` would delete every KB file outside the subpath.
+`/status` with `path` scopes `source_count` to the subpath; the file-status
+counts are KB-wide (accurate when the KB's whole scope is `path`). The operator
+surface is `make gdrive-sync --path <relpath>` / `make gdrive-index PATH=<relpath>`
+/ `make gdrive-status PATH=<relpath>` (the REST `?path=` is an internal detail).
+The full walk skips dot-dirs and dot-files (so hidden metadata like
+`.sync-reports`/`.sync.lock` is never indexed); `path` opts into a dot-subtree
+(the committed `gdrive/.tests/` fixtures are indexed this way).
+
 Posture change: for the `/index`+`/status` path the gateway holds
 `OPENWEBUI_ADMIN_API_KEY` (compose env, from `.env.local`) and uses it for the
 OWUI sync writes AND the `/status` file scan (`GET /files/` is user-scoped — a
@@ -446,7 +464,7 @@ dependency is down.
 | `ocr-config` | set the OWUI external-extraction keys (engine + URL + API key); re-run to re-assert after a DB reset |
 | `ocr-disable` | clear the external engine + remove the marker + recreate `openwebui` (no KB reset; existing OCR'd members unchanged until re-ingested) |
 | `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./gdrive-exclude.conf` (`[<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections; then POSTs `/index` to reconcile the tree into the KB (`--index-all` for a full re-index; `--retry-pending` to re-trigger stalled pending; fail-fast on `ok=false`) |
-| `gdrive-index` | POST `/index` alone (no rclone): reconcile `./gdrive` into the KB via kb-gateway (admin; incremental). `INDEX_ALL=1` for a full re-index |
+| `gdrive-index` | POST `/index` alone (no rclone): reconcile `./gdrive` into the KB via kb-gateway (admin; incremental). `INDEX_ALL=1` for a full re-index. `PATH=<relpath>` indexes only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path — see "Subpath reconcile" above) |
 | `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, write `GDRIVE_KB_ID` to `.env.local` (run after `make api-keys`; idempotent; no sidecar) |
 | `gdrive-status` | GET `/status` (kb-gateway): `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`, `✓ COMPLETE` / `○ in-flight=N` (no ETA — no daemon). Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
