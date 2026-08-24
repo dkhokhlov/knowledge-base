@@ -330,6 +330,60 @@ kb-gateway is stateless: it holds no persistent state (no `history.db`, no
 Only additions vs the prior design: the `./gdrive:/gdrive:ro` mount (input, not
 state) and `OPENWEBUI_ADMIN_API_KEY` in the gateway env (config, not state).
 
+## Projects memory indexing (Claude project memory → Open WebUI)
+
+**Projects memory** = Claude's per-project auto-memory
+(`~/.claude/projects/<encoded-dir>/memory/*.md`), indexed into OWUI KBs (one KB
+per project) so an agent recalls knowledge across Claude Code projects and
+sessions. This is distinct from **facts memory** (the Graphiti knowledge graph,
+`kb-gateway` `/memory/*`); "memory" is overloaded, so the two are named
+explicitly.
+
+Unlike the gdrive KB (kb-gateway `/index`, admin key, admin-owned KB), projects
+memory is indexed by the **skill-side wrapper** (`skills/claude/scripts/owui.py`
+`index-projects`): it walks the host filesystem and calls OWUI REST **directly
+with the caller's user key**, which creates + owns each project KB
+(`KB.user.email == caller`). The kb-gateway is not involved (it has no user-key
+OWUI-KB write path). Manual/on-demand only: no daemon, no schedule.
+
+### Provisioning (one-time, after `make api-keys`)
+
+`make projects-bootstrap` enables the `workspace.knowledge` permission (off by
+default; OWUI gates KB creation on it). It reads the default permissions, flips
+`workspace.knowledge=true`, POSTs the full body back (replace, not merge), and
+verifies with a disposable user-key probe KB (create + delete). The agent user
+record has no per-user permission override, so flipping the default propagates
+to it. Run once; re-runs are a no-op. No `*_KB_ID` is written — `index-projects`
+derives KB names and lists KBs at run time.
+
+### Indexing
+
+`index-projects` indexes every project with a `memory/` dir (or `--project
+<substr>` to select one). KB name = `<host>--<encoded-dir-without-leading-dash>`
+(host = short hostname). Per-file metadata (flat in `File.meta.data`): `host`,
+`project` (encoded dir), `project_path` (decode; authoritative when the path
+exists on disk), `repo` (git repo name), `account` (caller email),
+`source_relpath` (`memory/<file>`); `repo` also rides in the KB `description`.
+
+Every run is a full snapshot: all `memory/*.md` are uploaded (OWUI idempotency
+reuses unchanged files, no re-extract). A **modified** file (sha256 differs) is
+delete-then-uploaded — `DELETE /api/v1/files/{id}` (the router path; the upload's
+own reclaim does not clean KB vectors). Orphans (source file gone) are deleted
+(`--no-cleanup` to skip) so the KB mirror stays exact. `--wait` polls
+`GET /api/v1/files/?content=false` (the unified source; the linked-only
+`/knowledge/{id}/files` misses pending/unlinked uploads) until `pending +
+processing == 0` (deadline `PROJECTS_WAIT`, default 600s).
+
+### Status + search
+
+`status-projects` reports the current repo's drain (it walks up `realpath(cwd)`
+to match `~/.claude/projects/<encoded>`; `--project <substr>` overrides; `--json`
+prints a dict; `--wait` polls). `search-projects` searches across the caller's
+project KBs (filters: `--host`, `--project`, `--account` default caller,
+`--kb-glob`). It makes one retrieval call per KB (hit metadata carries no
+`knowledge_id`, so one-call-per-KB is the reliable attribution) and prints
+`repo=<repo> kb=<name> file=<file>` per hit.
+
 ## markitdown-OCR external extraction service
 
 The `markitdown-ocr` sidecar is an **external extraction engine** for Open WebUI

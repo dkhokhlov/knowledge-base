@@ -11,6 +11,7 @@ DATA_DIR := ./data
         health test test-e2e api-keys admin-signup rag-config \
         ocr-bootstrap ocr-config ocr-disable \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
+        projects-bootstrap \
         shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-backup
 
 help: ## Show this help
@@ -124,6 +125,14 @@ gdrive-status: ## Show gdrive index status via kb-gateway GET /status (completed
 	  [ -n "$${OPENWEBUI_USER_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
 	  curl -sS "$$H/status?source=gdrive&kb_id=$$GDRIVE_KB_ID" \
 	    -H "Authorization: Bearer $$OPENWEBUI_USER_API_KEY"; echo
+
+projects-bootstrap: ## One-time admin enable of workspace.knowledge so the user key can create + own project-memory KBs (run after `make api-keys`)
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
+	@grep -qE '^OPENWEBUI_USER_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (the caller key that owns project KBs; run: make api-keys)"; exit 1; }
+	@./scripts/projects-index-bootstrap.sh
 
 shell-owui: ## Shell into the Open WebUI container
 	@docker exec -it kb-openwebui sh

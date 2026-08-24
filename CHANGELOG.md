@@ -186,6 +186,28 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Projects memory indexing (Claude project memory → OWUI KBs).** New
+  `index-projects` / `search-projects` / `status-projects` subcommands in
+  `skills/claude/scripts/owui.py` index `~/.claude/projects/<encoded>/memory/*.md`
+  into OWUI KBs — one KB per project — so an agent recalls knowledge across
+  Claude Code projects and sessions. The skill-side wrapper walks the host
+  filesystem and calls OWUI REST directly with the caller's user key, which
+  creates + owns each project KB (`KB.user.email == caller`); the kb-gateway is
+  not involved. KB name = `<host>--<encoded-dir-without-leading-dash>`; per-file
+  metadata carries `host`, `project`, `project_path`, `repo` (git repo name),
+  `account`, `source_relpath` (and `repo` rides in the KB `description`).
+  Every run is a full snapshot (always re-uploads; OWUI idempotency reuses
+  unchanged files); a modified file is delete-then-uploaded (router `DELETE`
+  cleans vectors — the upload's own reclaim does not); orphans are deleted.
+  `search-projects` filters by `--host`/`--project`/`--account`/`--kb-glob` and
+  makes one retrieval call per KB (hit metadata carries no `knowledge_id`, so
+  one-call-per-KB is the reliable attribution). `status-projects` walks up
+  `realpath(cwd)` to match the project KB. Naming: "projects memory" (this) vs
+  "facts memory" (the Graphiti knowledge graph, `kb-gateway` `/memory/*`) —
+  "memory" is overloaded, so the two are named explicitly. One-time setup:
+  `make projects-bootstrap` (admin) enables `workspace.knowledge` (off by
+  default) so the user key can create KBs.
+
 - **Custom Open WebUI overlay image (path-aware dedup hash + upload
   idempotency).** New `open-webui/` dir builds a thin overlay on the pinned
   official OWUI 0.11.0 image (digest-pinned, not the rolling `:main` tag) that

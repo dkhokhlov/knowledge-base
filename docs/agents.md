@@ -37,9 +37,10 @@ The repo ships the `kb` skill in `skills/<tool>/` (one per agent tool):
 with `scripts/` symlinked to `../claude/scripts`. The wrappers are zero-dependency
 Python 3.8+ stdlib:
 
-- `scripts/owui.py` — Open WebUI REST (read-scoped): `whoami`, `kbs`, `search`,
-  `rag`, `file`.
-- `scripts/kb_gateway.py` — kb-gateway: memory (`whoami`, `groups`, `add`,
+- `scripts/owui.py` — Open WebUI REST: KB surface (read-scoped) `whoami`, `kbs`,
+  `search`, `rag`, `file`; **projects memory** (user-key writes to owned KBs)
+  `index-projects`, `search-projects`, `status-projects`.
+- `scripts/kb_gateway.py` — kb-gateway: facts memory (`whoami`, `groups`, `add`,
   `search`, `episodes`, `status`, `forget`, `delete-edge`, `delete-episode`) and
   admin (`user-create`).
 
@@ -55,6 +56,9 @@ Both read `KB_HOST` (fallback synth from `KB_HOST_PORT`) + `KB_API_KEY` (fallbac
 | Natural — search | "search the KB for X" / "search the knowledge base for X" | by description match |
 | Natural — RAG chat | "ask the KB: \<question\>" / "ask the knowledge base: \<question\>" | by description match |
 | Natural — list | "list my KBs" / "list my knowledge bases" | by description match |
+| Natural — index projects memory | "index projects memory" / "index my Claude project memory" | by description match |
+| Natural — projects status | "projects memory index status" / "is my repo indexed" | by description match |
+| Natural — search projects memory | "search projects memory for X" / "search across my project KBs for X" | by description match |
 
 The slash command is the most reliable; natural phrasing triggers automatically
 when it matches the skill description. Both "KB" and "knowledge base" phrasings
@@ -124,7 +128,41 @@ URL); without it the model confabulates. Ground the chat via the top-level
 `files` field only (`{"type":"collection","id":"<kb-id>"}`) — a `knowledge` field
 is ignored.
 
-### Graphiti memory (kb-gateway)
+### Projects memory (owui.py, user key)
+
+**Projects memory** = Claude's per-project auto-memory
+(`~/.claude/projects/<encoded-dir>/memory/*.md`), indexed into OWUI KBs — one KB
+per project — so an agent recalls knowledge across Claude Code projects and
+sessions. The wrapper walks the host filesystem and calls OWUI REST directly
+with the caller's user key, which creates + owns each project KB
+(`KB.user.email == caller`). The kb-gateway is not involved.
+
+**One-time setup** (admin): `make projects-bootstrap` enables the
+`workspace.knowledge` permission (off by default) so the user key can create
+KBs. `index-projects` fails with a clear message until this is run.
+
+KB name = `<host>--<encoded-dir-without-leading-dash>` (host = short hostname).
+Per-file metadata: `host`, `project`, `project_path`, `repo` (git repo name),
+`account`, `source_relpath` — `repo` rides in the KB `description` too, so hits
+are easy to reason about (`search-projects` prints `repo=<repo>` per hit).
+
+```
+python3 "$S/owui.py" $E index-projects --dry-run                  # plan only
+python3 "$S/owui.py" $E index-projects --project knowledgebase --wait   # index this repo, wait for drain
+python3 "$S/owui.py" $E status-projects                           # current repo's drain status (walks up cwd)
+python3 "$S/owui.py" $E search-projects "QPU scheduling"          # across ALL your project KBs
+python3 "$S/owui.py" $E search-projects "X" --host mini2 --project knowledgebase   # filtered
+```
+
+**Workflow**: run `index-projects` at session start (so this session's memory is
+searchable across sessions/repos) and on an explicit "index projects memory"
+prompt; then `status-projects` to confirm the current repo's drain before
+relying on search — same "refresh at session start" convention as
+open-codebase-index. `index-projects` is a full snapshot every run (always
+re-uploads `memory/*.md`; OWUI idempotency reuses unchanged files; a modified
+file is delete-then-uploaded so no stale vectors; orphans are deleted).
+
+### Facts memory (Graphiti, kb-gateway)
 
 ```
 python3 "$S/kb_gateway.py" $E groups                              # list all groups that have data
