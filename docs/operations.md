@@ -181,8 +181,9 @@ whose whole scope is that `path` (a dedicated/subpath KB, e.g. a throwaway test
 KB): on a SHARED KB `path` would delete every KB file outside the subpath.
 `/status` with `path` scopes `source_count` to the subpath; the file-status
 counts are KB-wide (accurate when the KB's whole scope is `path`). The operator
-surface is `make gdrive-sync --path <relpath>` / `make gdrive-index PATH=<relpath>`
-/ `make gdrive-status PATH=<relpath>` (the REST `?path=` is an internal detail).
+surface is `make gdrive-sync SCOPE_PATH=<relpath>` / `make gdrive-index SCOPE_PATH=<relpath>`
+/ `make gdrive-status SCOPE_PATH=<relpath>` (the env var is `SCOPE_PATH`, not `PATH`,
+so it does not clobber the shell's executable-search `PATH`; the REST `?path=` is an internal detail).
 The full walk skips dot-dirs and dot-files (so hidden metadata like
 `.sync-reports`/`.sync.lock` is never indexed); `path` opts into a dot-subtree
 (the committed `gdrive/.tests/` fixtures are indexed this way).
@@ -464,7 +465,7 @@ dependency is down.
 | `ocr-config` | set the OWUI external-extraction keys (engine + URL + API key); re-run to re-assert after a DB reset |
 | `ocr-disable` | clear the external engine + remove the marker + recreate `openwebui` (no KB reset; existing OCR'd members unchanged until re-ingested) |
 | `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./gdrive-exclude.conf` (`[<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections; then POSTs `/index` to reconcile the tree into the KB (`--index-all` for a full re-index; `--retry-pending` to re-trigger stalled pending; fail-fast on `ok=false`) |
-| `gdrive-index` | POST `/index` alone (no rclone): reconcile `./gdrive` into the KB via kb-gateway (admin; incremental). `INDEX_ALL=1` for a full re-index. `PATH=<relpath>` indexes only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path — see "Subpath reconcile" above) |
+| `gdrive-index` | POST `/index` alone (no rclone): reconcile `./gdrive` into the KB via kb-gateway (admin; incremental). `INDEX_ALL=1` for a full re-index. `SCOPE_PATH=<relpath>` indexes only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path — see "Subpath reconcile" above) |
 | `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, write `GDRIVE_KB_ID` to `.env.local` (run after `make api-keys`; idempotent; no sidecar) |
 | `gdrive-status` | GET `/status` (kb-gateway): `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`, `✓ COMPLETE` / `○ in-flight=N` (no ETA — no daemon). Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |

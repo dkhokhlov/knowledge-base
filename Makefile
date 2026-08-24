@@ -97,17 +97,17 @@ ocr-config: ## Set OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-ocr (ru
 ocr-disable: ## Clear the external extraction engine + remove the marker + recreate openwebui (no KB reset)
 	@./scripts/ocr-disable.sh
 
-gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup), then POST /index to reconcile into the OWUI gdrive KB. Use --index-all for a full re-index.
-	@./scripts/gdrive-sync
+gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup), then POST /index to reconcile into the OWUI gdrive KB. Use --index-all for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
+	@./scripts/gdrive-sync $${SCOPE_PATH:+--path "$$SCOPE_PATH"}
 
-gdrive-index: ## Reconcile ./gdrive into the OWUI gdrive KB via kb-gateway POST /index (admin; incremental). Set INDEX_ALL=1 for a full re-index. Set PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
+gdrive-index: ## Reconcile ./gdrive into the OWUI gdrive KB via kb-gateway POST /index (admin; incremental). Set INDEX_ALL=1 for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
 	  [ -n "$${GDRIVE_KB_ID:-}" ] || { echo "MISSING GDRIVE_KB_ID in .env.local (run: make gdrive-index-bootstrap)"; exit 1; }; \
 	  [ -n "$${OPENWEBUI_ADMIN_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
 	  q="source=gdrive&kb_id=$$GDRIVE_KB_ID"; [ "$${INDEX_ALL:-0}" = "1" ] && q="$$q&reindex_all=1"; \
-	  [ -n "$${PATH:-}" ] && q="$$q&path=$$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$$PATH")"; \
+	  [ -n "$${SCOPE_PATH:-}" ] && q="$$q&path=$$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$$SCOPE_PATH")"; \
 	  curl -sS --max-time 1200 -X POST "$$H/index?$$q" \
 	    -H "Authorization: Bearer $$OPENWEBUI_ADMIN_API_KEY" \
 	    -H "Content-Type: application/json" -d '{}'; echo
@@ -120,13 +120,13 @@ gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant agent read + writ
 	  || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (the read-scoped agent key; run: make api-keys)"; exit 1; }
 	@./scripts/gdrive-index-bootstrap.sh
 
-gdrive-status: ## Show gdrive index status via kb-gateway GET /status (completed/pending/processing/failed). Set PATH=<relpath> to scope source_count to a subpath (file counts are KB-wide; accurate when the KB's whole scope is that path).
+gdrive-status: ## Show gdrive index status via kb-gateway GET /status (completed/pending/processing/failed). Set SCOPE_PATH=<relpath> to scope source_count to a subpath (file counts are KB-wide; accurate when the KB's whole scope is that path).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
 	  [ -n "$${GDRIVE_KB_ID:-}" ] || { echo "MISSING GDRIVE_KB_ID in .env.local (run: make gdrive-index-bootstrap)"; exit 1; }; \
 	  [ -n "$${OPENWEBUI_USER_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
-	  q="source=gdrive&kb_id=$$GDRIVE_KB_ID"; [ -n "$${PATH:-}" ] && q="$$q&path=$$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$$PATH")"; \
+	  q="source=gdrive&kb_id=$$GDRIVE_KB_ID"; [ -n "$${SCOPE_PATH:-}" ] && q="$$q&path=$$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$$SCOPE_PATH")"; \
 	  curl -sS "$$H/status?$$q" \
 	    -H "Authorization: Bearer $$OPENWEBUI_USER_API_KEY"; echo
 

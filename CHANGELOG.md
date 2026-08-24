@@ -43,8 +43,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `path` on `/status` scopes `source_count` to the subpath; the file-status
   counts are KB-wide (`list_file_status` is KB-scoped by `knowledge_id`
   already), accurate when the KB's whole scope is `path`. The operator surface
-  is `make gdrive-sync --path <relpath>` / `make gdrive-index PATH=<relpath>` /
-  `make gdrive-status PATH=<relpath>` (the REST `?path=` is an internal detail).
+  is `make gdrive-sync SCOPE_PATH=<relpath>` / `make gdrive-index SCOPE_PATH=<relpath>` /
+  `make gdrive-status SCOPE_PATH=<relpath>` (the env var is `SCOPE_PATH`, not `PATH`,
+  so it does not clobber the shell's executable-search `PATH`; the REST `?path=` is an internal detail).
   `walk_source` now skips dot-dirs and dot-files (replacing the hardcoded
   `{".sync-reports", ".sync.lock"}` set) — a full walk no longer indexes hidden
   files, and `path` opts into a dot-subtree (e.g. `.tests`).
