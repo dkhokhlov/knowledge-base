@@ -4,15 +4,19 @@
 # (nomic-embed-text). Refuses if OLLAMA_MODEL_CONTEXT is not a positive
 # integer.
 #
-# NOTE: this does NOT pull the OCR vision model (deepseek-ocr) — that is
-# handled by `make ocr-bootstrap` (which runs `ollama pull $OCR_MODEL` as a
-# provisioning step). Run `make ocr-bootstrap` separately to provision OCR.
+# When OCR_ENABLED=true (default; overridable via `make pull-models
+# OCR_ENABLED=false`), also pulls the OCR vision model (OCR_MODEL, default
+# deepseek-ocr) — a first-class prereq alongside the base LLM + embedder.
 #
 # Usage: make pull-models   (or: scripts/pull-models.sh)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Capture a `make pull-models OCR_ENABLED=<val>` override before sourcing .env
+# (which would clobber it).
+_OCR_ENABLED_OVR="${OCR_ENABLED:-}"
 set -a; . ./.env; set +a
+if [ -n "$_OCR_ENABLED_OVR" ]; then export OCR_ENABLED="$_OCR_ENABLED_OVR"; fi
 : "${OLLAMA_MODEL_BASE:?OLLAMA_MODEL_BASE not set in .env}"
 : "${MODEL_NAME:?MODEL_NAME not set in .env}"
 case "${OLLAMA_MODEL_CONTEXT:-}" in ''|*[!0-9]*)
@@ -31,4 +35,9 @@ ollama create "$MODEL_NAME" -f "$mf"
 rm -f "$mf"
 echo "Pulling embedder: nomic-embed-text"
 ollama pull nomic-embed-text
+if [ "${OCR_ENABLED:-true}" = "true" ]; then
+  OCR_MODEL="${OCR_MODEL:-deepseek-ocr}"
+  echo "Pulling OCR vision model: $OCR_MODEL"
+  ollama pull "$OCR_MODEL"
+fi
 echo "Done. If the stack is running, restart it so Ollama reloads the new manifest: make restart"

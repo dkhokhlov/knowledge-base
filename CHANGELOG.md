@@ -6,8 +6,30 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`make provision` target** — one-shot from-scratch setup that chains
+  `bootstrap` → `pull-models` (blocking on Ollama) → `start` → `admin-signup` →
+  `api-keys` (auto-configures OWUI → `markitdown-ocr` when `OCR_ENABLED=true`)
+  → `rag-config` → `gdrive-index-bootstrap`, with a `/health` wait between
+  `start` and `admin-signup` (OWUI has a 40s healthcheck start period). Leaves
+  the stack running. Replaces the manual 7-step sequence; re-run after
+  `make clean-all`, use `make start` for everyday restarts.
+
 ### Changed
 
+- **Config templates renamed + `KB_HOST` now shell-sourced.** `.env.example`
+  → `.env.template` and `.env.local.example` → `.env.local.template` (the
+  tracked templates `make bootstrap` copies from). `KB_HOST` is now commented
+  out in `.env.template`, joining `OLLAMA_HOST`: both are deployment-specific,
+  set in the shell env (`export KB_HOST=http://<host>:3000`,
+  `export OLLAMA_HOST=http://<ollama-host>:11434`) so the shell value is not
+  clobbered when the scripts source `.env` (shell env overrides `.env`). The
+  scripts default to `http://localhost:3000` when `KB_HOST` is unset.
+  **Migration:** rename an existing `.env.example`/`.env.local.example` to
+  `.env.template`/`.env.local.template` (or delete them and let `make
+  bootstrap` recreate from the new names); if you set `KB_HOST` in `.env`,
+  export it in your shell env instead (uncomment in `.env` only as a fallback).
 - **Configurable `KB_DOMAIN` + first-user credential rename (BREAKING for
   existing `.env.local`).** A new `KB_DOMAIN` var in `.env` (default
   `local.test`) drives the email domain of provisioned accounts: the first
@@ -21,7 +43,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `OPENWEBUI_TEST_USER` → `OPENWEBUI_FIRST_USER`,
   `OPENWEBUI_TEST_PASSWORD` → `OPENWEBUI_FIRST_PASSWORD` across `bootstrap.sh`,
   `admin-signup.sh`, `api-keys.sh`, `e2e-restore-creds.sh`, `test-e2e.sh`,
-  `test_03`/`test_04`, `.env.local.example`, the Makefile (redaction list +
+  `test_03`/`test_04`, `.env.local.template`, the Makefile (redaction list +
   `admin-signup`/`api-keys` guards), and docs. `test_08` e2e users now use
   `@${KB_DOMAIN}`. **Migration:** an existing `.env.local` with the old
   `OPENWEBUI_TEST_USER=...` names is stale — run `make clean-all && make
@@ -30,19 +52,35 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `clean-all && bootstrap` to recompute the first-user email (or edit
   `.env.local` by hand). The kb skill is unaffected (auth via `KB_API_KEY`, not
   user/password); only illustrative `agent@local.test` prose was generalized.
-- **`MARKITDOWN_OCR_PROVISIONED` moved from `.env.local` to `.env`** (it is a
-  non-sensitive state marker, not a secret; `.env.local` is for secrets).
-  `make ocr-bootstrap` now writes it to `.env`; `make ocr-disable` and
-  `make clean-all` remove it from `.env` (clean-all drops it so a post-wipe
-  `make start` does not add `--profile ocr` against a wiped `OCR_SERVICE_TOKEN`).
-  `OCR_SERVICE_TOKEN` stays in `.env.local`. `preflight.sh` now sources `.env`
-  for the OCR-provisioned check (was `.env.local`-only).
+- **OCR is now a config flag (`OCR_ENABLED`), not a runtime toggle (BREAKING for
+  existing stacks).** The `MARKITDOWN_OCR_PROVISIONED` runtime marker +
+  `make ocr-bootstrap` + `make ocr-disable` are removed. Replaced by an
+  `OCR_ENABLED` var in `.env` (ships in `.env.template`, default `true`, decided
+  BEFORE `make bootstrap` — it cannot be toggled after; a change needs
+  `make clean-all && make bootstrap`; overridable per run with
+  `make <target> OCR_ENABLED=false`). When enabled, OCR is a first-class prereq
+  provisioned by the standard chain — no separate step: `make bootstrap`
+  generates `OCR_SERVICE_TOKEN` into `.env.local` (secret); `make pull-models`
+  pulls `deepseek-ocr`; `make preflight` HARD-FAILs on a missing `deepseek-ocr`;
+  `make start` adds `--profile ocr` (builds + starts the sidecar); `make
+  api-keys` auto-sets the OWUI external-extraction routing
+  (`CONTENT_EXTRACTION_ENGINE=external` +
+  `EXTERNAL_DOCUMENT_LOADER_URL=http://markitdown-ocr:8080` + the API key, via
+  `ocr-config.sh`). `make ocr-config` is retained to re-assert the OWUI DB keys
+  (e.g. after a DB reset) and no-ops (exit 0) when `OCR_ENABLED!=true`.
+  `clean-all` no longer drops a marker (`OCR_ENABLED` is preserved `.env`
+  config). An unset `OCR_ENABLED` resolves to `true` (normalization), so an
+  existing `.env` without the key behaves as enabled. **Migration / breaking:**
+  an existing stack without `OCR_ENABLED` defaults to enabled → `make preflight`
+  / `make start` hard-fail until `deepseek-ocr` is pulled (`make pull-models`)
+  or `OCR_ENABLED=false` is set in `.env` (then `make clean-all && make
+  bootstrap` to drop the token).
 - **`HOST_UID` / `HOST_GID` moved from `.env` to `.env.local`** (per-machine
   values, not machine-independent config). `make bootstrap` now generates them
   into `.env.local` from the current user's `id -u` / `id -g` (kept if already
   set — override there if the gdrive owner uid:gid differs; `make clean-all`
   wipes `.env.local` and the next bootstrap re-derives them). Removed from
-  `.env.example`. `compose.yml` interpolates them from the shell env (the
+  `.env.template`. `compose.yml` interpolates them from the shell env (the
   container-creating targets source `.env.local`); absent → default 1000:1000.
 
 - **`kb_gateway.py user-create` gains a `--json` flag.** The default output is

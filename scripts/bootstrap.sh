@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create .env (from .env.example, if missing) and .env.local (gitignored),
+# Create .env (from .env.template, if missing) and .env.local (gitignored),
 # generate WEBUI_SECRET_KEY, lock .env.local to 0600, and ensure the ./data
 # bind-mount tree exists. Idempotent: existing non-empty values are kept.
 #
@@ -11,12 +11,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [ ! -f .env ]; then
-  if [ ! -f .env.example ]; then
-    printf 'FAIL  .env.example missing (cannot scaffold .env)\n' >&2
+  if [ ! -f .env.template ]; then
+    printf 'FAIL  .env.template missing (cannot scaffold .env)\n' >&2
     exit 1
   fi
-  cp .env.example .env
-  printf '  created .env from .env.example — set OLLAMA_HOST (shell env or .env) before `make start`\n'
+  cp .env.template .env
+  printf '  created .env from .env.template — set OLLAMA_HOST (shell env or .env) before `make start`\n'
 fi
 
 gen_hex() {
@@ -81,12 +81,12 @@ ensure_value() {
 }
 
 if [ ! -f .env.local ]; then
-  if [ ! -f .env.local.example ]; then
-    printf 'FAIL  .env.local.example missing (cannot scaffold .env.local)\n' >&2
+  if [ ! -f .env.local.template ]; then
+    printf 'FAIL  .env.local.template missing (cannot scaffold .env.local)\n' >&2
     exit 1
   fi
-  cp .env.local.example .env.local
-  printf '  created .env.local from .env.local.example\n'
+  cp .env.local.template .env.local
+  printf '  created .env.local from .env.local.template\n'
 fi
 
 ensure_secret .env.local WEBUI_SECRET_KEY
@@ -108,6 +108,19 @@ ensure_secret .env.local OPENWEBUI_FIRST_PASSWORD
 # bootstrap re-derives from the current user.
 ensure_value .env.local HOST_UID "$(id -u)"
 ensure_value .env.local HOST_GID "$(id -g)"
+
+# markitdown-ocr service token (SECRET -> .env.local). Generated only when
+# OCR_ENABLED=true (default; read from the .env bootstrap just created, or a
+# `make bootstrap OCR_ENABLED=<val>` override which wins). Kept if already set;
+# clean-all wipes .env.local so a fresh bootstrap regenerates. Skipped on an
+# explicit OCR_ENABLED=false (no token -> the markitdown-ocr sidecar is not
+# provisioned by the chain).
+OCR_ENABLED_VAL="${OCR_ENABLED:-$(. ./.env 2>/dev/null; printf '%s' "${OCR_ENABLED:-true}")}"
+if [ "$OCR_ENABLED_VAL" = "true" ]; then
+  ensure_secret .env.local OCR_SERVICE_TOKEN
+else
+  printf '  OCR_ENABLED=%s — not generating OCR_SERVICE_TOKEN (markitdown-ocr disabled)\n' "$OCR_ENABLED_VAL"
+fi
 
 chmod 600 .env.local
 printf '  set .env.local permissions to 0600\n'

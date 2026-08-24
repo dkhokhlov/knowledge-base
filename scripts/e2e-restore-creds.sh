@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Restore admin (and optional agent) credentials into .env.local after a
 # `make clean-all` + `make bootstrap` wiped them. `make bootstrap` recreates
-# .env.local from .env.local.example with a fresh WEBUI_SECRET_KEY and writes
+# .env.local from .env.local.template with a fresh WEBUI_SECRET_KEY and writes
 # admin@<KB_DOMAIN> + a generated OPENWEBUI_FIRST_PASSWORD; this script
 # overwrites those with the stashed admin creds so `make admin-signup` +
 # `make api-keys` reuse the same admin account across the e2e wipe.
 #
-# In-place key replacement (not append): .env.local.example's last line has no
+# In-place key replacement (not append): .env.local.template's last line has no
 # trailing newline, so a bare `cat stash >> .env.local` would glue the first
 # stashed line onto it. Replacing ^KEY=.* lines avoids that and keeps the
 # freshly generated WEBUI_SECRET_KEY.

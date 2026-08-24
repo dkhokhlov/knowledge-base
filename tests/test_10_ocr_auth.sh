@@ -11,18 +11,18 @@
 # The token is read from the container's own env at runtime; it is never
 # printed or passed on the command line.
 #
-# Tolerant: SKIPs (passes with a notice) when markitdown-ocr is not provisioned
-# (MARKITDOWN_OCR_PROVISIONED!=1 in .env) so `make test` runs clean in a
-# bare environment.
+# Tolerant: SKIPs (passes with a notice) when OCR is disabled
+# (OCR_ENABLED!=true in .env; unset defaults to enabled) so `make test` runs
+# clean in a bare environment.
 set -u
 . "$(dirname "$0")/lib.sh"
 load_env
 require_stack_up
 
 # --- skip condition ----------------------------------------------------------
-if [ "${MARKITDOWN_OCR_PROVISIONED:-0}" != "1" ]; then
+if [ "${OCR_ENABLED:-true}" != "true" ]; then
   section "ocr auth"
-  pass "SKIP: MARKITDOWN_OCR_PROVISIONED!=1 (run: make ocr-bootstrap); test skipped"
+  pass "SKIP: OCR_ENABLED!=true (markitdown-ocr disabled); test skipped"
   finish
   exit 0
 fi
@@ -37,7 +37,7 @@ toklen=$(docker inspect kb-markitdown-ocr \
 if [ "${toklen:-0}" -gt 0 ]; then
   pass "kb-markitdown-ocr OCR_SERVICE_TOKEN is set (len=$toklen)"
 else
-  fail "kb-markitdown-ocr OCR_SERVICE_TOKEN is EMPTY (stale recreate? rerun: make ocr-bootstrap)"
+  fail "kb-markitdown-ocr OCR_SERVICE_TOKEN is EMPTY (stale recreate? rerun: make start to recreate from .env.local, or make bootstrap to regenerate the token)"
 fi
 
 section "/process auth gate (401 without Bearer, 200 with)"

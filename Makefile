@@ -7,15 +7,34 @@
 COMPOSE  := docker compose
 DATA_DIR := ./data
 
-.PHONY: help bootstrap preflight pull pull-models start stop restart logs ps config \
+.PHONY: help provision bootstrap preflight pull pull-models start stop restart logs ps config \
         health test test-e2e api-keys admin-signup rag-config \
-        ocr-bootstrap ocr-config ocr-disable \
+        ocr-config \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
         projects-bootstrap \
         shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-backup
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
+provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + admin-signup + api-keys (auto OCR) + rag-config + gdrive KB. Leaves the stack running.
+	@set -e; \
+	  echo "==> 1/7 bootstrap (creates .env/.env.local + secrets + ./data dirs)"; make bootstrap; \
+	  echo "==> 2/7 pull-models (BLOCKING: pulls base LLM + ctx variant + embedder + deepseek-ocr from Ollama)"; make pull-models; \
+	  echo "==> 3/7 start (preflight + docker compose up -d, + --profile ocr when OCR_ENABLED=true)"; make start; \
+	  echo "==> waiting for stack /health (OWUI has a 40s start period)..."; \
+	  set -a; . ./.env; set +a; \
+	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
+	  i=0; until curl -sf "$$H/health" >/dev/null 2>&1; do i=$$((i+1)); [ $$i -lt 60 ] \
+	    || { echo "stack did not become healthy in 120s ($$H/health)" >&2; exit 1; }; sleep 2; done; \
+	  echo "  stack healthy ($$H/health)"; \
+	  echo "==> 4/7 admin-signup (creates the admin@<KB_DOMAIN> account)"; make admin-signup; \
+	  echo "==> 5/7 api-keys (admin + agent keys; auto-configures OWUI -> markitdown-ocr when OCR_ENABLED=true)"; make api-keys; \
+	  echo "==> 6/7 rag-config (strict-grounding RAG template + rag.ollama.base_url sync)"; make rag-config; \
+	  echo "==> 7/7 gdrive-index-bootstrap (creates the gdrive KB + grants agent read + writes GDRIVE_KB_ID)"; make gdrive-index-bootstrap; \
+	  echo; echo "==> provision complete — stack is running."; \
+	  echo "    Populate the gdrive KB (one-time, ~40 min):  make gdrive-sync"; \
+	  echo "    Everyday restart:                            make start"
 
 bootstrap: ## Create .env.local (generate WEBUI_SECRET_KEY) + ./data dirs
 	@./scripts/bootstrap.sh
@@ -80,22 +99,16 @@ rag-config: ## Set the strict-grounding RAG template in Open WebUI (run after `m
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
 	@./scripts/rag-config.sh
 
-ocr-bootstrap: ## Build + start markitdown-ocr, point OWUI at it, set MARKITDOWN_OCR_PROVISIONED=1 (run after `make api-keys`)
+ocr-config: ## Re-assert OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-ocr (auto-set by make api-keys when OCR_ENABLED=true; re-run after a DB reset)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
-	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
-	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
-	@./scripts/ocr-bootstrap.sh
-
-ocr-config: ## Set OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-ocr (run after `make ocr-bootstrap`)
-	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
-	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
-	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
-	@grep -qE '^OCR_SERVICE_TOKEN=.+$$' .env.local \
-	  || { echo "MISSING OCR_SERVICE_TOKEN in .env.local (run: make ocr-bootstrap)"; exit 1; }
-	@./scripts/ocr-config.sh enable
-
-ocr-disable: ## Clear the external extraction engine + remove the marker + recreate openwebui (no KB reset)
-	@./scripts/ocr-disable.sh
+	@_OVR="$${OCR_ENABLED:-}"; set -a; . ./.env 2>/dev/null; set +a; \
+	  if [ -n "$$_OVR" ]; then export OCR_ENABLED="$$_OVR"; fi; \
+	  if [ "$${OCR_ENABLED:-true}" != "true" ]; then echo "OCR_ENABLED=$${OCR_ENABLED} — nothing to configure"; exit 0; fi; \
+	  grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
+	    || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
+	  grep -qE '^OCR_SERVICE_TOKEN=.+$$' .env.local \
+	    || { echo "MISSING OCR_SERVICE_TOKEN in .env.local (run: make bootstrap with OCR_ENABLED=true)"; exit 1; }; \
+	  ./scripts/ocr-config.sh
 
 gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup), then POST /index to reconcile into the OWUI gdrive KB. Use --index-all for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
 	@./scripts/gdrive-sync $${SCOPE_PATH:+--path "$$SCOPE_PATH"}
@@ -153,7 +166,7 @@ shell-caddy: ## Shell into the Caddy gateway container
 clean: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.local.
 	@$(COMPOSE) down --remove-orphans
 
-clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + remove .env.local. Keeps .env config (drops the OCR marker) and configs.
+clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + remove .env.local. Keeps .env config (incl. OCR_ENABLED) and configs.
 	@$(COMPOSE) down --remove-orphans --volumes
 	@# Remove ./data as root via a throwaway container: OWUI (root) and Neo4j
 	@# (neo4j uid) write bind-mount files the host user cannot delete, so a host
@@ -161,11 +174,7 @@ clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + remove .env.
 	@docker run --rm -v "$(CURDIR)/$(DATA_DIR):/data" alpine sh -c "rm -rf /data/*"
 	@rm -f .env.local
 	@rm -rf ./.gdrive-backup
-	@# Drop the OCR-provisioned marker from .env (it lives in .env, which
-	@# clean-all otherwise preserves; without this a `make start` would add
-	@# --profile ocr against a wiped OCR_SERVICE_TOKEN). .env config is kept.
-	@if [ -f .env ]; then sed -i '/^MARKITDOWN_OCR_PROVISIONED=/d' .env; fi
-	@echo "Wiped containers, ./data, ./.gdrive-backup, and .env.local. .env, graphiti/config.yaml, caddy/Caddyfile are preserved (the OCR marker is dropped from .env)."
+	@echo "Wiped containers, ./data, ./.gdrive-backup, and .env.local. .env (incl. OCR_ENABLED), graphiti/config.yaml, caddy/Caddyfile are preserved."
 
 clean-backup: ## Remove the rclone --backup-dir retention tree (./.gdrive-backup). Non-destructive: does not touch the stack, ./data, or .env.local.
 	@rm -rf ./.gdrive-backup

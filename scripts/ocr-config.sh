@@ -1,39 +1,42 @@
 #!/usr/bin/env bash
 # Point Open WebUI's retrieval/extraction at the markitdown-ocr external engine
-# (CONTENT_EXTRACTION_ENGINE=external + URL + a non-empty API key), or clear it
-# (disable -> OWUI falls back to its default loaders). Sets the keys in the OWUI
-# DB via the admin retrieval-config API (merge semantics: only the posted keys
-# change).
+# (CONTENT_EXTRACTION_ENGINE=external + URL + a non-empty API key) by setting
+# the keys in the OWUI DB via the admin retrieval-config API (merge semantics:
+# only the posted keys change). Read-back asserts each key stuck.
 #
-# Idempotent: re-running re-asserts the same values.
-#
-# Usage:
-#   make ocr-config            # enable (default)
-#   scripts/ocr-config.sh disable   # clear the external engine (make ocr-disable)
+# Enable-only. Auto-run by `make api-keys` when OCR_ENABLED=true (the one
+# post-start DB step, folded into the standard chain); re-assert manually with
+# `make ocr-config` (e.g. after a DB reset). No-op when OCR_ENABLED!=true.
 #
 # Preconditions:
-#   - Stack running and healthy (`make start` / `make ocr-bootstrap`).
-#   - markitdown-ocr service up and /health green (for enable).
+#   - Stack running and healthy (`make start`).
+#   - markitdown-ocr service up (started by `make start` with --profile ocr).
 #   - OPENWEBUI_ADMIN_API_KEY + OCR_SERVICE_TOKEN in .env.local.
 #
 # Why this exists: OWUI's external extraction engine is global + all-or-nothing.
-# When the engine is "external" + URL + a NON-EMPTY API key are set, OWUI routes
-# EVERY ingest to markitdown-ocr (no per-type fallback; an empty result orphans).
-# An empty API key makes OWUI silently skip the external engine and fall through
-# to its default loaders, so the key MUST be non-empty for enable.
+# When CONTENT_EXTRACTION_ENGINE=external + URL + a NON-EMPTY API key are set,
+# OWUI routes EVERY ingest to markitdown-ocr (no per-type fallback; an empty
+# result orphans). An empty API key makes OWUI silently skip the external engine
+# and fall through to its default loaders, so the key MUST be non-empty.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-MODE="${1:-enable}"
-
+# Capture a `make ocr-config OCR_ENABLED=<val>` override before sourcing .env
+# (which would clobber it).
+_OCR_ENABLED_OVR="${OCR_ENABLED:-}"
 set -a
 # shellcheck source=/dev/null
 . ./.env
 # shellcheck source=/dev/null
 . ./.env.local
 set +a
+if [ -n "$_OCR_ENABLED_OVR" ]; then export OCR_ENABLED="$_OCR_ENABLED_OVR"; fi
 
-export MODE
+# No-op when OCR is disabled (unset defaults to enabled per the .env contract).
+if [ "${OCR_ENABLED:-true}" != "true" ]; then
+  echo "OCR_ENABLED=${OCR_ENABLED:-<unset>} — nothing to configure (markitdown-ocr disabled)"
+  exit 0
+fi
 
 python3 - <<'PY'
 import os, json, urllib.request, urllib.error, sys
@@ -43,36 +46,24 @@ AK = os.environ.get("OPENWEBUI_ADMIN_API_KEY", "")
 if not AK:
     sys.exit("FAIL  OPENWEBUI_ADMIN_API_KEY not set in .env.local (run: make api-keys)")
 
-MODE = os.environ.get("MODE", "enable")
 H = {"Authorization": "Bearer " + AK, "Content-Type": "application/json"}
 REQUEST_TIMEOUT = 15
 
 # OWUI reaches the engine over owui_net by service name.
 ENGINE_URL = "http://markitdown-ocr:8080"
 
-if MODE == "enable":
-    TOKEN = os.environ.get("OCR_SERVICE_TOKEN", "")
-    if not TOKEN:
-        sys.exit("FAIL  OCR_SERVICE_TOKEN not set in .env.local (required for enable)")
-    WANT = {
-        "CONTENT_EXTRACTION_ENGINE": "external",
-        "EXTERNAL_DOCUMENT_LOADER_URL": ENGINE_URL,
-        "EXTERNAL_DOCUMENT_LOADER_API_KEY": TOKEN,
-        # OWUI validates HEADERS as a dict (OpenAPI anyOf: object|null), NOT a
-        # string. Posting "{}" (a string) -> HTTP 422 dict_type. Empty dict =
-        # no custom headers (the default).
-        "EXTERNAL_DOCUMENT_LOADER_HEADERS": {},
-    }
-else:
-    # Clear: empty values drop OWUI back to its default loaders. HEADERS is
-    # dict-typed (OWUI anyOf: object|null) so clear it to {} (the default), not
-    # a string (posting "" -> HTTP 422 dict_type).
-    WANT = {
-        "CONTENT_EXTRACTION_ENGINE": "",
-        "EXTERNAL_DOCUMENT_LOADER_URL": "",
-        "EXTERNAL_DOCUMENT_LOADER_API_KEY": "",
-        "EXTERNAL_DOCUMENT_LOADER_HEADERS": {},
-    }
+TOKEN = os.environ.get("OCR_SERVICE_TOKEN", "")
+if not TOKEN:
+    sys.exit("FAIL  OCR_SERVICE_TOKEN not set in .env.local (required; run: make bootstrap with OCR_ENABLED=true)")
+WANT = {
+    "CONTENT_EXTRACTION_ENGINE": "external",
+    "EXTERNAL_DOCUMENT_LOADER_URL": ENGINE_URL,
+    "EXTERNAL_DOCUMENT_LOADER_API_KEY": TOKEN,
+    # OWUI validates HEADERS as a dict (OpenAPI anyOf: object|null), NOT a
+    # string. Posting "{}" (a string) -> HTTP 422 dict_type. Empty dict =
+    # no custom headers (the default).
+    "EXTERNAL_DOCUMENT_LOADER_HEADERS": {},
+}
 
 def call(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
@@ -117,25 +108,6 @@ for k, v in WANT.items():
     if got != v:
         sys.exit("FAIL  %s did not stick: posted %r got %r" % (k, v, got))
 
-if MODE == "enable":
-    print("OK    external extraction engine ENABLED -> %s" % ENGINE_URL)
-    print("      CONTENT_EXTRACTION_ENGINE=external, API key set, no per-type fallback")
-else:
-    print("OK    external extraction engine CLEARED (OWUI default loaders)")
+print("OK    external extraction engine ENABLED -> %s" % ENGINE_URL)
+print("      CONTENT_EXTRACTION_ENGINE=external, API key set, no per-type fallback")
 PY
-
-# Disable also drops the MARKITDOWN_OCR_PROVISIONED marker from .env so
-# `make start`/`make restart` no longer add --profile ocr. (Enable writes the
-# marker in ocr-bootstrap.sh, after the service is healthy + this config sticks.)
-# This is a bash heredoc (not a Makefile inline heredoc): GNU make splits each
-# recipe line into a separate shell, so an inline heredoc body does not reach
-# python — the marker edit must live in this script.
-if [ "$MODE" = disable ]; then
-  python3 - <<'PY'
-import os
-key = "MARKITDOWN_OCR_PROVISIONED"; f = ".env"
-out = [ln for ln in open(f).read().splitlines() if not ln.startswith(key + "=")]
-open(f, "w").write("\n".join(out) + "\n")
-print("OK    removed %s marker from .env" % key)
-PY
-fi

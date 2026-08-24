@@ -39,7 +39,7 @@ README:
 Sub-documents:
 
 - [docs/operations.md](docs/operations.md) — prerequisites, configuration (env vars), Ollama host service, persistent data / RAID, make targets, troubleshooting, full hardening reference.
-- [docs/ocr.md](docs/ocr.md) — markitdown-OCR external extraction engine: per-figure `deepseek-ocr` via native Ollama `/api/chat`, per-page/per-slide/per-sheet metadata, provisioning + scope + reversion.
+- [docs/ocr.md](docs/ocr.md) — markitdown-OCR external extraction engine: per-figure `deepseek-ocr` via native Ollama `/api/chat`, per-page/per-slide/per-sheet metadata, `OCR_ENABLED` config flag + scope + limits.
 - [docs/testing.md](docs/testing.md) — integration test suite + matrix.
 - [docs/agents.md](docs/agents.md) — agent integration per tool (Claude Code, Codex, OpenCode, Pi): install the `kb` skill, set `KB_HOST` + `KB_API_KEY`, example flows.
 
@@ -151,7 +151,7 @@ The `gdrive` knowledge base is indexed by **kb-gateway** (stateless, no sidecar)
 
 ### OCR extraction (image-bearing documents)
 
-The `markitdown-ocr` sidecar is an **external extraction engine** that OCRs image-bearing documents (PDF/DOCX/PPTX/XLSX) and standalone images via `deepseek-ocr` on Ollama's native `/api/chat`, so image-only PDFs and embedded figures/diagrams become searchable instead of orphaning. Off by default; profile-gated (`--profile ocr`); no per-type fallback (global + all-or-nothing). Provision with `make ocr-bootstrap` (after `make api-keys`); revert with `make ocr-disable` (no KB reset). A hit carries `file_id` + `page` → the exact original page/slide/sheet. Full design, scope, and service guards: [docs/ocr.md](docs/ocr.md).
+The `markitdown-ocr` sidecar is an **external extraction engine** that OCRs image-bearing documents (PDF/DOCX/PPTX/XLSX) and standalone images via `deepseek-ocr` on Ollama's native `/api/chat`, so image-only PDFs and embedded figures/diagrams become searchable instead of orphaning. Gated by `OCR_ENABLED` in `.env` (default `true`; set `false` BEFORE `make bootstrap` to disable — no runtime toggle); profile-gated (`--profile ocr`); no per-type fallback (global + all-or-nothing). When enabled it is provisioned by the standard chain (`bootstrap` generates the token, `pull-models` pulls `deepseek-ocr`, `start` builds + starts the sidecar, `api-keys` sets the OWUI routing) — no separate step. To disable, set `OCR_ENABLED=false` in `.env` and run `make clean-all && make bootstrap` (existing OCR'd members keep their content until re-ingested). A hit carries `file_id` + `page` → the exact original page/slide/sheet. Full design, scope, and service guards: [docs/ocr.md](docs/ocr.md).
 
 For per-tool agent integration (skill install, CLI examples), see [docs/agents.md](docs/agents.md).
 
@@ -159,49 +159,33 @@ For per-tool agent integration (skill install, CLI examples), see [docs/agents.m
 
 Full prerequisites, configuration, and env vars are in [docs/operations.md](docs/operations.md). Core sequence:
 
-**Minimum env vars to set** — everything else has a working default or is auto-generated:
+**Minimum env vars to set** (in your shell env — both are commented out in `.env.template` so the shell value is not clobbered; everything else has a working default or is auto-generated):
 
-- `.env` → `OLLAMA_HOST`: the only hard blocker. `make start` fails fast if `OLLAMA_HOST` is unset — compose uses `${OLLAMA_HOST:?…}` (no `host.docker.internal` fallback; `make preflight` checks it too). Set your Ollama URL (`http://host.docker.internal:11434` if Ollama runs on the Docker host) in shell env or `.env` (shell overrides `.env`). Do NOT use `localhost`/`127.0.0.1` — the value is used inside the containers, where localhost is the container's own loopback (no Ollama there).
-- `.env` → `KB_HOST`: the single public URL agents/clients point at (default `http://localhost:3000`). `KB_HOST_PORT` (default `3000`) is the only host-published port. Change `KB_HOST` for remote agents (HTTPS/VPN).
+- `OLLAMA_HOST`: the only hard blocker. `make start` fails fast if `OLLAMA_HOST` is unset — compose uses `${OLLAMA_HOST:?…}` (no `host.docker.internal` fallback; `make preflight` checks it too). `export OLLAMA_HOST=http://<ollama-host>:11434` (`http://host.docker.internal:11434` if Ollama runs on the Docker host). Do NOT use `localhost`/`127.0.0.1` — the value is used inside the containers, where localhost is the container's own loopback (no Ollama there).
+- `KB_HOST`: the single public URL agents/clients point at. `export KB_HOST=http://<host>:3000` (defaults to `http://localhost:3000` when unset). `KB_HOST_PORT` (default `3000`) is the only host-published port. Use `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
 
-A generated JWT signing key (`make bootstrap`), the API keys (`make api-keys`), and Neo4j auth are generated or default locally. Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
+**One-shot provision** — from a fresh checkout, run:
 
-1. **Bootstrap** the local secret file and data dirs:
-   ```
-   make bootstrap
-   ```
-   Generates the JWT signing key into `.env.local` (`0600`), creates `./data/{neo4j/data,neo4j/logs,openwebui}`, and creates `.env` from `.env.example` if absent. Set `OLLAMA_HOST` (shell env or `.env`) to your Ollama URL before `make start`.
-2. Set `KB_HOST` for agent clients (in `.env`): `http://localhost:3000` on the Docker host, or `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
-3. **Pull models**, **preflight**, **start**, **verify**:
-   ```
-   make pull-models
-   make preflight
-   make start
-   make health
-   ```
-4. Open `KB_HOST` (`http://<your-host-ip>:3000`) and register the first user (becomes admin). Record this admin as the test user in `.env.local` (see [docs/testing.md](docs/testing.md); used by `make test` and `make api-keys`).
-5. **Provision API keys** (admin + read-scoped agent) into `.env.local`:
-   ```
-   make api-keys
-   ```
-   Idempotent; `FORCE=1` rotates. See [docs/operations.md](docs/operations.md#environment-variables).
-6. **Set the strict-grounding RAG template**:
-   ```
-   make rag-config
-   ```
-   Re-run after a DB reset/rebuild or an `OLLAMA_HOST` change.
+```
+export OLLAMA_HOST=http://<ollama-host>:11434
+export KB_HOST=http://<host>:3000
+make provision
+```
 
-7. **(Optional) Index `gdrive/` into RAG** — populate the dir, then provision the KB:
-   ```
-   make gdrive-index-bootstrap # create the gdrive KB + grant agent read + write GDRIVE_KB_ID
-   make gdrive-sync            # rclone pull into ./gdrive + POST /index (reconcile into the KB)
-   make gdrive-status          # completed/pending/processing/failed vs source (no ETA — no daemon)
-   ```
-   See [gdrive indexing (manual, via kb-gateway)](#gdrive-indexing-manual-via-kb-gateway). `make gdrive-sync` chains rclone → POST `/index`; indexing is manual/on-demand (no sidecar).
+`make provision` chains the full first-time setup and leaves the stack running: `bootstrap` (creates `.env`/`.env.local` + the JWT key, `OCR_SERVICE_TOKEN`, first-user password, `./data` dirs) → `pull-models` (BLOCKING: pulls the base LLM + ctx variant + embedder + `deepseek-ocr` from Ollama) → `start` (preflight + `docker compose up -d`, `--profile ocr` when `OCR_ENABLED=true`) → `admin-signup` (creates `admin@<KB_DOMAIN>`) → `api-keys` (admin + read-scoped agent keys; auto-configures OWUI → `markitdown-ocr` when `OCR_ENABLED=true`) → `rag-config` (strict-grounding RAG template + `rag.ollama.base_url` sync) → `gdrive-index-bootstrap` (creates the gdrive KB + grants agent read + writes `GDRIVE_KB_ID`). The JWT key, API keys, and Neo4j auth are generated locally; `OCR_ENABLED` defaults to `true` (set `false` BEFORE `make provision` to skip OCR). Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
 
-Provisioning sequence: `make start` → (admin signs up in UI) → `make api-keys` → `make rag-config` → (`make gdrive-index-bootstrap` + `make gdrive-sync`).
+**Populate the gdrive KB** (one-time, ~40 min) — after `make provision`:
 
-8. (Optional) Close signup: set `ENABLE_SIGNUP=false` in `.env` and `make restart`.
+```
+make gdrive-sync   # rclone pull into ./gdrive + POST /index (reconcile into the KB)
+make gdrive-status # completed/pending/processing/failed vs source (no ETA — no daemon)
+```
+
+See [gdrive indexing (manual, via kb-gateway)](#gdrive-indexing-manual-via-kb-gateway). `make gdrive-sync` chains rclone → POST `/index`; indexing is manual/on-demand (no sidecar).
+
+**Everyday restart** (provision is done once): `make start`. Re-assert after a DB reset: `make rag-config` (+ `make ocr-config`). Rotate keys: `make api-keys FORCE=1`.
+
+(Optional) Close signup after the admin + agent accounts exist: set `ENABLE_SIGNUP=false` in `.env` and `make restart`.
 
 ## Performance
 
@@ -262,8 +246,8 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 | `skills/` | per-tool `kb` agent skill (`claude/` primary; `codex/`, `opencode/`, `pi/` symlink `scripts/` to it) — see [docs/agents.md](docs/agents.md) |
 | `tests/` | `test_01`..`test_08` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
 | `docs/` | `operations.md`, `testing.md`, `agents.md`, favicon assets |
-| `.env` / `.env.example` | tracked template — no secrets (ports, tags, models, tunables, `OLLAMA_HOST`) |
-| `.env.local` / `.env.local.example` | gitignored secrets + generated keys (`chmod 0600`) |
+| `.env` / `.env.template` | tracked template — no secrets (ports, tags, models, tunables, `OLLAMA_HOST`) |
+| `.env.local` / `.env.local.template` | gitignored secrets + generated keys (`chmod 0600`) |
 | `Makefile` | targets (see [docs/operations.md#make-targets](docs/operations.md#make-targets)) |
 | `LICENSE` | MIT |
 

@@ -4,7 +4,8 @@ The `markitdown-ocr` sidecar is an **external extraction engine** for Open WebUI
 It runs [markitdown-ocr][markitdown-ocr] with the OCR service replaced by an
 Ollama-native `/api/chat` client (`markitdown/oursvc.py`), so embedded figures
 and image-only pages are OCR'd by `deepseek-ocr` and become searchable KB
-members. Off by default; profile-gated (`--profile ocr`); no fallback.
+members. Off when `OCR_ENABLED=false` (default `true`); profile-gated
+(`--profile ocr`); no fallback.
 
 This is the per-figure OCR path for the `gdrive` knowledge base: image-only
 PDFs (no text layer) and figure/diagram content in text+figure PDFs become
@@ -69,28 +70,29 @@ bytes straight to `OllamaNativeOCRService` and returns one document. (The gdrive
 set excludes standalone images via the gateway `DEFAULT_ALLOW` allowlist, so
 this branch matters for direct uploads, not the synced set.)
 
-## Provisioning (one-time, after `make api-keys`)
+## Provisioning (config flag, decided before `make bootstrap`)
 
-`make ocr-bootstrap`:
+OCR is gated by `OCR_ENABLED` in `.env` (default `true`; overridable per make
+invocation: `make <target> OCR_ENABLED=false`). It is a config flag, not a
+runtime toggle: decide it before `make bootstrap`; a change after bootstrap
+needs `make clean-all && make bootstrap`. When enabled, OCR is a prereq
+provisioned by the standard chain — no separate step:
 
-1. generates `OCR_SERVICE_TOKEN` (if missing) into `.env.local`;
-2. builds the `markitdown-ocr` image;
-3. (re)creates the `markitdown-ocr` service (`--profile ocr`);
-4. waits for `/health` (the compose healthcheck);
-5. runs `make ocr-config` — sets `CONTENT_EXTRACTION_ENGINE=external` +
+1. `make bootstrap` generates `OCR_SERVICE_TOKEN` into `.env.local` (secret);
+2. `make pull-models` pulls `deepseek-ocr` (a first-class prereq alongside the
+   base LLM + embedder);
+3. `make start` builds + starts the `markitdown-ocr` sidecar (`--profile ocr`);
+4. `make api-keys` sets `CONTENT_EXTRACTION_ENGINE=external` +
    `EXTERNAL_DOCUMENT_LOADER_URL=http://markitdown-ocr:8080` + the API key in
-   the OWUI DB (`/api/v1/retrieval/config/update`, merge semantics), then
-   read-back-asserts each key stuck;
-6. writes `MARKITDOWN_OCR_PROVISIONED=1` to `.env` **only on success**.
+   the OWUI DB (`/api/v1/retrieval/config/update`, merge semantics) and
+   read-back-asserts each key stuck.
 
-`make start` / `make restart` then add `--profile ocr` automatically when the
-marker is set. Idempotent. **No fallback:** if any step fails, the marker is NOT
-written and OWUI keeps its default loaders (a half-provisioned global engine
-would orphan every ingest).
-
-`make ocr-config` re-asserts the OWUI DB keys (re-run after a DB reset).
-`make preflight` warns when provisioned if `deepseek-ocr` is not pulled or
-`rag.content_extraction_engine` has drifted from `external`.
+`make preflight` HARD-FAILs when enabled if `deepseek-ocr` is not pulled (a
+half-provisioned engine would orphan every ingest), and WARNs on
+`rag.content_extraction_engine` drift. `make ocr-config` re-asserts the OWUI DB
+keys (re-run after a DB reset). Idempotent. **No fallback:** OWUI's external
+engine is global + all-or-nothing — an empty result orphans (no per-type
+fallback).
 
 ## Scope and limits
 
@@ -108,7 +110,7 @@ would orphan every ingest).
   `DEFAULT_ALLOW` allowlist already excludes audio/video).
 - **API key required.** An empty `EXTERNAL_DOCUMENT_LOADER_API_KEY` makes OWUI
   silently skip the external engine and fall back to its default loaders.
-  `make ocr-bootstrap` sets a non-empty `OCR_SERVICE_TOKEN`.
+  `make bootstrap` generates a non-empty `OCR_SERVICE_TOKEN` (when `OCR_ENABLED=true`).
 - **No silent fallback.** If `markitdown-ocr` is down, OWUI extraction fails
   (logged, greppable) and the file orphans — it does not fall back to a default
   loader. This is by design (the operator sees the outage).
@@ -137,17 +139,21 @@ would orphan every ingest).
 ## Monitoring
 
 - `docker logs -f kb-markitdown-ocr` — per-request log + OCR errors.
-- `make preflight` — when provisioned, warns if `deepseek-ocr` is not pulled or
-  `rag.content_extraction_engine` has drifted from `external` (fix: `make
-  ocr-config`).
+- `make preflight` — when enabled, hard-fails if `deepseek-ocr` is not pulled
+  and warns if `rag.content_extraction_engine` has drifted from `external`
+  (fix: `make ocr-config`).
 - `GET /api/v1/retrieval/config` (admin key) — confirm the engine is set.
 
-## Reversion (no KB reset)
+## Disabling (no runtime toggle; no KB reset)
 
-`make ocr-disable` clears `CONTENT_EXTRACTION_ENGINE` in the OWUI DB, removes
-the `MARKITDOWN_OCR_PROVISIONED` marker, and recreates `openwebui`. New uploads
-then use OWUI's default loaders. Existing OCR'd members keep their content
-until re-ingested; re-ingested image-only files return to orphans (the pre-OCR
-state). No full KB reset.
+There is no runtime toggle — `make ocr-disable` is gone. To disable, set
+`OCR_ENABLED=false` in `.env` BEFORE `make bootstrap` (or for one run,
+`make <target> OCR_ENABLED=false`). A persistent change after bootstrap needs
+`make clean-all && make bootstrap` (wipes `.env.local` + `./data`): the token
+is no longer generated, `make start` no longer adds `--profile ocr`, and
+`make api-keys` no longer sets the OWUI routing — so new uploads use OWUI's
+default loaders. Existing OCR'd members keep their content until re-ingested;
+re-ingested image-only files return to orphans (the pre-OCR state). No full KB
+reset.
 
 [markitdown-ocr]: https://github.com/microsoft/markitdown/tree/main/packages/markitdown-ocr

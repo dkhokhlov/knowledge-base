@@ -301,12 +301,13 @@ services:
       context: ./markitdown
     pull_policy: never
     container_name: kb-markitdown-ocr
-    # Profile-gated (no-fallback). With the `ocr` profile
-    # off, `make start` never creates this service; it is started ONLY by `make
-    # ocr-bootstrap` (--profile ocr), which first builds, waits /health, runs
-    # `make ocr-config`, then writes MARKITDOWN_OCR_PROVISIONED=1. `make start`
-    # adds --profile ocr when that marker is already in .env.local, so a
-    # provisioned stack's `make restart` brings it back.
+    # Profile-gated (no-fallback). `make start` adds --profile ocr when
+    # OCR_ENABLED=true (default; in .env, overridable via `make start
+    # OCR_ENABLED=<val>`), so compose builds + starts this service as part of
+    # the standard chain. OWUI routing (CONTENT_EXTRACTION_ENGINE=external +
+    # URL + API key) is set in the OWUI DB by `make api-keys` (re-assert:
+    # `make ocr-config`). No runtime marker; OCR_ENABLED is config, decided
+    # before `make bootstrap`.
     profiles: [ocr]
     restart: unless-stopped
     networks: [owui_net]
@@ -332,11 +333,12 @@ services:
     # the rest of .env.local's secrets are NOT loaded into this sidecar.
     # OLLAMA_BASE_URL uses :? (OLLAMA_HOST is always required + always set).
     # OCR_SERVICE_TOKEN is bare ${VAR} (NOT :?): compose interpolates ALL
-    # services at parse time, even non-active profiles, and `make start` runs
-    # before `make ocr-bootstrap` writes the token — :? would block the clean
-    # start. A stale recreate that bypasses .env.local (empty token -> no
-    # /process auth) is caught at RUNTIME by tests/test_10_ocr_auth.sh, which
-    # asserts the live container holds a non-empty token + /process 401/200.
+    # services at parse time, even non-active profiles, and when OCR_ENABLED=false
+    # no token is ever generated (bootstrap skips it) — :? would block `make
+    # start` on a disabled-OCR stack. A stale recreate that bypasses .env.local
+    # (empty token -> no /process auth) is caught at RUNTIME by
+    # tests/test_10_ocr_auth.sh, which asserts the live container holds a
+    # non-empty token + /process 401/200 (it runs only when OCR_ENABLED=true).
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_HOST:?OLLAMA_HOST is required (shell env or uncomment in .env)}
       - OCR_MODEL=${OCR_MODEL:-deepseek-ocr}

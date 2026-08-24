@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # DESTRUCTIVE clean-state deploy + full integration test suite:
-#   wipe -> bootstrap -> restore admin creds -> preflight -> start -> wait
-#   healthy -> admin-signup -> api-keys -> rag-config -> ocr-bootstrap
-#   (engine ON before ingest) -> gdrive-index-bootstrap -> gdrive-sync
-#   (rclone + POST /index) -> test.
+#   wipe -> bootstrap -> restore admin creds -> [pull OCR model] -> preflight
+#   -> [build markitdown-ocr] -> start -> wait healthy -> admin-signup ->
+#   api-keys (auto: points OWUI at markitdown-ocr) -> rag-config ->
+#   gdrive-index-bootstrap -> gdrive-sync (rclone + POST /index) -> test.
 #
 # OCR is provisioned BEFORE the gdrive set ingests so image-bearing documents
 # are OCR'd (non-empty), not orphaned. gdrive-sync runs rclone then POSTs
@@ -27,7 +27,9 @@ cd "$(dirname "$0")/.."
 
 echo "==> DESTRUCTIVE: wipes all data and re-provisions from scratch."
 test -f .env.local || { echo "REFUSING: no .env.local (no admin creds to stash) — run make bootstrap + fill OPENWEBUI_FIRST_USER/PASSWORD first" >&2; exit 1; }
+_OCR_OVR="${OCR_ENABLED:-}"
 set -a; . ./.env; . ./.env.local; set +a
+if [ -n "$_OCR_OVR" ]; then export OCR_ENABLED="$_OCR_OVR"; fi
 [ -n "${OPENWEBUI_FIRST_USER:-}" ] && [ -n "${OPENWEBUI_FIRST_PASSWORD:-}" ] \
   || { echo "REFUSING: OPENWEBUI_FIRST_USER/PASSWORD not set in .env.local (admin account) — fill them first" >&2; exit 1; }
 
@@ -40,14 +42,25 @@ make clean-all
 unset GDRIVE_KB_ID
 make bootstrap
 ./scripts/e2e-restore-creds.sh "$stash"
+# Pull the OCR vision model before preflight (preflight hard-fails on a missing
+# OCR model when OCR_ENABLED=true). Pull only the OCR model, NOT full
+# `make pull-models` (that `ollama rm`s + recreates MODEL_NAME, disrupting the
+# assumed-present base LLM). Honors a `make test-e2e OCR_ENABLED=false` override.
+if [ "${OCR_ENABLED:-true}" = "true" ]; then
+  echo "==> pulling OCR vision model: ${OCR_MODEL:-deepseek-ocr}"
+  ollama pull "${OCR_MODEL:-deepseek-ocr}"
+fi
 make preflight
-# Rebuild locally-built images whose code changed since the last run, so the
-# e2e tests current code (clean-all wipes volumes/data, NOT images; `up -d`
-# without --build reuses the existing image). kb-gateway is stdlib-only so this
-# is fast. openwebui (patched) + markitdown-ocr are heavy; markitdown-ocr is
-# rebuilt by `make ocr-bootstrap` below, openwebui is rebuilt only when its
-# patches change (manual: `docker compose build openwebui`).
+# Rebuild locally-built images whose code changed since the last run, so e2e
+# tests current code (clean-all wipes volumes/data, NOT images; `up -d` without
+# --build reuses the existing image). kb-gateway is stdlib-only so this is fast.
+# markitdown-ocr is rebuilt here (gated on OCR_ENABLED) so e2e runs current OCR
+# code; openwebui (patched) is rebuilt only when its patches change (manual:
+# `docker compose build openwebui`).
 docker compose build kb-gateway
+if [ "${OCR_ENABLED:-true}" = "true" ]; then
+  docker compose --profile ocr build markitdown-ocr
+fi
 make start
 
 H="${KB_HOST:-http://localhost:${KB_HOST_PORT:-3000}}"
@@ -62,7 +75,6 @@ echo "stack healthy ($H/health)"
 make admin-signup
 make api-keys
 make rag-config
-make ocr-bootstrap
 make gdrive-index-bootstrap
 make gdrive-sync
 GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" make test

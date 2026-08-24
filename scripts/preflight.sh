@@ -30,10 +30,14 @@ ok "secrets present in .env.local"
   || fail "./data tree incomplete (run: make bootstrap)"
 ok "./data tree exists"
 
-# Load config-of-record (non-secret).
+# Load config-of-record (non-secret). Capture a `make preflight
+# OCR_ENABLED=<val>` override before sourcing .env (which would clobber it);
+# restored so the OCR block below honors the override.
+_OCR_ENABLED_OVR="${OCR_ENABLED:-}"
 set -a; . ./.env; set +a
+if [ -n "$_OCR_ENABLED_OVR" ]; then export OCR_ENABLED="$_OCR_ENABLED_OVR"; fi
 
-: "${OLLAMA_HOST:?OLLAMA_HOST is required (set in shell env or uncomment in .env; see .env.example)}"
+: "${OLLAMA_HOST:?OLLAMA_HOST is required (set in shell env or uncomment in .env; see .env.template)}"
 OLLAMA="${OLLAMA_HOST%/}"
 # Probe the configured Ollama from the host side (it must be reachable from
 # the host AND from the containers; compose points both services at $OLLAMA).
@@ -112,28 +116,19 @@ else
   printf '\nPreflight OK. Next: make start && make health\n'
 fi
 
-# --- markitdown-ocr provisioned? check engine drift + OCR model -------------
-# Only runs when MARKITDOWN_OCR_PROVISIONED=1 in .env. Reads
-# rag.content_extraction_engine straight from webui.db (read-only) and WARNs if
-# it is not "external" (drift -> OWUI uses its default loaders, not the engine).
-# Also WARNs if the OCR model is not pulled in host Ollama (ingest would orphan).
-ocr_prov=0
-(
-  set -a; . ./.env 2>/dev/null; . ./.env.local 2>/dev/null; set +a
-  [ "${MARKITDOWN_OCR_PROVISIONED:-0}" = "1" ] && echo yes
-) | grep -q yes && ocr_prov=1
-
-if [ "$ocr_prov" -eq 1 ]; then
-  ok "markitdown-ocr provisioned (MARKITDOWN_OCR_PROVISIONED=1)"
+# --- markitdown-ocr (OCR_ENABLED) -----------------------------------------
+# OCR_ENABLED (default true; overridable via `make preflight OCR_ENABLED=<val>`)
+# gates the OCR prereq checks. When enabled, HARD-FAIL if the OCR vision model
+# is not pulled (a half-provisioned engine silently orphans image docs), and
+# WARN on rag.content_extraction_engine drift (OWUI not routed to the engine).
+# When disabled, skip (the sidecar is not part of the stack).
+if [ "${OCR_ENABLED:-true}" = "true" ]; then
   OCR_MODEL="${OCR_MODEL:-deepseek-ocr}"
   # Match "deepseek-ocr" or "deepseek-ocr:latest" (ollama pull appends :latest;
-  # the bare "\"${OCR_MODEL}\"" pattern misses the :latest form -> false WARN).
-  if ! echo "$TAGS" | grep -qE "\"${OCR_MODEL}(:|\")"; then
-    warn "OCR model '${OCR_MODEL}' not pulled in host Ollama — ingest via the external engine would orphan"
-    warn "       pull it: ollama pull ${OCR_MODEL}"
-  else
-    ok "Ollama has OCR model '${OCR_MODEL}'"
-  fi
+  # the bare "\"${OCR_MODEL}\"" pattern misses the :latest form -> false fail).
+  echo "$TAGS" | grep -qE "\"${OCR_MODEL}(:|\")" \
+    || fail "OCR model '${OCR_MODEL}' not pulled in host Ollama (OCR_ENABLED=true; run: make pull-models)"
+  ok "Ollama has OCR model '${OCR_MODEL}'"
   if ocr_msg="$(python3 - 2>&1 <<'PY'
 import sqlite3, json, os, sys
 db = "./data/openwebui/webui.db"
@@ -164,6 +159,8 @@ PY
     ok "$ocr_msg"
   else
     warn "$ocr_msg"
-    warn "       after 'make start', run: make ocr-config  (sets CONTENT_EXTRACTION_ENGINE=external)"
+    warn "       after 'make start', run: make ocr-config  (re-asserts CONTENT_EXTRACTION_ENGINE=external)"
   fi
+else
+  ok "OCR disabled (OCR_ENABLED=false) — skipping OCR checks"
 fi
