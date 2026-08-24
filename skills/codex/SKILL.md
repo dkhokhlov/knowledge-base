@@ -36,7 +36,7 @@ key.
 
 - Header: `Authorization: Bearer $KB_API_KEY` (the agent key is also stored as
   `OPENWEBUI_USER_API_KEY` in `.env.local`).
-- The key belongs to a `user`-role account (`agent@local.test`), not admin.
+- The key belongs to a `user`-role account (`agent@<KB_DOMAIN>`, default `agent@local.test`), not admin.
 - Read scope: sees KBs via their `*` (public) read grants; `write_access=false`
   on every KB it does not own. It cannot `file/add`, remove files, or delete a KB.
 

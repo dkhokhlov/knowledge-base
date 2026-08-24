@@ -8,6 +8,29 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Configurable `KB_DOMAIN` + first-user credential rename (BREAKING for
+  existing `.env.local`).** A new `KB_DOMAIN` var in `.env` (default
+  `local.test`) drives the email domain of provisioned accounts: the first
+  (admin) user is `admin@<KB_DOMAIN>` and the agent user is
+  `agent@<KB_DOMAIN>` (was hardcoded `agent@local.test`). `make bootstrap`
+  now writes `OPENWEBUI_FIRST_USER=admin@<KB_DOMAIN>` + a generated
+  `OPENWEBUI_FIRST_PASSWORD` into `.env.local` (was: operator hand-filled). The
+  first-user display name is `admin` (was `Admin`). A `make <target>
+  KB_DOMAIN=<domain>` command-line override wins over `.env` for that run (per
+  `bootstrap`, `api-keys`, and `test`). **Rename:**
+  `OPENWEBUI_TEST_USER` → `OPENWEBUI_FIRST_USER`,
+  `OPENWEBUI_TEST_PASSWORD` → `OPENWEBUI_FIRST_PASSWORD` across `bootstrap.sh`,
+  `admin-signup.sh`, `api-keys.sh`, `e2e-restore-creds.sh`, `test-e2e.sh`,
+  `test_03`/`test_04`, `.env.local.example`, the Makefile (redaction list +
+  `admin-signup`/`api-keys` guards), and docs. `test_08` e2e users now use
+  `@${KB_DOMAIN}`. **Migration:** an existing `.env.local` with the old
+  `OPENWEBUI_TEST_USER=...` names is stale — run `make clean-all && make
+  bootstrap` (re-provisions `admin@<domain>` + a fresh password) then `make
+  admin-signup && make api-keys`. Changing `KB_DOMAIN` later likewise requires
+  `clean-all && bootstrap` to recompute the first-user email (or edit
+  `.env.local` by hand). The kb skill is unaffected (auth via `KB_API_KEY`, not
+  user/password); only illustrative `agent@local.test` prose was generalized.
+
 - **`kb_gateway.py user-create` gains a `--json` flag.** The default output is
   human-readable `key: value` lines (`email`, `temp_password`, `kb_api_key`,
   `role`, `id`); pass `--json` to emit the raw JSON response instead, so a script

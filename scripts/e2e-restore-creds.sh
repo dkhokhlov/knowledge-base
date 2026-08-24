@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Restore admin (and optional agent) credentials into .env.local after a
 # `make clean-all` + `make bootstrap` wiped them. `make bootstrap` recreates
-# .env.local from .env.local.example with a fresh WEBUI_SECRET_KEY and EMPTY
-# OPENWEBUI_TEST_USER/PASSWORD; this script puts the stashed admin creds back
-# so `make admin-signup` + `make api-keys` can sign in.
+# .env.local from .env.local.example with a fresh WEBUI_SECRET_KEY and writes
+# admin@<KB_DOMAIN> + a generated OPENWEBUI_FIRST_PASSWORD; this script
+# overwrites those with the stashed admin creds so `make admin-signup` +
+# `make api-keys` reuse the same admin account across the e2e wipe.
 #
 # In-place key replacement (not append): .env.local.example's last line has no
 # trailing newline, so a bare `cat stash >> .env.local` would glue the first
@@ -11,8 +12,8 @@
 # freshly generated WEBUI_SECRET_KEY.
 #
 # Usage: e2e-restore-creds.sh <stash-file>
-#   stash-file = 0600 file with KEY=VALUE lines (OPENWEBUI_TEST_USER,
-#                OPENWEBUI_TEST_PASSWORD, optional OPENWEBUI_USER).
+#   stash-file = 0600 file with KEY=VALUE lines (OPENWEBUI_FIRST_USER,
+#                OPENWEBUI_FIRST_PASSWORD, optional OPENWEBUI_USER).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -5,7 +5,7 @@ set -u
 . "$(dirname "$0")/lib.sh"
 load_env
 require_stack_up
-require_env OPENWEBUI_TEST_USER OPENWEBUI_TEST_PASSWORD || { finish; exit 1; }
+require_env OPENWEBUI_FIRST_USER OPENWEBUI_FIRST_PASSWORD || { finish; exit 1; }
 
 # OWUI REST is at the KB_HOST root (/api/* via Caddy catch-all -> openwebui:8080).
 O="$(kb_host)"
@@ -14,12 +14,12 @@ MODEL="${MODEL_NAME:-qwen2.5:14b}"
 section "open webui signin (auth + JWT)"
 jwt=$(curl -s -X POST "$O/api/v1/auths/signin" \
   -H 'Content-Type: application/json' \
-  -d "{\"email\":\"${OPENWEBUI_TEST_USER}\",\"password\":\"${OPENWEBUI_TEST_PASSWORD}\"}" \
+  -d "{\"email\":\"${OPENWEBUI_FIRST_USER}\",\"password\":\"${OPENWEBUI_FIRST_PASSWORD}\"}" \
   | python3 -c 'import sys, json; print(json.load(sys.stdin).get("token", ""))' 2>/dev/null)
 if [ -n "$jwt" ]; then
   pass "signin -> JWT obtained"
 else
-  fail "signin -> no JWT (check OPENWEBUI_TEST_USER/OPENWEBUI_TEST_PASSWORD)"
+  fail "signin -> no JWT (check OPENWEBUI_FIRST_USER/OPENWEBUI_FIRST_PASSWORD)"
 fi
 
 section "open webui chat completion (-> Ollama ${MODEL})"

@@ -114,7 +114,7 @@ done
                 || fail "agent group ${AGENT_GROUP_ID} still in /memory/groups after 60s"
 
 section "admin user-create + issued key + non-admin deny"
-NEW_EMAIL="e2e-${TS}@local.test"
+NEW_EMAIL="e2e-${TS}@${KB_DOMAIN:-local.test}"
 UCOUT=$(kbrun $KBA user-create --email "$NEW_EMAIL" --name "E2E User") || true
 NEW_KEY=$(printf '%s' "$UCOUT" | awk '/^kb_api_key:/ {print $2}')
 if [ -n "$NEW_KEY" ]; then
@@ -124,7 +124,7 @@ if [ -n "$NEW_KEY" ]; then
 else
   fail "admin user-create did not return a kb_api_key"
 fi
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$G/admin/users" -H "Authorization: Bearer ${OPENWEBUI_USER_API_KEY}" -H "$CT" -d "{\"email\":\"blocked-${TS}@local.test\",\"name\":\"x\"}")
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$G/admin/users" -H "Authorization: Bearer ${OPENWEBUI_USER_API_KEY}" -H "$CT" -d "{\"email\":\"blocked-${TS}@${KB_DOMAIN:-local.test}\",\"name\":\"x\"}")
 [ "$code" = 403 ] && pass "non-admin user-create -> 403" || fail "non-admin user-create -> ${code} (want 403)"
 
 # Cleanup: the created user has no memory; nothing to forget. Leave the account

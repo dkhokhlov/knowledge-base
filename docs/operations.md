@@ -85,10 +85,12 @@ Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on 
 | Var | Source | Purpose |
 |---|---|---|
 | `WEBUI_SECRET_KEY` | `make bootstrap` (random) | Open Web UI JWT signing key |
-| `OPENWEBUI_USER` / `OPENWEBUI_USER_PASSWORD` | `make api-keys` | the shared agent account (`role=user`) |
+| `KB_DOMAIN` | `.env` (default `local.test`) | email domain for provisioned accounts: first user `admin@<domain>`, agent `agent@<domain>`; override one run with `make bootstrap KB_DOMAIN=<domain>`, or set here for a persistent custom domain; change requires `make clean-all && make bootstrap` to recompute the first-user email |
+| `OPENWEBUI_FIRST_USER` / `OPENWEBUI_FIRST_PASSWORD` | `make bootstrap` | the first (admin) account (`admin@<KB_DOMAIN>` + a generated password); used by `make admin-signup`, `make api-keys`, and `make test` |
+| `OPENWEBUI_USER` / `OPENWEBUI_USER_PASSWORD` | `make api-keys` | the shared agent account (`role=user`; `agent@<KB_DOMAIN>`) |
 | `OPENWEBUI_ADMIN_API_KEY` | `make api-keys` | admin key (`role=admin`) — a valid `KB_API_KEY`; also injected into kb-gateway (`compose.yml`) for the `/index` OWUI sync writes (caller's `KB_API_KEY` is authorization only) |
 | `OPENWEBUI_USER_API_KEY` | `make api-keys` | agent key (read-scoped) — a valid `KB_API_KEY` |
-| `OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` | by hand | existing OWUI user for `make test` |
+| `OPENWEBUI_FIRST_USER` / `OPENWEBUI_FIRST_PASSWORD` | by hand | existing OWUI user for `make test` |
 | `GDRIVE_KB_ID` | `make gdrive-index-bootstrap` | the `gdrive` KB id kb-gateway indexes into (POST /index) |
 
 Notes:

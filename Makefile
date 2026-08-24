@@ -45,7 +45,7 @@ ps: ## Show container status (with health)
 
 config: ## Render effective compose config (secrets redacted)
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
-	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_TEST_PASSWORD): .*/\1: <redacted>/'
+	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_FIRST_PASSWORD): .*/\1: <redacted>/'
 
 health: ## Probe the stack /health (Caddy -> kb-gateway aggregated, reflects OWUI)
 	@set -a; . ./.env; set +a; \
@@ -65,14 +65,14 @@ test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch (incl. OCR engine + g
 
 api-keys: ## Provision admin + agent-user API keys into .env.local (run after `make start` + admin signup)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
-	@grep -qE '^OPENWEBUI_TEST_USER=.+$$' .env.local \
-	  || { echo "MISSING OPENWEBUI_TEST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
+	@grep -qE '^OPENWEBUI_FIRST_USER=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_FIRST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
 	@./scripts/api-keys.sh
 
-admin-signup: ## Create the OWUI admin account (OPENWEBUI_TEST_USER/PASSWORD) via signup API; run after make start
+admin-signup: ## Create the OWUI admin account (OPENWEBUI_FIRST_USER/PASSWORD) via signup API; run after make start
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
-	@grep -qE '^OPENWEBUI_TEST_USER=.+$$' .env.local \
-	  || { echo "MISSING OPENWEBUI_TEST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
+	@grep -qE '^OPENWEBUI_FIRST_USER=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_FIRST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
 	@./scripts/admin-signup.sh
 
 rag-config: ## Set the strict-grounding RAG template in Open WebUI (run after `make api-keys`)

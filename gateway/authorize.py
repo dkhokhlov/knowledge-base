@@ -14,7 +14,7 @@ group_id convention: the logical form is `user:<email>` for personal memory,
 but Graphiti's group_id charset is ASCII alphanumeric, dash, and underscore
 only (validate_group_id in graphiti_core, regex ^[A-Za-z0-9_-]+$). The chars
 `:`, `@`, `.` are not allowed, so the stored/compared id is the sanitized
-form `user-<sanitized-email>` (e.g. `user:agent@local.test` ->
+form `user-<sanitized-email>` (e.g. `user:agent@<KB_DOMAIN>` ->
 `user-agent-local-test`). Client input in either form is accepted: the
 boundary normalizes both to the one stored id. The caller NEVER supplies a
 raw identity — only the gateway-resolved email is used, so identity is
@@ -39,7 +39,7 @@ def graphiti_group_id(group_id):
     an already-valid id is unchanged. Empty in -> empty out.
 
     Maps the logical `user:<email>` to the stored `user-<sanitized-email>`
-    (e.g. `user:agent@local.test` -> `user-agent-local-test`), so client input
+    (e.g. `user:agent@<KB_DOMAIN>` -> `user-agent-local-test`), so client input
     in either form resolves to the one stored id used for writes, reads,
     ownership checks, and display."""
     return _GROUP_BAD.sub("-", group_id or "").strip("-")

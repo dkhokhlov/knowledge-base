@@ -5,7 +5,7 @@
 #
 # Preconditions:
 #   - Stack running and healthy (`make start`).
-#   - OPENWEBUI_TEST_USER / OPENWEBUI_TEST_PASSWORD in .env.local = an admin
+#   - OPENWEBUI_FIRST_USER / OPENWEBUI_FIRST_PASSWORD in .env.local = an admin
 #     account (the first UI registrant becomes admin).
 #
 # What it does:
@@ -26,26 +26,30 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # .env (config of record) + .env.local (secrets + test creds) -> exported env.
+# Capture a `make api-keys KB_DOMAIN=<d>` override before `set -a; . ./.env`
+# (which would clobber it with .env's KB_DOMAIN); restore it after sourcing.
+_KB_DOMAIN_OVR="${KB_DOMAIN:-}"
 set -a
 # shellcheck source=/dev/null
 . ./.env
 # shellcheck source=/dev/null
 . ./.env.local
 set +a
+if [ -n "$_KB_DOMAIN_OVR" ]; then export KB_DOMAIN="$_KB_DOMAIN_OVR"; fi
 
 python3 - <<'PY'
 import os, json, secrets, tempfile, time, urllib.request, urllib.error, sys
 
 # OWUI is fronted by Caddy at the KB_HOST root; reach its /api/* there.
 O = os.environ.get("KB_HOST") or ("http://localhost:%s" % os.environ.get("KB_HOST_PORT", "3000"))
-ADMIN_USER = os.environ.get("OPENWEBUI_TEST_USER", "")
-ADMIN_PASS = os.environ.get("OPENWEBUI_TEST_PASSWORD", "")
-AGENT_USER = os.environ.get("OPENWEBUI_USER") or "agent@local.test"
+ADMIN_USER = os.environ.get("OPENWEBUI_FIRST_USER", "")
+ADMIN_PASS = os.environ.get("OPENWEBUI_FIRST_PASSWORD", "")
+AGENT_USER = os.environ.get("OPENWEBUI_USER") or "agent@" + (os.environ.get("KB_DOMAIN") or "local.test")
 AGENT_NAME = os.environ.get("OPENWEBUI_USER_NAME") or "Agent"
 FORCE = os.environ.get("FORCE", "") == "1"
 
 if not ADMIN_USER or not ADMIN_PASS:
-    sys.exit("FAIL  OPENWEBUI_TEST_USER / OPENWEBUI_TEST_PASSWORD not set in .env.local (admin account)")
+    sys.exit("FAIL  OPENWEBUI_FIRST_USER / OPENWEBUI_FIRST_PASSWORD not set in .env.local (admin account)")
 
 def req(method, path, token=None, body=None):
     url = O + path
@@ -88,7 +92,7 @@ def out(msg): print(msg)
 # --- 1. admin signin ---------------------------------------------------------
 admin_jwt = signin(ADMIN_USER, ADMIN_PASS)
 if not admin_jwt:
-    sys.exit("FAIL  admin signin failed for %s (check OPENWEBUI_TEST_USER/PASSWORD)" % ADMIN_USER)
+    sys.exit("FAIL  admin signin failed for %s (check OPENWEBUI_FIRST_USER/PASSWORD)" % ADMIN_USER)
 out("OK    admin signin -> JWT")
 
 # --- 2. enable API keys stack-wide (admin config round-trip) -----------------

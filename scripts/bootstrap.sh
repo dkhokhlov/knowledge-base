@@ -60,6 +60,26 @@ ensure_secret() {
     || { printf 'FAIL  %s not set in %s\n' "$key" "$file" >&2; exit 1; }
 }
 
+# ensure_value <file> <key> <value>: guarantee a non-empty <key>=<value> line in
+# <file>. Like ensure_secret, but with a caller-supplied value (not random).
+# Replaces an empty/quoted-empty/whitespace line in place; appends if the key is
+# absent. Idempotent (kept if the sourced value is non-empty); verifies it landed.
+ensure_value() {
+  local file="$1" key="$2" val="$3"
+  if secret_present "$file" "$key"; then
+    printf '  %s already present in %s (kept)\n' "$key" "$file"
+    return
+  fi
+  if grep -qE "^${key}=" "$file"; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$file"
+  fi
+  printf '  set %s in %s\n' "$key" "$file"
+  secret_present "$file" "$key" \
+    || { printf 'FAIL  %s not set in %s\n' "$key" "$file" >&2; exit 1; }
+}
+
 if [ ! -f .env.local ]; then
   if [ ! -f .env.local.example ]; then
     printf 'FAIL  .env.local.example missing (cannot scaffold .env.local)\n' >&2
@@ -71,6 +91,17 @@ fi
 
 ensure_secret .env.local WEBUI_SECRET_KEY
 
+# First (admin) account: email admin@<KB_DOMAIN> (KB_DOMAIN is in .env,
+# default local.test) + a generated password. A `make bootstrap KB_DOMAIN=<d>`
+# override wins; else read KB_DOMAIN from the .env bootstrap just created (plain
+# KEY=VALUE; source in a subshell, default if unset or source fails). ensure_value
+# keeps an existing non-empty value (operator edits / e2e-restore-creds survive a
+# re-bootstrap); clean-all wipes .env.local so a fresh bootstrap recomputes for a
+# new KB_DOMAIN.
+KB_DOMAIN="${KB_DOMAIN:-$(. ./.env 2>/dev/null; printf '%s' "${KB_DOMAIN:-local.test}")}"
+ensure_value .env.local OPENWEBUI_FIRST_USER "admin@${KB_DOMAIN}"
+ensure_secret .env.local OPENWEBUI_FIRST_PASSWORD
+
 chmod 600 .env.local
 printf '  set .env.local permissions to 0600\n'
 
@@ -78,5 +109,6 @@ mkdir -p data/neo4j/data data/neo4j/logs data/openwebui
 printf '  ensured ./data/{neo4j/data,neo4j/logs,openwebui} exist\n'
 
 printf '\nBootstrap done. Next: make preflight && make start\n'
-printf 'After start + admin signup: make api-keys (admin + shared-agent keys),\n'
-printf 'then provision accounts via the kb-gateway (see README KB_API_KEY).\n'
+printf 'After start: make admin-signup (admin %s; password in .env.local OPENWEBUI_FIRST_PASSWORD),\n' "admin@${KB_DOMAIN}"
+printf 'then make api-keys (admin + shared-agent keys), then provision accounts\n'
+printf 'via the kb-gateway (see README KB_API_KEY).\n'

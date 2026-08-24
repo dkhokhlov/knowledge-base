@@ -14,7 +14,7 @@
 # runs per-figure OCR through deepseek-ocr, so the pending-drain budget is
 # raised (E2E_INDEXER_WAIT, default 2400s -> GDRIVE_TEST_WAIT).
 #
-# Stashes OPENWEBUI_TEST_USER/PASSWORD (+OPENWEBUI_USER) before the wipe and
+# Stashes OPENWEBUI_FIRST_USER/PASSWORD (+OPENWEBUI_USER) before the wipe and
 # restores them after bootstrap (clear-all deletes .env.local).
 #
 # No fallback / no workaround: any step failing aborts the run (set -e). The
@@ -26,13 +26,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "==> DESTRUCTIVE: wipes all data and re-provisions from scratch."
-test -f .env.local || { echo "REFUSING: no .env.local (no admin creds to stash) — run make bootstrap + fill OPENWEBUI_TEST_USER/PASSWORD first" >&2; exit 1; }
+test -f .env.local || { echo "REFUSING: no .env.local (no admin creds to stash) — run make bootstrap + fill OPENWEBUI_FIRST_USER/PASSWORD first" >&2; exit 1; }
 set -a; . ./.env; . ./.env.local; set +a
-[ -n "${OPENWEBUI_TEST_USER:-}" ] && [ -n "${OPENWEBUI_TEST_PASSWORD:-}" ] \
-  || { echo "REFUSING: OPENWEBUI_TEST_USER/PASSWORD not set in .env.local (admin account) — fill them first" >&2; exit 1; }
+[ -n "${OPENWEBUI_FIRST_USER:-}" ] && [ -n "${OPENWEBUI_FIRST_PASSWORD:-}" ] \
+  || { echo "REFUSING: OPENWEBUI_FIRST_USER/PASSWORD not set in .env.local (admin account) — fill them first" >&2; exit 1; }
 
 stash=$(mktemp); chmod 600 "$stash"
-{ printf 'OPENWEBUI_TEST_USER=%s\nOPENWEBUI_TEST_PASSWORD=%s\n' "$OPENWEBUI_TEST_USER" "$OPENWEBUI_TEST_PASSWORD"
+{ printf 'OPENWEBUI_FIRST_USER=%s\nOPENWEBUI_FIRST_PASSWORD=%s\n' "$OPENWEBUI_FIRST_USER" "$OPENWEBUI_FIRST_PASSWORD"
   [ -n "${OPENWEBUI_USER:-}" ] && printf 'OPENWEBUI_USER=%s\n' "$OPENWEBUI_USER" || true; } > "$stash"
 trap 'rm -f "$stash"' EXIT
 

@@ -22,13 +22,17 @@ fail() { printf '%sFAIL%s  %s\n' "$C_FAIL" "$C_RST" "$1"; FAIL=$((FAIL + 1)); }
 section() { printf '\n%s== %s ==%s\n' "$C_INFO" "$1" "$C_RST"; }
 
 # Load the config-of-record (.env) and the gitignored secrets (.env.local).
+# Capture a `make test KB_DOMAIN=<d>` override before `set -a; . ./.env` (which
+# would clobber it with .env's KB_DOMAIN); restore it after sourcing.
 load_env() {
+  local _kb_domain_ovr="${KB_DOMAIN:-}"
   set -a
   # shellcheck source=/dev/null
   . ./.env
   # shellcheck source=/dev/null
   . ./.env.local
   set +a
+  if [ -n "$_kb_domain_ovr" ]; then export KB_DOMAIN="$_kb_domain_ovr"; fi
 }
 
 # Record a failure for each named env var that is empty. Return 1 if any missing.

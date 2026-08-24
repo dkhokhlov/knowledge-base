@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create the Open WebUI admin account from OPENWEBUI_TEST_USER/PASSWORD in
+# Create the Open WebUI admin account from OPENWEBUI_FIRST_USER/PASSWORD in
 # .env.local, via the signup API. The first registrant becomes admin (OWUI
 # default); this script automates that step so a from-scratch run does not
 # require a manual UI signup.
@@ -11,7 +11,7 @@
 # Preconditions:
 #   - Stack running and healthy (`make start`).
 #   - ENABLE_SIGNUP=true (compose default; required for the signup call).
-#   - OPENWEBUI_TEST_USER / OPENWEBUI_TEST_PASSWORD set in .env.local.
+#   - OPENWEBUI_FIRST_USER / OPENWEBUI_FIRST_PASSWORD set in .env.local.
 #
 # Run after `make start`, before `make api-keys` (api-keys.sh signs in as this
 # admin). Exits non-zero on any failure.
@@ -31,12 +31,12 @@ import os, json, urllib.request, urllib.error, sys
 
 # OWUI is fronted by Caddy at the KB_HOST root; reach its /api/* there.
 O = os.environ.get("KB_HOST") or ("http://localhost:%s" % os.environ.get("KB_HOST_PORT", "3000"))
-ADMIN_USER = os.environ.get("OPENWEBUI_TEST_USER", "")
-ADMIN_PASS = os.environ.get("OPENWEBUI_TEST_PASSWORD", "")
-ADMIN_NAME = os.environ.get("OPENWEBUI_ADMIN_NAME") or "Admin"
+ADMIN_USER = os.environ.get("OPENWEBUI_FIRST_USER", "")
+ADMIN_PASS = os.environ.get("OPENWEBUI_FIRST_PASSWORD", "")
+ADMIN_NAME = os.environ.get("OPENWEBUI_ADMIN_NAME") or "admin"
 
 if not ADMIN_USER or not ADMIN_PASS:
-    sys.exit("FAIL  OPENWEBUI_TEST_USER / OPENWEBUI_TEST_PASSWORD not set in .env.local (admin account)")
+    sys.exit("FAIL  OPENWEBUI_FIRST_USER / OPENWEBUI_FIRST_PASSWORD not set in .env.local (admin account)")
 
 def req(method, path, token=None, body=None):
     url = O + path
@@ -100,6 +100,6 @@ if code == 200 and d and d.get("token"):
 # 409 (or any non-200 with "already") means the account exists but signin
 # failed -> password mismatch in .env.local, not a missing account.
 if code == 409 or (txt and "already" in txt.lower()):
-    sys.exit("FAIL  %s already exists but signin failed -> OPENWEBUI_TEST_PASSWORD mismatch in .env.local" % ADMIN_USER)
+    sys.exit("FAIL  %s already exists but signin failed -> OPENWEBUI_FIRST_PASSWORD mismatch in .env.local" % ADMIN_USER)
 sys.exit("FAIL  signup -> %s %s" % (code, (txt or "")[:200]))
 PY
