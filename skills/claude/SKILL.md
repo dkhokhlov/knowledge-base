@@ -261,6 +261,11 @@ python3 "$G" $E delete-edge <uuid>                     # delete one edge (owner/
 python3 "$G" $E delete-episode <uuid>                  # delete one episode (owner/admin of its group)
 ```
 
+**`add` is asynchronous:** Graphiti extracts entity edges in a background
+Ollama pass after `add` returns, so an immediate `search` for the just-added
+fact can return `[]`. Wait ~20s (or retry) before treating a 0-hit search as
+"not remembered".
+
 Errors: any non-200 from the gateway exits non-zero with the gateway's message
 (401 = bad/missing key; 403 = not authorized for that op/group; 503 = identity
 service down; 502 = graphiti/neo4j down; 501 = admin op unsupported by this

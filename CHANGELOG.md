@@ -13,6 +13,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `role`, `id`); pass `--json` to emit the raw JSON response instead, so a script
   can `json.load` stdout and extract `kb_api_key` / `temp_password` without
   parsing prose. `--email` + `--name` remain required. SKILL.md documents both.
+- **SKILL.md notes that `add` is asynchronous.** Graphiti extracts entity edges
+  in a background Ollama pass after `add` returns, so an immediate `search` for
+  the just-added fact can return `[]`; wait ~20s (or retry) before treating a
+  0-hit search as "not remembered". Documentation only — no code change.
 
 - **`make test` is fast and deterministic; the full real-gdrive drain moved to
   `make test-e2e` only.** `tests/test_09_gdrive_index.sh` (the full real-gdrive
