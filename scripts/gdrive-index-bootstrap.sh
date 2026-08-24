@@ -144,5 +144,14 @@ PY
 update_env_local GDRIVE_KB_ID "$KB_ID"
 printf 'OK    wrote GDRIVE_KB_ID to .env.local\n'
 
+# Recreate kb-gateway so it picks up OPENWEBUI_ADMIN_API_KEY + GDRIVE_KB_ID from
+# .env.local (the gateway holds the admin key for /index writes + defaults
+# kb_id from GDRIVE_KB_ID). `make start` launched it before these existed; a
+# bare restart would NOT re-read compose env, so force-recreate is required.
+# Re-source .env.local (just written) so the interpolated values are current.
+set -a; . ./.env 2>/dev/null || true; . ./.env.local 2>/dev/null || true; set +a
+docker compose up -d --no-deps --force-recreate kb-gateway >/dev/null
+printf 'OK    recreated kb-gateway (admin key + GDRIVE_KB_ID now in env)\n'
+
 printf '\nDone. gdrive KB id: %s\n' "$KB_ID"
 printf 'Index the tree: make gdrive-sync   |   status: make gdrive-status\n'

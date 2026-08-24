@@ -207,6 +207,28 @@ def sync_cleanup(admin_key, kb_id, file_ids, dir_ids):
     return True
 
 
+def create_directory(admin_key, kb_id, name, parent_id):
+    """POST /api/v1/knowledge/{id}/dirs/create. Directories are first-class OWUI
+    entities (sync/diff's directory_map only carries EXISTING paths); a new
+    subdir must be created before files can be linked into it, and its id is
+    needed as the upload/batch-add directory_id. `name` is the single segment;
+    `parent_id` is the parent dir id or None for a top-level dir. Returns the
+    directory model dict {id, name, parent_id, ...}. Raises OwuiError on
+    transport failure or non-200."""
+    code, data, txt = _j("POST", "/api/v1/knowledge/%s/dirs/create" % kb_id,
+                         admin_key, {"name": name, "parent_id": parent_id})
+    if code != 200 or not isinstance(data, dict) or not data.get("id"):
+        raise OwuiError("create_directory %s/%s -> HTTP %s: %s" % (kb_id, name, code, (txt or "")[:200]))
+    return data
+
+
+def _cd_filename(name):
+    """Escape a filename for a quoted Content-Disposition parameter: strip CR/LF
+    (header injection) and backslash-escape double quotes + backslashes."""
+    s = (name or "").replace("\r", "").replace("\n", "")
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def upload_file(admin_key, kb_id, file_hash, directory_id, filename, data_bytes):
     """POST /api/v1/files/ multipart: field 'file' (filename, raw bytes) + field
     'metadata' (JSON {knowledge_id, file_hash, directory_id}). The idempotency
@@ -219,7 +241,7 @@ def upload_file(admin_key, kb_id, file_hash, directory_id, filename, data_bytes)
     boundary = uuid.uuid4().hex
     body = bytearray()
     body += ("--%s\r\n" % boundary).encode()
-    body += ('Content-Disposition: form-data; name="file"; filename="%s"\r\n' % filename).encode()
+    body += ('Content-Disposition: form-data; name="file"; filename="%s"\r\n' % _cd_filename(filename)).encode()
     body += b"Content-Type: application/octet-stream\r\n\r\n"
     body += data_bytes
     body += b"\r\n"

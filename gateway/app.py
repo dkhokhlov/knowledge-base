@@ -107,6 +107,22 @@ class Handler(BaseHTTPRequestHandler):
             raise GatewayError(400, "request body must be a JSON object")
         return data
 
+    def _drain_body(self):
+        """Read and discard the request body. /index takes its arguments as
+        query params and sends an unused `{}` body, but with HTTP/1.1 keep-alive
+        an unconsumed body leaves bytes in the socket buffer; the next request
+        on the same (Caddy-reused) upstream connection then parses those bytes
+        as its request line -> 'Unsupported method'. Draining keeps the
+        connection aligned. No parsing, no size limit beyond MAX_BODY."""
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            return
+        remaining = min(length, MAX_BODY)
+        self.rfile.read(remaining)
+        # Anything beyond MAX_BODY: leave it. A trigger body is always tiny (`{}`);
+        # an oversized body would desync the connection, but that is not a
+        # contract any caller sends, so we do not engineer for it here.
+
     def _auth(self):
         """Resolve the caller's identity from the Bearer key. Raises
         GatewayError(401) for a bad/missing key, GatewayError(503) if OWUI is
@@ -201,6 +217,7 @@ class Handler(BaseHTTPRequestHandler):
             identity = self._auth()
             return self._create_user(identity, self._read_body())
         if path == "/index" and method == "POST":
+            self._drain_body()  # before auth: keep the keep-alive connection aligned on every path
             identity = self._auth()
             return self._index(identity, qs)
         if path == "/status" and method == "GET":
@@ -336,7 +353,10 @@ class Handler(BaseHTTPRequestHandler):
         """POST /index?source=gdrive&kb_id=<id>[&force=1][&dry_run=1][&reindex_all=1].
         Admin-only. Walks the source mount, drives OWUI's sync/diff protocol
         with the gateway's held admin key, returns per-file results. Stateless:
-        the KB is the state (no manifest file)."""
+        the KB is the state (no manifest file). dry_run never mutates (returns
+        the plan only). New source subdirs are created via dirs/create before
+        their files are uploaded (sync/diff's directory_map only covers existing
+        paths; without this, new-subdir files would land at KB root)."""
         if not authorize.is_admin(identity):
             raise GatewayError(403, "admin role required for /index")
         admin_key = owui._admin_key()  # OwuiError -> 503 if unset
@@ -353,6 +373,9 @@ class Handler(BaseHTTPRequestHandler):
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
 
+        # walk_source fails closed on any read/stat/hash error (a silently
+        # dropped file would reappear as `deleted` in sync/diff -> cleanup
+        # removes its KB entry: data loss on a transient I/O error).
         files = walk_source(root, allow, max_size)  # [{filename,path,checksum,size,abspath}]
         if not files and not force:
             raise GatewayError(422, "source walk yielded 0 files - refusing "
@@ -361,8 +384,28 @@ class Handler(BaseHTTPRequestHandler):
                      "checksum": f["checksum"], "size": f["size"]} for f in files]
         by_key = {(f["path"], f["filename"]): f for f in files}
 
-        # reindex_all: drain the KB first so the whole source is re-uploaded.
-        drain_file_ids, drain_dir_ids = [], []
+        # dry_run: return the plan with ZERO mutation (no drain, no dir create,
+        # no upload, no cleanup). For reindex_all the plan reports every source
+        # file as added + the existing count it would drain; otherwise it runs
+        # the read-only sync/diff and reports that diff.
+        if dry_run:
+            if reindex_all:
+                lst = owui.list_kb_files(admin_key, kb_id)
+                would_drain = len([it for it in (lst.get("items") or []) if it.get("id")])
+                mkdir = sorted({f["path"] for f in files if f["path"]})
+                return self._ok({"dry_run": True, "reindex_all": True,
+                                 "added": len(files), "modified": 0, "deleted": 0,
+                                 "unmodified": 0, "would_drain": would_drain,
+                                 "mkdir": mkdir})
+            diff = owui.sync_diff(admin_key, kb_id, manifest)
+            return self._ok({"dry_run": True, "added": len(diff.get("added") or []),
+                             "modified": len(diff.get("modified") or []),
+                             "deleted": len(diff.get("deleted") or []),
+                             "unmodified": diff.get("unmodified_count") or 0,
+                             "mkdir": diff.get("mkdir") or []})
+
+        # reindex_all (non-dry_run): drain the KB first so the whole source is
+        # re-uploaded (everything becomes `added` in the diff).
         if reindex_all:
             lst = owui.list_kb_files(admin_key, kb_id)
             drain_file_ids = [it.get("id") for it in (lst.get("items") or []) if it.get("id")]
@@ -371,7 +414,9 @@ class Handler(BaseHTTPRequestHandler):
                 owui.sync_cleanup(admin_key, kb_id, drain_file_ids, drain_dir_ids)
 
         diff = owui.sync_diff(admin_key, kb_id, manifest)
-        directory_map = diff.get("directory_map") or {}
+        # directory_map: EXISTING path -> dir_id (from sync/diff). Extended below
+        # with newly created dirs so every source path resolves to a dir_id.
+        directory_map = dict(diff.get("directory_map") or {})
         added = diff.get("added") or []
         modified = diff.get("modified") or []
         deleted = diff.get("deleted") or []
@@ -380,15 +425,24 @@ class Handler(BaseHTTPRequestHandler):
         log.info("/index kb=%s added=%d modified=%d deleted=%d unmodified=%d",
                  kb_id, len(added), len(modified), len(deleted), unmodified)
 
-        if dry_run:
-            return self._ok({"dry_run": True, "added": len(added),
-                             "modified": len(modified), "deleted": len(deleted),
-                             "unmodified": unmodified,
-                             "mkdir": diff.get("mkdir") or []})
+        # Create the new directories (mkdir) shallowest-first so each segment's
+        # parent_id is known. sync/diff returns mkdir sorted by depth; create each
+        # missing segment via dirs/create and extend directory_map to cover it.
+        for mkdir_path in (diff.get("mkdir") or []):
+            segments = mkdir_path.split("/")
+            for depth in range(1, len(segments) + 1):
+                p = "/".join(segments[:depth])
+                if p in directory_map:
+                    continue
+                parent_p = "/".join(segments[:depth - 1])
+                parent_id = directory_map.get(parent_p)  # None -> top-level
+                d = owui.create_directory(admin_key, kb_id, segments[depth - 1], parent_id)
+                directory_map[p] = d.get("id") or ""
 
         errors = []
         file_models = []
         add_items = []
+        orphan_file_ids = []  # modified: stale_file_ids to clean after the new link
         for entry in added + modified:
             fn = entry.get("filename")
             path = entry.get("path", "")
@@ -412,9 +466,12 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             file_models.append(fm)
             add_items.append({"file_id": fm["id"], "directory_id": dir_id})
-            # modified: the old file_id (if the entry carries one) is now orphan.
-            if entry.get("file_id") and entry in modified:
-                drain_file_ids.append(entry["file_id"])
+            # modified: OWUI carries the OLD file id as `stale_file_id` (added
+            # entries never carry it). It is now an orphan -> clean below
+            # (sync_cleanup is tolerant of an id the idempotency patch already
+            # reclaimed during the new upload).
+            if entry.get("stale_file_id"):
+                orphan_file_ids.append(entry["stale_file_id"])
 
         if add_items:
             try:
@@ -432,7 +489,7 @@ class Handler(BaseHTTPRequestHandler):
             except owui.OwuiError as e:
                 errors.append({"filename": "<batch_process>", "status": "error", "error": str(e)})
 
-        cleanup_file_ids = [d.get("file_id") for d in deleted if d.get("file_id")]
+        cleanup_file_ids = orphan_file_ids + [d.get("file_id") for d in deleted if d.get("file_id")]
         cleanup_dir_ids = list(rmdir)
         if cleanup_file_ids or cleanup_dir_ids:
             try:
@@ -520,11 +577,20 @@ def walk_source(root, allow, max_size):
     [{filename, path, checksum, size, abspath}]. `filename` is the basename,
     `path` is the directory relpath from `root` (POSIX, "" at root) — the shape
     OWUI sync/diff expects. `checksum` is the raw-file sha256. Skips symlinks,
-    .sync-reports, .sync.lock. Empty list if root missing/empty (caller guards)."""
+    .sync-reports, .sync.lock. Empty list if root missing/empty (caller guards).
+
+    Fails CLOSED on any OSError (stat, read, hash, or os.walk descent): a
+    silently dropped file would reappear as `deleted` in sync/diff, and
+    sync/cleanup would then remove its KB entry — data loss on a transient
+    I/O/permission error. Raises GatewayError(500) so /index aborts instead."""
     out = []
     if not os.path.isdir(root):
         return out
-    for dirpath, dirs, filenames in os.walk(root):
+
+    def _walk_err(err):
+        raise GatewayError(500, "source walk failed: %s" % err)
+
+    for dirpath, dirs, filenames in os.walk(root, onerror=_walk_err):
         dirs[:] = [d for d in dirs if d not in _SKIP_NAMES]
         for fn in filenames:
             if fn in _SKIP_NAMES:
@@ -537,8 +603,8 @@ def walk_source(root, allow, max_size):
                 if os.path.islink(abspath) or not os.path.isfile(abspath):
                     continue
                 size = os.path.getsize(abspath)
-            except OSError:
-                continue
+            except OSError as e:
+                raise GatewayError(500, "stat failed for %s: %s" % (abspath, e))
             if size > max_size:
                 continue
             rel = os.path.relpath(abspath, root)
@@ -549,8 +615,8 @@ def walk_source(root, allow, max_size):
                     for chunk in iter(lambda: fh.read(1 << 20), b""):
                         h.update(chunk)
                 checksum = h.hexdigest()
-            except OSError:
-                continue
+            except OSError as e:
+                raise GatewayError(500, "hash failed for %s: %s" % (abspath, e))
             out.append({"filename": fn, "path": d_rel, "checksum": checksum,
                         "size": size, "abspath": abspath})
     return out

@@ -579,9 +579,11 @@ if (( !dry_run )); then
             emit "FAIL: kb /index call failed (curl error): ${idx_resp}"
             write_report_and_exit 1
         fi
-        # Parse the JSON response (jq is a declared dependency above).
-        idx_http_ok=$(printf '%s' "$idx_resp" | jq -e 'has("ok")' 2>/dev/null || echo 0)
-        if [[ "$idx_http_ok" != "1" ]]; then
+        # Parse the JSON response (jq is a declared dependency above). jq -e
+        # sets exit status from the last value's truthiness; it prints the
+        # boolean TEXT (true/false) to stdout, so use the exit status, not
+        # stdout, to decide JSON-ness (comparing stdout to "1" is always false).
+        if ! printf '%s' "$idx_resp" | jq -e 'has("ok")' >/dev/null 2>&1; then
             emit "FAIL: kb /index returned a non-JSON/error response: ${idx_resp}"
             write_report_and_exit 1
         fi
