@@ -150,13 +150,23 @@ def cmd_kbs(base, key, a):
         print("(no knowledge bases visible to this key)")
         return
     for k in items:
-        print("%-38s  files=%-3s  write=%-5s  %s" % (
+        owner = ((k.get("user") or {}).get("email") or "-")
+        print("%-38s  files=%-3s  write=%-5s  %s  owner=%s" % (
             k.get("id", ""), k.get("file_count", "?"),
-            k.get("write_access"), k.get("name", "")))
+            k.get("write_access"), k.get("name", ""), owner))
 
 
 def cmd_kb(base, key, a):
     d = jget(base, key, "GET", "/api/v1/knowledge/%s" % a.id)
+    # The detail endpoint returns user=null (server limitation); only the list
+    # endpoint populates user.email. Fill it in from the list when missing.
+    if d.get("user") is None:
+        lst = jget(base, key, "GET", "/api/v1/knowledge/")
+        items = lst.get("items", []) if isinstance(lst, dict) else lst
+        for k in items:
+            if k.get("id") == a.id:
+                d["user"] = k.get("user")
+                break
     print(json.dumps(d, indent=2))
 
 
