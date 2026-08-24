@@ -15,8 +15,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
   parsing prose. `--email` + `--name` remain required. SKILL.md documents both.
 - **SKILL.md notes that `add` is asynchronous.** Graphiti extracts entity edges
   in a background Ollama pass after `add` returns, so an immediate `search` for
-  the just-added fact can return `[]`; wait ~20s (or retry) before treating a
-  0-hit search as "not remembered". Documentation only — no code change.
+  the just-added fact can return `[]`; wait or retry before treating a 0-hit
+  search as "not remembered". Observed latency on this deployment (mini2 → mini4
+  Ollama, `qwen2.5:14b`): ~10-15s warm, cold start can exceed 90s (varies by
+  host/model). Documentation only — no code change.
 
 - **`make test` is fast and deterministic; the full real-gdrive drain moved to
   `make test-e2e` only.** `tests/test_09_gdrive_index.sh` (the full real-gdrive

@@ -263,8 +263,10 @@ python3 "$G" $E delete-episode <uuid>                  # delete one episode (own
 
 **`add` is asynchronous:** Graphiti extracts entity edges in a background
 Ollama pass after `add` returns, so an immediate `search` for the just-added
-fact can return `[]`. Wait ~20s (or retry) before treating a 0-hit search as
-"not remembered".
+fact can return `[]`. Wait, or retry, before treating a 0-hit search as "not
+remembered" — observed latency on this deployment (mini2 → mini4 Ollama,
+`qwen2.5:14b`): ~10-15s warm, and a cold start (model not loaded) can exceed
+90s. Varies by host/model.
 
 Errors: any non-200 from the gateway exits non-zero with the gateway's message
 (401 = bad/missing key; 403 = not authorized for that op/group; 503 = identity
