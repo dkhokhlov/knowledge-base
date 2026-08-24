@@ -8,14 +8,40 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Replaced the `oikb` gdrive-indexer sidecar with a stateless indexer in
+  kb-gateway.** The opaque `oikb` daemon (failed with 4/159 files indexed, no
+  errors surfaced) is removed. gdrive indexing is now `POST /index` + `GET
+  /status` endpoints in `gateway/app.py` (+ `gateway/owui.py` sync-protocol
+  client: `sync/diff`, `upload_file` multipart, `files/batch/add`,
+  `retrieval/process/files/batch`, `sync/cleanup`). The gateway walks the
+  read-only `./gdrive` mount, drives OWUI's native sync protocol with its held
+  `OPENWEBUI_ADMIN_API_KEY` (the caller's `KB_API_KEY` is authorization only),
+  and returns per-file `{filename, status, error}` results — the diagnosis
+  surface the daemon lacked. Stateless: no `history.db`, no `./data/oikb`, no
+  manifest file; the KB is the state. Indexing is manual/on-demand only
+  (`make gdrive-sync` chains rclone → `POST /index`; `make gdrive-index` runs
+  `/index` alone; `INDEX_ALL=1` / `--index-all` force a full re-index). Empty
+  source → 422 unless `?force=1` (no mass-delete). `make gdrive-status` is now
+  `GET /status` (source vs indexed, pending, `✓ COMPLETE` / `○ remaining=N`;
+  no ETA — no daemon). Removed: `.oikb.yaml`, `scripts/e2e-wait-indexer.sh`,
+  `scripts/gdrive-status.sh`, the `gdrive-indexer` compose service + profile,
+  `data/oikb/`. `compose.yml` adds `./gdrive:/gdrive:ro` +
+  `OPENWEBUI_ADMIN_API_KEY` + `GDRIVE_KB_ID` + `KB_MAX_SIZE` + `user:
+  ${HOST_UID:-1000}:${HOST_GID:-1000}` to kb-gateway. `.env.example` drops
+  `OIKB_*` vars, adds `HOST_UID`/`HOST_GID`/`KB_MAX_SIZE` (rename
+  `OIKB_MAX_SIZE` → `KB_MAX_SIZE` in your `.env`). `tests/test_09` rewrites to
+  `POST /index` + poll `GET /status`. The OWUI path-aware-dedup +
+  upload-idempotency patches STAY (the gateway depends on them). Greenfield:
+  no backward-compat; the KB may be drained + re-indexed freely.
 - **`gdrive-sync` now delta-syncs with backup retention.** Switched from
   `rclone copy` (additive, never deleted) to `rclone sync --backup-dir
   --delete-after`: files removed from Drive are deleted from `./gdrive` (and
-  oikb drops them from the KB on its next cycle), and deleted/overwritten files
-  are moved into a dated `./.gdrive-backup/<UTC-ISO>/` dir OUTSIDE `./gdrive` (so
-  oikb does not re-index them) as a recovery net. `sync` deletes to match the
-  source, so a bad/empty Drive mount empties `./gdrive` — but the removed files
-  are recoverable from `./.gdrive-backup/`, not gone. The sync report gains a
+  the next `/index` drops them from the KB via `sync/cleanup`), and
+  deleted/overwritten files are moved into a dated
+  `./.gdrive-backup/<UTC-ISO>/` dir OUTSIDE `./gdrive` (so `/index` does not
+  index them) as a recovery net. `sync` deletes to match the source, so a
+  bad/empty Drive mount empties `./gdrive` — but the removed files are
+  recoverable from `./.gdrive-backup/`, not gone. The sync report gains a
   `backup-dir` header and a "Files backed up (deleted/overwritten)" line.
   `./.gdrive-backup/` is gitignored; new `make clean` clears it (so does
   `make clear-all`).
@@ -41,9 +67,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `": "`, e.g. `"Report: Q4 review - …"`, which truncated the path).
 - **`gdrive-sync` sets owner-only permissions.** After each sync, `./gdrive`
   (and `./.gdrive-backup/`) are normalized to files `600` / dirs `700` (Drive
-  content is business-sensitive; rclone v1.60 has no `--umask`). The oikb
-  sidecar reads `./gdrive` read-only as uid 1000 (`appuser`) == host owner, so
-  owner-only is still readable by the container.
+  content is business-sensitive; rclone v1.60 has no `--umask`). kb-gateway
+  reads `./gdrive` read-only as the host owner uid (`HOST_UID`, default 1000),
+  so owner-only is still readable by the container.
 - **`gdrive-sync` exclude file switched to an INI format; report gains
   COPY/UPDATE/DELETE + Files-excluded sections.** `./gdrive-exclude.conf`
   (gitignored — Drive paths are PII) is now an INI file: `[<drive name>]`
@@ -90,28 +116,6 @@ project adheres to [Semantic Versioning](https://semver.org/).
   the run aborts with exit 1 if another live run holds the lock. Release is on
   every exit path (the EXIT trap), gated by a `lock_held` flag so a contention
   abort does not delete the other holder's lock. PID reuse is a residual.
-- **`make start` brings the gdrive indexer back when provisioned.** It now adds
-  `--profile gdrive` when `GDRIVE_KB_ID` is set in `.env.local`, so a
-  provisioned stack's `make restart` re-creates the indexer; with it unset,
-  `make start` still starts the core stack only (the indexer is started by
-  `make gdrive-index-bootstrap`). The `gdrive-indexer` compose service is now
-  profile-gated (`profiles: [gdrive]`): it cannot start unprovisioned
-  (`.oikb.yaml` interpolates `kb-id` to `''` -> oikb exits 1 -> restart loop),
-  so `make start` never creates a broken sidecar.
-- **`make test-e2e` provisions + waits for the gdrive indexer.** The
-  destructive e2e run now runs `gdrive-index-bootstrap` + the new
-  `e2e-wait-indexer` step after `rag-config`, then runs the full `make test`
-  suite against a synced gdrive KB (was: core stack only). It unsets
-  `GDRIVE_KB_ID`/`OIKB_API_KEY` before `clear-all` so the wipe re-provisions the
-  indexer from scratch (matches the "start from a clean state" rule).
-- **oikb state persists across container recreation.** The `gdrive-indexer`
-  service sets `OIKB_CONFIG_DIR=/data` (the `data/oikb` bind mount), so
-  `history.db` + `config.yaml` land on the host tree and survive recreation
-  (oikb's default `~/.config/oikb` is ephemeral in-container). `make
-  gdrive-index-bootstrap` chowns `data/oikb` to the oikb runtime uid:gid
-  (detected dynamically from the image, not hardcoded; no fallback — a wrong
-  owner would silently lose `history.db` every restart, so a detect/chown
-  failure aborts the bootstrap).
 
 ### Added
 
@@ -127,26 +131,6 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `OPENWEBUI_IMAGE_TAG=main` and removing the `build:` block; to run the dedup
   patch only, set `0.11.0-pathdedup`. Build seconds, not minutes (no frontend
   rebuild; two backend router files patched in place).
-- `scripts/e2e-wait-indexer.sh` — waits for the gdrive indexer (oikb) to reach a
-  healthy source-sync completion state (`success`/`ok`/`partial`) after
-  `gdrive-index-bootstrap`, so `test_09_gdrive_index` runs against a synced KB
-  instead of a first-sync-in-progress state. Fail-loud (exit 1) on a stuck
-  `running`/`error` within the timeout; skips cleanly when `./gdrive` has no
-  allowlisted files.
-- **gdrive auto-indexing into RAG (oikb sidecar).** New `gdrive-indexer` compose
-  service runs Open WebUI's official sync companion
-  (`ghcr.io/open-webui/oikb:0.4.0`) as a daemon, auto-syncing the host `./gdrive`
-  tree into the OWUI `gdrive` knowledge base every `GDRIVE_INDEX_INTERVAL`
-  (default 30s). Files copied/updated in `gdrive/` are indexed automatically.
-  Incremental SHA-256 diffing, retries, bounded concurrency, include/exclude
-  glob filters + max-size (`.oikb.yaml`), and fail-closed on an empty source
-  (no mass-delete on a bad mount). Additive service; no existing service changed.
-- `make gdrive-index-bootstrap` — creates the `gdrive` KB, grants the agent user
-  read access (merged with existing grants), generates `OIKB_API_KEY`, writes
-  `GDRIVE_KB_ID` + `OIKB_API_KEY` to `.env.local`, starts the indexer.
-- `make gdrive-status` — indexer container + oikb source status/last sync,
-  `indexed` (OWUI KB file count) vs `source` (allowlisted `gdrive/` file count),
-  and an ETA while the sync is not yet finished.
 - `gdrive-sync` now writes `./gdrive/.sync-reports/sync-<UTC-ISO>.report` with
   the transfer summary and a "Files not downloaded" section (e.g. admin-
   protected / download-restricted Drive files, surfaced with their 403 reason).

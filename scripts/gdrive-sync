@@ -12,6 +12,8 @@ Options:
   -r, --remote NAME       rclone remote name (default: gdrive)
   -d, --destination DIR  local destination (default: ./gdrive)
       --dry-run           show transfers without downloading files
+      --index-all         force a full re-index of every file (default:
+                          incremental: only new/changed files are indexed)
   -h, --help              show this help
 
 The destination contains one directory per shared drive. The command uses
@@ -19,6 +21,13 @@ rclone sync, so files removed from Drive are deleted from the destination
 (delta sync). Deleted/overwritten files are moved into a dated backup dir
 (.<destination>-backup/<UTC-ISO>/) as a recovery net, NOT deleted in place —
 so a bad/empty mount is recoverable from the backup dir (`make clean` clears it).
+
+After the sync (unless --dry-run), the synced tree is reconciled into the OWUI
+"gdrive" knowledge base via kb-gateway POST /index (stateless sync/diff against
+the live KB; the gateway holds the admin key). Default is incremental (only
+new/changed files uploaded + extracted); --index-all drains + re-uploads every
+file. Fail-fast: a non-2xx /index response or ok=false aborts after the report.
+Skipped silently if GDRIVE_KB_ID is unset (run: make gdrive-index-bootstrap).
 
 Fail-fast: ANY transfer error aborts the run immediately (the report is still
 written with the failing files + rclone reasons). A per-drive empty-source guard
@@ -54,6 +63,7 @@ remote="gdrive"
 destination="./gdrive"
 exclude_file="./gdrive-exclude.conf"
 dry_run=0
+index_all=0
 
 while (($# > 0)); do
     case "$1" in
@@ -69,6 +79,10 @@ while (($# > 0)); do
             ;;
         --dry-run)
             dry_run=1
+            shift
+            ;;
+        --index-all)
+            index_all=1
             shift
             ;;
         -h|--help)
@@ -117,10 +131,10 @@ report="$reports_dir/sync-${ts}.report"
 
 # rclone sync --backup-dir retention: deleted/overwritten files are moved here
 # (in their original hierarchy) instead of being deleted in place. MUST sit
-# outside <destination> — oikb scans <destination> read-only and would re-index
-# any backup file matching the .oikb.yaml allowlist (*.pdf, *.docx, ...). Dated
-# subdir per run so backups never overwrite each other. `make clean` wipes the
-# whole .<destination>-backup tree.
+# outside <destination> — kb-gateway walks <destination> read-only and would
+# index any backup file matching the gateway allowlist (*.pdf, *.docx, ...).
+# Dated subdir per run so backups never overwrite each other. `make clean`
+# wipes the whole .<destination>-backup tree.
 dest_norm="${destination%/}"
 backup_dir="$(cd "$(dirname "$dest_norm")" && pwd)/.$(basename "$dest_norm")-backup"
 backup_root="$backup_dir/$ts"
@@ -139,7 +153,7 @@ temp_files=()
 # no longer alive (crashed/killed holder) is retaken — `kill -0` is the
 # liveness probe. PID reuse is a residual: a dead PID recycled to an unrelated
 # live process would look alive and block (rare on a single-user host). The
-# lock file has no .oikb.yaml-allowlisted extension, so oikb does not index it.
+# lock file has no gateway-allowlisted extension, so kb-gateway does not index it.
 # `lock_held` gates release so a contention abort (exit 1 before we acquire)
 # does NOT delete the other holder's lock via the EXIT trap.
 LOCK="$dest_norm/.sync.lock"
@@ -182,9 +196,10 @@ emit() { printf '%s\n' "$*"; summary+="$*"$'\n'; }
 
 # Owner-only perms (files 600, dirs 700) on the synced tree + backup retention.
 # Drive content is business-sensitive; rclone v1.60 has no --umask, so normalize
-# after the sync. The oikb sidecar reads ./gdrive read-only as uid 1000 (appuser)
-# == host owner, so owner-only is readable by the container. Skip under --dry-run
-# (no files are created). Run on every exit path (success + fail-fast).
+# after the sync. kb-gateway reads ./gdrive read-only as the host owner uid
+# (HOST_UID, default 1000), so owner-only is readable by the container. Skip
+# under --dry-run (no files are created). Run on every exit path (success +
+# fail-fast).
 normalize_perms() {
     (( dry_run )) && return 0
     find "$destination" -type d -exec chmod 700 {} + 2>/dev/null || true
@@ -539,5 +554,58 @@ if (( !dry_run )) && [[ -d "$backup_root" ]]; then
     backed_up=$(find "$backup_root" -type f | wc -l)
 fi
 emit "Files backed up (deleted/overwritten): ${backed_up} (in ${backup_root})"
+
+# --- index chain: reconcile the synced tree into the OWUI KB via kb-gateway ---
+# Stateless: the gateway walks ./gdrive (ro mount), drives OWUI sync/diff against
+# the live KB, uploads+links+extracts new/changed files, cleans up removed ones.
+# Default incremental; --index-all drains + re-uploads everything. Fail-fast on
+# a non-2xx response or ok=false. Skipped under --dry-run or if GDRIVE_KB_ID unset.
+if (( !dry_run )); then
+    set -a; . ./.env 2>/dev/null || true; . ./.env.local 2>/dev/null || true; set +a
+    if [[ -n "${GDRIVE_KB_ID:-}" && -n "${OPENWEBUI_ADMIN_API_KEY:-}" ]]; then
+        O="http://localhost:${KB_HOST_PORT:-3000}"
+        idx_q="source=gdrive&kb_id=${GDRIVE_KB_ID}"
+        (( index_all )) && idx_q="${idx_q}&reindex_all=1"
+        if (( index_all )); then
+            emit "Indexing synced tree into OWUI KB (via kb-gateway /index, full re-index)..."
+        else
+            emit "Indexing synced tree into OWUI KB (via kb-gateway /index, incremental)..."
+        fi
+        # shellcheck disable=SC2086 # idx_q is a single query string, intentionally unquoted
+        if ! idx_resp=$(curl -sS --max-time 1200 -X POST \
+                -H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}" \
+                -H "Content-Type: application/json" -d '{}' \
+                "${O}/index?${idx_q}" 2>&1); then
+            emit "FAIL: kb /index call failed (curl error): ${idx_resp}"
+            write_report_and_exit 1
+        fi
+        # Parse the JSON response (jq is a declared dependency above).
+        idx_http_ok=$(printf '%s' "$idx_resp" | jq -e 'has("ok")' 2>/dev/null || echo 0)
+        if [[ "$idx_http_ok" != "1" ]]; then
+            emit "FAIL: kb /index returned a non-JSON/error response: ${idx_resp}"
+            write_report_and_exit 1
+        fi
+        idx_added=$(printf '%s' "$idx_resp" | jq -r '.added')
+        idx_modified=$(printf '%s' "$idx_resp" | jq -r '.modified')
+        idx_deleted=$(printf '%s' "$idx_resp" | jq -r '.deleted')
+        idx_unmodified=$(printf '%s' "$idx_resp" | jq -r '.unmodified')
+        idx_ok=$(printf '%s' "$idx_resp" | jq -r '.ok')
+        idx_errn=$(printf '%s' "$idx_resp" | jq -r '(.errors // []) | length')
+        idx_errn=${idx_errn:-0}
+        emit "KB index: added=${idx_added} modified=${idx_modified} deleted=${idx_deleted} unmodified=${idx_unmodified} errors=${idx_errn}"
+        if (( idx_errn > 0 )); then
+            printf 'KB index per-file errors:\n' >&2
+            printf '%s' "$idx_resp" | jq -r '.errors[] | "  \(.filename // .file_id // "?"): \(.status) — \(.error // "")"' >&2
+        fi
+        if [[ "$idx_ok" != "true" ]]; then
+            emit "FAIL: kb /index completed with errors (ok=false) — see per-file errors above"
+            write_report_and_exit 1
+        fi
+    elif [[ -z "${GDRIVE_KB_ID:-}" ]]; then
+        printf 'GDRIVE_KB_ID unset — skipping kb index (run: make gdrive-index-bootstrap)\n' >&2
+    else
+        printf 'OPENWEBUI_ADMIN_API_KEY unset — skipping kb index (run: make api-keys)\n' >&2
+    fi
+fi
 
 write_report_and_exit 0

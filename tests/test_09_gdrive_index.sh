@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
-# System integration test: gdrive auto-indexing (oikb sidecar).
+# System integration test: gdrive indexing via kb-gateway (stateless, no sidecar).
 #
-# Asserts the gdrive-indexer sidecar is up, oikb's daemon is ready, its source
-# sync status is healthy, and the OWUI "gdrive" KB has files indexed. Does a
-# best-effort semantic search over the KB (a hit is a bonus, not a hard
-# requirement — name/content matching is not guaranteed for arbitrary docs).
+# POSTs /index (admin key) to reconcile ./gdrive into the OWUI "gdrive" KB,
+# then polls GET /status (read key) until extraction drains (pending=0), and
+# asserts indexed_count >= source_count - per-file errors. Best-effort semantic
+# search over the KB (a hit is a bonus, not a hard requirement — name/content
+# matching is not guaranteed for arbitrary docs).
 #
-# Tolerant: SKIPs (passes with a notice) when gdrive auto-indexing is not
-# provisioned — GDRIVE_KB_ID unset in .env.local, or ./gdrive has no
-# allowlisted files — so `make test` still runs clean in a bare environment.
+# /index is idempotent: re-running on an indexed KB reports unmodified + adds
+# nothing, so this test is safe to run repeatedly.
+#
+# Tolerant: SKIPs (passes with a notice) when gdrive indexing is not provisioned
+# — GDRIVE_KB_ID unset in .env.local, or ./gdrive has no allowlisted files — so
+# `make test` still runs clean in a bare environment.
 set -u
 . "$(dirname "$0")/lib.sh"
 load_env
 require_stack_up
 
 O="$(kb_host)"
-CTN="kb-gdrive-indexer"
-# Allowlist must match scripts/gdrive-status.sh (Python set) + .oikb.yaml. find's
-# default Emacs regex treats (a|b) as LITERAL (matches 0 files), so every -iregex
-# call below MUST use -regextype posix-extended for the alternation to work.
-ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex|py|s|c|h|inc|cfg)$'
+# Allowlist must match gateway DEFAULT_ALLOW (gateway/app.py). find's default
+# Emacs regex treats (a|b) as LITERAL (matches 0 files), so every -iregex call
+# below MUST use -regextype posix-extended for the alternation to work.
+ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
 
 # --- skip conditions ---------------------------------------------------------
 if [ -z "${GDRIVE_KB_ID:-}" ]; then
@@ -36,89 +39,94 @@ if [ "${src_count:-0}" -eq 0 ]; then
   exit 0
 fi
 
-require_env OPENWEBUI_USER_API_KEY || { finish; exit 1; }
+require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; }
+AK="$OPENWEBUI_ADMIN_API_KEY"
 UK="$OPENWEBUI_USER_API_KEY"
-AUTH=(-H "Authorization: Bearer $UK")
+ADM=(-H "Authorization: Bearer $AK")
+RD=(-H "Authorization: Bearer $UK")
 
-# --- indexer container up ----------------------------------------------------
-section "gdrive-indexer container"
-st=$(docker ps --filter "name=^/${CTN}$" --format '{{.Status}}' 2>/dev/null)
-if printf '%s' "$st" | grep -qi 'Up'; then
-  pass "container up: $st"
-else
-  fail "container not up: ${st:-<missing>}"
-  fail "run: make gdrive-index-bootstrap"
+# --- POST /index (admin): reconcile ./gdrive into the KB ---------------------
+section "POST /index (kb-gateway)"
+idx_resp=$(curl -sS --max-time 1200 -X POST \
+  "$O/index?source=gdrive&kb_id=${GDRIVE_KB_ID}" \
+  "${ADM[@]}" -H 'Content-Type: application/json' -d '{}' 2>&1)
+read -r added modified deleted unmodified errn < <(printf '%s' "$idx_resp" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("0 0 0 0 0"); sys.exit(0)
+if not isinstance(d, dict) or "ok" not in d:
+    print("0 0 0 0 0"); sys.exit(0)
+print(d.get("added", 0), d.get("modified", 0), d.get("deleted", 0),
+      d.get("unmodified", 0), len(d.get("errors") or []))
+' 2>/dev/null || echo "0 0 0 0 0")
+if [ "$added" = "0" ] && [ "$modified" = "0" ] && [ "$unmodified" = "0" ] && [ "$errn" = "0" ]; then
+  fail "POST /index returned no parseable result: ${idx_resp}"
   finish
   exit 1
 fi
-
-# --- oikb daemon ready (via docker exec; no published port) ------------------
-section "oikb daemon ready"
-ready=$(docker exec "$CTN" python -c \
-  "import urllib.request,sys; sys.stdout.write(str(urllib.request.urlopen('http://localhost:8080/health/ready',timeout=5).status))" \
-  2>/dev/null || true)
-if [ "$ready" = "200" ]; then
-  pass "oikb /health/ready -> 200"
-else
-  fail "oikb /health/ready not 200 (got ${ready:-<no response>})"
-  finish
-  exit 1
+pass "/index: added=${added} modified=${modified} deleted=${deleted} unmodified=${unmodified} errors=${errn}"
+if [ "${errn:-0}" -gt 0 ]; then
+  fail "/index reported ${errn} per-file error(s):"
+  printf '%s' "$idx_resp" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+for e in (d.get("errors") or [])[:20]:
+    print("    " + str(e.get("filename") or e.get("file_id") or "?") +
+          ": " + str(e.get("status", "")) + " - " + str(e.get("error", "")))
+'
 fi
 
-# --- oikb source sync status -------------------------------------------------
-# oikb 0.4.0 per-source status (daemon.py): "running" while a sync cycle is
-# active, "success" when the cycle completed with no errors, "partial" when it
-# completed with some per-file errors, "error" on an exception. The daemon
-# syncs on a 30s interval, so a one-shot read can land mid-cycle ("running") on
-# an otherwise-healthy indexer. Poll briefly (60s) for a completion state
-# (success/ok/partial); only a stuck "running" or "error" is a failure. ("ok" is
-# the top-level daemon health string, kept here defensively for older oikb.)
-section "oikb gdrive source status"
-oikb_status=""
-src_state=""
-for _ in $(seq 1 12); do
-  src_state=$(docker exec "$CTN" python -c \
-    "import urllib.request,json; d=json.load(urllib.request.urlopen('http://localhost:8080/health',timeout=5)); s=d.get('sources',{}).get('/gdrive',{}); print(s.get('status','?'), '|', s.get('error',''))" \
-    2>/dev/null || true)
-  oikb_status="${src_state%% *}"
-  case "$oikb_status" in
-    success|ok|partial) break;;
-  esac
-  sleep 5
+# --- poll GET /status until extraction drains (pending=0) -------------------
+# batch_process is non-blocking; OCR extraction drains async. Poll /status
+# (read key) for pending=0 up to GDRIVE_TEST_WAIT (default 600s).
+section "poll GET /status (pending drain)"
+wait_s="${GDRIVE_TEST_WAIT:-600}"
+deadline=$(( $(date +%s) + wait_s ))
+pending=""
+indexed=""
+while :; do
+  st=$(curl -sS "$O/status?source=gdrive&kb_id=${GDRIVE_KB_ID}&json=1" "${RD[@]}" 2>/dev/null || true)
+  pending=$(printf '%s' "$st" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin); p = d.get("pending")
+    print("%d" % p if isinstance(p, int) else "")
+except Exception:
+    print("")
+')
+  indexed=$(printf '%s' "$st" | python3 -c '
+import sys, json
+try:
+    print(json.load(sys.stdin).get("indexed_count") or 0)
+except Exception:
+    print(0)
+')
+  if [ "$pending" = "0" ]; then break; fi
+  if [ "$(date +%s)" -ge "$deadline" ]; then break; fi
+  sleep 10
 done
-case "$oikb_status" in
-  success|ok|partial) pass "oikb source status=${oikb_status}";;
-  *)
-    fail "oikb source status=${oikb_status} (${src_state})"
-    fail "indexer did not reach a completion state (success/partial) in 60s - stuck mid-cycle or error; check: docker logs $CTN"
-    finish
-    exit 1
-    ;;
-esac
-
-# --- OWUI KB has files indexed ----------------------------------------------
-# file_count is exposed only on the LIST endpoint (GET /api/v1/knowledge/), not
-# the detail endpoint (whose files array is empty). List with the agent key and
-# pick the gdrive KB by id.
-section "OWUI gdrive KB file_count"
-fc=$(curl -s "$O/api/v1/knowledge/" "${AUTH[@]}" \
-  | python3 -c '
-import sys,json
-d=json.load(sys.stdin)
-items=d.get("items",d) if isinstance(d,dict) else d
-fc=0
-for k in items:
-    if k.get("id")==sys.argv[1]:
-        fc=k.get("file_count",0) or 0; break
-print(fc)
-' "$GDRIVE_KB_ID" 2>/dev/null || true)
-if [ "${fc:-0}" -gt 0 ]; then
-  pass "KB file_count=${fc} (source allowlisted=${src_count})"
+if [ "$pending" = "0" ]; then
+  pass "pending=0 (extraction drained); indexed=${indexed:-0} source=${src_count}"
 else
-  fail "KB file_count=0 — nothing indexed yet (source=${src_count})"
-  fail "if first sync is still running, wait and re-run; else check: docker logs $CTN"
-  finish
-  exit 1
+  fail "pending=${pending:-<unavailable>} after ${wait_s}s (indexed=${indexed:-0}); extraction did not drain"
+  fail "check: docker logs kb-openwebui + docker logs kb-markitdown-ocr"
+fi
+
+# --- indexed count assertion ------------------------------------------------
+# The upload-idempotency + path-aware-dedup patches make duplicate-content 400s
+# not occur, so a healthy run has errors=0 and indexed reaches source. Any
+# per-file error lowers the bar by exactly its count (the errors explain the
+# gap). An unexplained gap (indexed < source - errors) is a real failure.
+section "indexed vs source"
+idx_n="${indexed:-0}"
+expected_min=$(( src_count - ${errn:-0} ))
+if [ "${idx_n}" -ge "${expected_min}" ] && [ "${idx_n}" -gt 0 ]; then
+  pass "KB indexed=${idx_n} >= source(${src_count}) - errors(${errn:-0}) = ${expected_min}"
+else
+  fail "KB indexed=${idx_n} < source(${src_count}) - errors(${errn:-0}) = ${expected_min} (unexplained gap)"
+  fail "re-run: make gdrive-sync; then docker logs kb-openwebui / kb-markitdown-ocr"
 fi
 
 # --- best-effort semantic search --------------------------------------------
@@ -126,7 +134,7 @@ section "semantic search over gdrive KB (best-effort)"
 qfile=$(find gdrive -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | head -1)
 q=$(basename "$qfile" | sed -E 's/\.[A-Za-z0-9]+$//' | tr -c '[:alnum:]' ' ' | tr -s ' ' | sed -E 's/^ | $//g')
 if [ -z "$q" ]; then q="verification plan"; fi
-hits=$(curl -s -X POST "$O/api/v1/retrieval/query/collection" "${AUTH[@]}" -H 'Content-Type: application/json' \
+hits=$(curl -s -X POST "$O/api/v1/retrieval/query/collection" "${RD[@]}" -H 'Content-Type: application/json' \
   -d "{\"collection_names\":[\"${GDRIVE_KB_ID}\"],\"query\":$(python3 -c 'import sys,json;print(json.dumps(sys.argv[1]))' "$q"),\"k\":4,\"hybrid\":true}" \
   | python3 -c '
 import sys,json

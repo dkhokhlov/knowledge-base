@@ -136,16 +136,17 @@ An admin tells an agent **"create a new KB user alice\@example.com named Alice"*
 - To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field of `/api/chat/completions` as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds.
 - `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
 
-### gdrive auto-indexing
+### gdrive indexing (manual, via kb-gateway)
 
-The `gdrive-indexer` sidecar runs [oikb][oikb] (Open WebUI's official sync companion) as a daemon and auto-syncs the host `./gdrive` tree into the OWUI `gdrive` knowledge base every `GDRIVE_INDEX_INTERVAL` (default `30s`). Files copied or updated in `gdrive/` are indexed automatically — no manual trigger.
+The `gdrive` knowledge base is indexed by **kb-gateway** (stateless, no sidecar). `make gdrive-sync` runs rclone to sync `./gdrive` from the shared drives, then POSTs `/index` to kb-gateway, which walks `./gdrive` read-only and drives OWUI's native sync/diff protocol to reconcile the tree into the KB. Indexing is **manual/on-demand only**: no daemon, no schedule, no hooks.
 
-- `make gdrive-sync` syncs `./gdrive` from all shared drives (rclone `sync --backup-dir --delete-after`; delta — files removed from Drive are deleted from `./gdrive`, and oikb drops them from the KB next cycle; deleted/overwritten files are retained in a dated `./.gdrive-backup/<UTC-ISO>/` dir outside `./gdrive` as a recovery net; `make clean` clears it). Per-drive non-downloadable files and global patterns (e.g. `*.tmp`) are read from the gitignored `./gdrive-exclude.conf` (INI format: `[<drive name>]` and `[*]` sections; format documented in the tracked `gdrive-exclude.conf.example`) and converted to `--exclude-from` per drive. It fail-fasts on any transfer error and writes a per-run report (`0600`) to `./gdrive/.sync-reports/sync-<UTC-ISO>.report` with a per-drive `remote`/`local`/`excluded`/`dups` table, a `COPY`/`UPDATE`/`DELETE` breakdown (per file; correct under `--backup-dir`), a "Files excluded" section (Drive files matching the exclude patterns), a "Duplicates ignored" section (Drive files rclone skipped because another file shares the same path — Drive permits duplicate names), and a "Files not downloaded" section (e.g. admin-protected / download-restricted Drive files, surfaced with their 403 reason). Downloadable files still transfer; exit code is non-zero if any drive had errors.
-- `make gdrive-index-bootstrap` (one-time, after `make api-keys`) creates the `gdrive` KB, grants the agent user read access (so the read-scoped agent key can search/RAG it), generates `OIKB_API_KEY`, writes `GDRIVE_KB_ID` + `OIKB_API_KEY` to `.env.local`, and starts the indexer. Idempotent.
-- `make gdrive-status` reports indexing state: indexer container, oikb source status + last sync, `indexed` (OWUI KB file count) vs `source` (allowlisted `gdrive/` file count), `pending` (files linked but not yet extracted by markitdown-ocr), and an ETA while the sync is not yet finished.
-- Indexed file types + max-size are set in [`.oikb.yaml`](.oikb.yaml) (documents only — source code is handled by open-codebase-index; `.npy`, audio/video, images, archives, `.svg`/`.drawio` are excluded). oikb does incremental SHA-256 diffing and **fails closed on an empty source** (logs "Source is empty — nothing to sync" and returns without deleting KB files), so a bad/empty mount cannot mass-delete the KB.
-- The sidecar reaches OWUI internally (`openwebui:8080` on `owui_net`) with only the admin key in its env (the rest of `.env.local` is not loaded into it). Daemon state (`history.db`) persists under `./data/oikb`. No host port is published; `gdrive-status` reads oikb's `/health` + `/history` via `docker exec`.
-- Until `make gdrive-index-bootstrap` runs, the indexer has no `kb-id` and logs sync errors harmlessly (it restarts and converges once provisioned).
+- `make gdrive-sync` syncs `./gdrive` from all shared drives (rclone `sync --backup-dir --delete-after`; delta — files removed from Drive are deleted from `./gdrive`, and the next `/index` drops them from the KB via `sync/cleanup`; deleted/overwritten files are retained in a dated `./.gdrive-backup/<UTC-ISO>/` dir outside `./gdrive` as a recovery net; `make clean` clears it). Per-drive non-downloadable files and global patterns (e.g. `*.tmp`) are read from the gitignored `./gdrive-exclude.conf` (INI format: `[<drive name>]` and `[*]` sections; format documented in the tracked `gdrive-exclude.conf.example`) and converted to `--exclude-from` per drive. It fail-fasts on any transfer error and writes a per-run report (`0600`) to `./gdrive/.sync-reports/sync-<UTC-ISO>.report` with a per-drive `remote`/`local`/`excluded`/`dups` table, a `COPY`/`UPDATE`/`DELETE` breakdown (per file; correct under `--backup-dir`), a "Files excluded" section (Drive files matching the exclude patterns), a "Duplicates ignored" section (Drive files rclone skipped because another file shares the same path — Drive permits duplicate names), and a "Files not downloaded" section (e.g. admin-protected / download-restricted Drive files, surfaced with their 403 reason). Downloadable files still transfer; exit code is non-zero if any drive had errors. After rclone, it POSTs `/index` and fail-fasts on a non-2xx response or `ok=false` (per-file errors logged to stderr). `--index-all` forces a full re-index instead of incremental.
+- `make gdrive-index` runs POST `/index` alone (no rclone). Default incremental; set `INDEX_ALL=1` for a full re-index (drain + re-upload every file).
+- `make gdrive-index-bootstrap` (one-time, after `make api-keys`) creates the `gdrive` KB, grants the agent user read access (so the read-scoped agent key can search/RAG it), and writes `GDRIVE_KB_ID` to `.env.local`. Idempotent. Does NOT start a sidecar (there is none).
+- `make gdrive-status` reads GET `/status`: `source` (allowlisted `gdrive/` file count) vs `indexed` (OWUI KB file count), `pending` (files linked but not yet extracted by markitdown-ocr), and a `✓ COMPLETE` / `○ remaining=N` status line. No ETA (no daemon).
+- Indexed file types are the documents-only allowlist hardcoded in `gateway/app.py` `DEFAULT_ALLOW` (source code is handled by open-codebase-index; `.npy`, audio/video, images, archives, `.svg`/`.drawio` are excluded). Max size is `KB_MAX_SIZE` (default `100mb`, `.env`). `/index` does incremental SHA-256 diffing against the live KB and **fails closed on an empty source** (0 files + not `?force=1` → 422, no `cleanup`), so a bad/empty mount cannot mass-delete the KB.
+- kb-gateway reaches OWUI internally (`openwebui:8080` on `owui_net`) with the admin key in its env (`OPENWEBUI_ADMIN_API_KEY`, injected from `.env.local`). The caller's `KB_API_KEY` is authorization only (identity via OWUI, role checked for `/index` admin). The gateway is stateless: no `history.db`, no `./data/oikb`. File bytes flow gateway → OWUI internally (not through Caddy); Caddy carries only the trigger + the results JSON.
+- Per-file transparency: `/index` returns `{added, modified, deleted, unmodified, errors, ok}` where `errors` carries `{filename, status, error}` per failed file — the diagnosis surface (no opaque daemon aggregate). `ok=false` means a real upload/extract error (the upload-idempotency + path-aware-dedup patches make duplicate-content 400s not occur).
 
 ### OCR extraction (image-bearing documents)
 
@@ -189,15 +190,15 @@ A generated JWT signing key (`make bootstrap`), the API keys (`make api-keys`), 
    ```
    Re-run after a DB reset/rebuild or an `OLLAMA_HOST` change.
 
-7. **(Optional) Auto-index `gdrive/` into RAG** — populate the dir, then provision the KB:
+7. **(Optional) Index `gdrive/` into RAG** — populate the dir, then provision the KB:
    ```
-   make gdrive-sync            # rclone pull into ./gdrive (writes a sync report)
-   make gdrive-index-bootstrap # create the gdrive KB + grant agent read + start the indexer
-   make gdrive-status          # indexed vs source, ETA while syncing
+   make gdrive-index-bootstrap # create the gdrive KB + grant agent read + write GDRIVE_KB_ID
+   make gdrive-sync            # rclone pull into ./gdrive + POST /index (reconcile into the KB)
+   make gdrive-status          # indexed vs source, pending drain (no ETA — no daemon)
    ```
-   See [gdrive auto-indexing](#gdrive-auto-indexing). The `gdrive-indexer` sidecar then keeps the `gdrive` KB in sync automatically.
+   See [gdrive indexing (manual, via kb-gateway)](#gdrive-indexing-manual-via-kb-gateway). `make gdrive-sync` chains rclone → POST `/index`; indexing is manual/on-demand (no sidecar).
 
-Provisioning sequence: `make start` → (admin signs up in UI) → `make api-keys` → `make rag-config` → (`make gdrive-sync` + `make gdrive-index-bootstrap`).
+Provisioning sequence: `make start` → (admin signs up in UI) → `make api-keys` → `make rag-config` → (`make gdrive-index-bootstrap` + `make gdrive-sync`).
 
 8. (Optional) Close signup: set `ENABLE_SIGNUP=false` in `.env` and `make restart`.
 
@@ -256,7 +257,7 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 | `graphiti/bootstrap.py` | mounted into the `graphiti` container and run as the command; injects `OpenAIGenericClient` + `nomic` embedder (768) so Ollama extraction works, runs a robust `/messages` worker, owns the app lifespan |
 | `graphiti/config.yaml` | UNUSED — config for the retired MCP image; kept for reference (not mounted) |
 | `Modelfile_qwen2_5` | reference Modelfile for the custom ctx-baked `MODEL_NAME` (`FROM qwen2.5:14b` + `PARAMETER num_ctx 8192`); see [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant) |
-| `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `rag-config.sh`, `gdrive-sync`, `gdrive-index-bootstrap.sh`, `gdrive-status.sh` |
+| `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `rag-config.sh`, `gdrive-sync`, `gdrive-index-bootstrap.sh` |
 | `skills/` | per-tool `kb` agent skill (`claude/` primary; `codex/`, `opencode/`, `pi/` symlink `scripts/` to it) — see [docs/agents.md](docs/agents.md) |
 | `tests/` | `test_01`..`test_08` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
 | `docs/` | `operations.md`, `testing.md`, `agents.md`, favicon assets |
@@ -278,7 +279,6 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 
 [graphiti]: https://github.com/getzep/graphiti
 [open-webui]: https://github.com/open-webui/open-webui
-[oikb]: https://github.com/open-webui/oikb
 [neo4j]: https://neo4j.com/
 [caddy]: https://caddyserver.com/
 [ollama]: https://ollama.com/

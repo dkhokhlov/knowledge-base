@@ -10,7 +10,7 @@ DATA_DIR := ./data
 .PHONY: help bootstrap preflight pull pull-models start stop restart logs ps config \
         health test test-e2e api-keys admin-signup rag-config \
         ocr-bootstrap ocr-config ocr-disable \
-        gdrive-sync gdrive-index-bootstrap gdrive-status \
+        gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
         shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all clean
 
 help: ## Show this help
@@ -44,7 +44,7 @@ ps: ## Show container status (with health)
 
 config: ## Render effective compose config (secrets redacted)
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
-	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OIKB_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_TEST_PASSWORD): .*/\1: <redacted>/'
+	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_TEST_PASSWORD): .*/\1: <redacted>/'
 
 health: ## Probe the stack /health (Caddy -> kb-gateway aggregated, reflects OWUI)
 	@set -a; . ./.env; set +a; \
@@ -57,7 +57,7 @@ test: ## Run system integration tests against the running stack (run: make start
 	  echo; echo "=== $$t ==="; bash "$$t" || status=1; \
 	done; exit $$status
 
-test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch (incl. OCR engine + gdrive indexer) + full test suite + e2e
+test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch (incl. OCR engine + gdrive index) + full test suite + e2e
 	@./scripts/test-e2e.sh
 
 api-keys: ## Provision admin + agent-user API keys into .env.local (run after `make start` + admin signup)
@@ -94,10 +94,21 @@ ocr-config: ## Set OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-ocr (ru
 ocr-disable: ## Clear the external extraction engine + remove the marker + recreate openwebui (no KB reset)
 	@./scripts/ocr-disable.sh
 
-gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup)
+gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup), then POST /index to reconcile into the OWUI gdrive KB. Use --index-all for a full re-index.
 	@./scripts/gdrive-sync
 
-gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant agent read + start the indexer (run after `make api-keys`)
+gdrive-index: ## Reconcile ./gdrive into the OWUI gdrive KB via kb-gateway POST /index (admin; incremental). Set INDEX_ALL=1 for a full re-index.
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
+	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
+	  [ -n "$${GDRIVE_KB_ID:-}" ] || { echo "MISSING GDRIVE_KB_ID in .env.local (run: make gdrive-index-bootstrap)"; exit 1; }; \
+	  [ -n "$${OPENWEBUI_ADMIN_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
+	  q="source=gdrive&kb_id=$$GDRIVE_KB_ID"; [ "$${INDEX_ALL:-0}" = "1" ] && q="$$q&reindex_all=1"; \
+	  curl -sS --max-time 1200 -X POST "$$H/index?$$q" \
+	    -H "Authorization: Bearer $$OPENWEBUI_ADMIN_API_KEY" \
+	    -H "Content-Type: application/json" -d '{}'; echo
+
+gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant agent read + write GDRIVE_KB_ID to .env.local (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
@@ -105,8 +116,14 @@ gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant agent read + star
 	  || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (the read-scoped agent key; run: make api-keys)"; exit 1; }
 	@./scripts/gdrive-index-bootstrap.sh
 
-gdrive-status: ## Show gdrive RAG indexing status (indexed vs source, ETA if syncing)
-	@./scripts/gdrive-status.sh
+gdrive-status: ## Show gdrive index status via kb-gateway GET /status (source vs indexed, pending)
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
+	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
+	  [ -n "$${GDRIVE_KB_ID:-}" ] || { echo "MISSING GDRIVE_KB_ID in .env.local (run: make gdrive-index-bootstrap)"; exit 1; }; \
+	  [ -n "$${OPENWEBUI_USER_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
+	  curl -sS "$$H/status?source=gdrive&kb_id=$$GDRIVE_KB_ID" \
+	    -H "Authorization: Bearer $$OPENWEBUI_USER_API_KEY"; echo
 
 shell-owui: ## Shell into the Open WebUI container
 	@docker exec -it kb-openwebui sh

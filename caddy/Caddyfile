@@ -3,10 +3,16 @@
 # Routing:
 #   /memory/*          -> kb-gateway:8010  (memory/facts; gateway serves /memory/*)
 #   POST /admin/users  -> kb-gateway:8010  (admin user provisioning; POST only)
+#   POST /index        -> kb-gateway:8010  (gdrive index sync drive; admin only)
+#   GET  /status       -> kb-gateway:8010  (gdrive index status; read)
+#   GET  /openapi.json -> kb-gateway:8010  (gateway surface; ungated)
 #   /health            -> kb-gateway:8010  (aggregated; probes OWUI; ungated)
 #   /* (catch-all)     -> openwebui:8080   (OWUI landing + /api/* + SPA)
 # GET /admin/users falls through to OWUI (SPA admin view) — only POST is the
 # gateway's provisioning endpoint, so browser deep-links keep working.
+# /index + /status are method-scoped so a browser GET /index falls through to
+# OWUI (no SPA route claims it). The /index request body is a tiny trigger;
+# file bytes flow gateway -> OWUI internally (not through Caddy).
 # graphiti + neo4j are not reachable from here (graph_internal, bridged only
 # by kb-gateway). OWUI is reached over owui_net (Caddy joins owui_net + edge).
 :3000 {
@@ -14,10 +20,31 @@
 		method POST
 		path /admin/users
 	}
+	@index {
+		method POST
+		path /index
+	}
+	@status {
+		method GET
+		path /status
+	}
+	@openapi {
+		method GET
+		path /openapi.json
+	}
 	handle /memory/* {
 		reverse_proxy kb-gateway:8010
 	}
 	handle @provision {
+		reverse_proxy kb-gateway:8010
+	}
+	handle @index {
+		reverse_proxy kb-gateway:8010
+	}
+	handle @status {
+		reverse_proxy kb-gateway:8010
+	}
+	handle @openapi {
 		reverse_proxy kb-gateway:8010
 	}
 	handle /health {

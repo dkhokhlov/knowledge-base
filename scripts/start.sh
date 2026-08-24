@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Start the stack detached, adding --profile gdrive / --profile ocr only when
-# the corresponding sidecars are provisioned:
-#   - --profile gdrive  when GDRIVE_KB_ID is set (run: make gdrive-index-bootstrap);
+# Start the stack detached, adding --profile ocr only when the markitdown-ocr
+# sidecar is provisioned:
 #   - --profile ocr     when MARKITDOWN_OCR_PROVISIONED=1 (run: make ocr-bootstrap).
+#
+# gdrive indexing is no longer a sidecar: kb-gateway serves POST /index (manual,
+# driven by `make gdrive-sync`). No gdrive profile.
 #
 # Refuses to start without .env.local + a WEBUI_SECRET_KEY, and fails fast if
 # OLLAMA_HOST is unset (compose `${OLLAMA_HOST:?...}` + `./scripts/preflight.sh`).
@@ -25,12 +27,6 @@ set -a; . ./.env; . ./.env.local; set +a
 ./scripts/preflight.sh
 
 PROFILES=""
-if [ -n "${GDRIVE_KB_ID:-}" ]; then
-  echo "gdrive indexer provisioned (GDRIVE_KB_ID set) — adding --profile gdrive"
-  PROFILES="$PROFILES --profile gdrive"
-else
-  echo "gdrive indexer not provisioned (GDRIVE_KB_ID unset) — not starting it (run: make gdrive-index-bootstrap to add it)"
-fi
 if [ "${MARKITDOWN_OCR_PROVISIONED:-0}" = "1" ]; then
   echo "markitdown-ocr provisioned (MARKITDOWN_OCR_PROVISIONED=1) — adding --profile ocr"
   PROFILES="$PROFILES --profile ocr"

@@ -1,10 +1,19 @@
-"""Open WebUI HTTP client (stdlib urllib) for identity + user provisioning.
+"""Open WebUI HTTP client (stdlib urllib) for identity + user provisioning
++ the gdrive index sync protocol.
 
-All calls go to OWUI over the container-internal `owui_net` network. The
-gateway never holds a static admin key of its own — it forwards the caller's
-KB_API_KEY (an OWUI key) to authorize admin operations, and signs in as a
-newly created user with that user's temp password to obtain that user's own
-JWT (never the admin's) for per-user API-key generation (codex #3).
+All calls go to OWUI over the container-internal `owui_net` network. For user
+provisioning the gateway forwards the caller's KB_API_KEY (an OWUI key) to
+authorize admin operations, and signs in as a newly created user with that
+user's temp password to obtain that user's own JWT (never the admin's) for
+per-user API-key generation (codex #3).
+
+For the gdrive index path (/index, /status) the posture differs: the gateway
+holds OPENWEBUI_ADMIN_API_KEY (compose env) and uses it for the OWUI sync
+writes (sync/diff, upload, batch/add, batch/process, sync/cleanup). The
+caller's KB_API_KEY is authorization only (identity via whoami, role via
+authorize.is_admin) — it is NOT forwarded for the write. This keeps the admin
+key off the host for skill/agent callers; only the operator-run gdrive-sync
+passes the admin KB_API_KEY. See _admin_key().
 
 Raises OwuiError (mapped by app.py to 503 on transport failure, left as the
 caller's concern for 4xx). Duplicate-email on add_user is surfaced as a
@@ -152,3 +161,145 @@ def provisioning_capabilities():
         if not isinstance(spec, dict) or method.lower() not in spec:
             missing.append(label)
     return (len(missing) == 0), missing, None
+
+
+# --- gdrive index sync protocol (admin key) ----------------------------------
+# Stateless reconciliation against the live KB: the client sends a source
+# manifest, OWUI computes the diff against the KB's current files, the gateway
+# acts on added/modified/deleted. The KB itself is the state (no client
+# manifest). See gateway/app.py /index for the orchestration.
+
+def _admin_key():
+    """The gateway's held admin key for the /index sync writes (compose env).
+    Posture change: the gateway holds OPENWEBUI_ADMIN_API_KEY for the index
+    path; the caller's KB_API_KEY is authorization only. Raises OwuiError if
+    unset (the gateway returns 500)."""
+    k = os.environ.get("OPENWEBUI_ADMIN_API_KEY", "").strip()
+    if not k:
+        raise OwuiError("OPENWEBUI_ADMIN_API_KEY not set in gateway env")
+    return k
+
+
+def _upload_timeout():
+    return float(os.environ.get("OWUI_UPLOAD_TIMEOUT", "180"))
+
+
+def sync_diff(admin_key, kb_id, manifest):
+    """POST /api/v1/knowledge/{id}/sync/diff. `manifest` is a list of
+    {filename, path, checksum, size} (filename=basename, path=directory relpath
+    only, checksum=raw-file sha256). Returns the diff dict
+    {added, modified, deleted, mkdir, rmdir, unmodified_count, directory_map}.
+    Raises OwuiError on transport failure or non-200."""
+    code, data, txt = _j("POST", "/api/v1/knowledge/%s/sync/diff" % kb_id,
+                         admin_key, {"manifest": manifest})
+    if code != 200 or not isinstance(data, dict):
+        raise OwuiError("sync_diff -> HTTP %s: %s" % (code, (txt or "")[:200]))
+    return data
+
+
+def sync_cleanup(admin_key, kb_id, file_ids, dir_ids):
+    """POST /api/v1/knowledge/{id}/sync/cleanup. Removes orphan files + empty
+    dirs. Returns True on success, raises OwuiError on non-200."""
+    code, _, txt = _j("POST", "/api/v1/knowledge/%s/sync/cleanup" % kb_id,
+                      admin_key, {"file_ids": file_ids or [], "dir_ids": dir_ids or []})
+    if code != 200:
+        raise OwuiError("sync_cleanup -> HTTP %s: %s" % (code, (txt or "")[:200]))
+    return True
+
+
+def upload_file(admin_key, kb_id, file_hash, directory_id, filename, data_bytes):
+    """POST /api/v1/files/ multipart: field 'file' (filename, raw bytes) + field
+    'metadata' (JSON {knowledge_id, file_hash, directory_id}). The idempotency
+    patch matches on (knowledge_id, directory_id, filename, file_hash) and
+    returns the existing file_id without re-extracting when unchanged. Returns
+    the FileModel dict {id, hash, filename, meta, ...}. Raises OwuiError on
+    transport failure or non-200."""
+    import uuid
+    metadata = {"knowledge_id": kb_id, "file_hash": file_hash, "directory_id": directory_id}
+    boundary = uuid.uuid4().hex
+    body = bytearray()
+    body += ("--%s\r\n" % boundary).encode()
+    body += ('Content-Disposition: form-data; name="file"; filename="%s"\r\n' % filename).encode()
+    body += b"Content-Type: application/octet-stream\r\n\r\n"
+    body += data_bytes
+    body += b"\r\n"
+    body += ("--%s\r\n" % boundary).encode()
+    body += b'Content-Disposition: form-data; name="metadata"\r\n'
+    body += b"Content-Type: application/json\r\n\r\n"
+    body += json.dumps(metadata).encode()
+    body += b"\r\n"
+    body += ("--%s--\r\n" % boundary).encode()
+    url = _base() + "/api/v1/files/"
+    req = urllib.request.Request(
+        url, data=bytes(body),
+        headers={"Authorization": "Bearer " + admin_key,
+                 "Content-Type": "multipart/form-data; boundary=%s" % boundary},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=_upload_timeout()) as r:
+            txt = r.read().decode()
+    except urllib.error.HTTPError as e:
+        raise OwuiError("upload_file -> HTTP %s: %s" % (e.code, (e.read().decode() or "")[:200]))
+    except urllib.error.URLError as e:
+        raise OwuiError("OWUI unreachable: %s" % e)
+    try:
+        data = json.loads(txt)
+    except Exception:
+        raise OwuiError("upload_file -> non-JSON response: %s" % (txt or "")[:200])
+    if not isinstance(data, dict) or not data.get("id"):
+        raise OwuiError("upload_file -> no file_id: %s" % (txt or "")[:200])
+    return data
+
+
+def batch_add(admin_key, kb_id, items):
+    """POST /api/v1/knowledge/{id}/files/batch/add. `items` is a list of
+    {file_id, directory_id}. Links the files to the KB. Returns the response
+    dict. Raises OwuiError on non-200."""
+    code, data, txt = _j("POST", "/api/v1/knowledge/%s/files/batch/add" % kb_id,
+                         admin_key, items)
+    if code != 200:
+        raise OwuiError("batch_add -> HTTP %s: %s" % (code, (txt or "")[:200]))
+    return data
+
+
+def batch_process(admin_key, files, collection_name):
+    """POST /api/v1/retrieval/process/files/batch. `files` is a list of
+    FileModel dicts (the upload_file responses). Triggers extraction + indexing
+    per file. Returns {results:[{file_id,status,error}], errors:[...]} — the
+    per-file transparency surface. Raises OwuiError on non-200."""
+    code, data, txt = _j("POST", "/api/v1/retrieval/process/files/batch",
+                         admin_key, {"files": files, "collection_name": collection_name})
+    if code != 200 or not isinstance(data, dict):
+        raise OwuiError("batch_process -> HTTP %s: %s" % (code, (txt or "")[:200]))
+    return data
+
+
+def list_kb_files(admin_key, kb_id):
+    """GET /api/v1/knowledge/{id}/files. Returns {items:[{id,hash,filename,
+    data,meta,...}], directories:[...], breadcrumbs, total}. Raises OwuiError
+    on non-200."""
+    code, data, txt = _j("GET", "/api/v1/knowledge/%s/files" % kb_id, admin_key)
+    if code != 200 or not isinstance(data, dict):
+        raise OwuiError("list_kb_files -> HTTP %s: %s" % (code, (txt or "")[:200]))
+    return data
+
+
+def kb_file_count(read_key, kb_id):
+    """GET /api/v1/knowledge/ (list) -> file_count for kb_id, or None if the KB
+    is not visible to the key. Read-scoped key works (read grant)."""
+    code, data, _ = _j("GET", "/api/v1/knowledge/", read_key)
+    if code != 200 or not isinstance(data, dict):
+        return None
+    for k in (data.get("items") or data.get("data") or []):
+        if k.get("id") == kb_id:
+            return k.get("file_count")
+    return None
+
+
+def pending_files(read_key, kb_id):
+    """GET /api/v1/knowledge/{id}/files/pending -> list of linked-not-extracted
+    files, or None on failure. Read-scoped key works."""
+    code, data, _ = _j("GET", "/api/v1/knowledge/%s/files/pending" % kb_id, read_key)
+    if code != 200 or not isinstance(data, list):
+        return None
+    return data

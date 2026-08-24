@@ -2,13 +2,15 @@
 # DESTRUCTIVE clean-state deploy + full integration test suite:
 #   wipe -> bootstrap -> restore admin creds -> preflight -> start -> wait
 #   healthy -> admin-signup -> api-keys -> rag-config -> ocr-bootstrap
-#   (engine ON before ingest) -> gdrive-index-bootstrap -> wait indexer ->
-#   test.
+#   (engine ON before ingest) -> gdrive-index-bootstrap -> gdrive-sync
+#   (rclone + POST /index) -> test.
 #
 # OCR is provisioned BEFORE the gdrive set ingests so image-bearing documents
-# are OCR'd (non-empty), not orphaned. The indexer wait is given a longer
-# budget (E2E_INDEXER_WAIT, default 2400s) because the cold first sync now
-# runs per-figure OCR through deepseek-ocr.
+# are OCR'd (non-empty), not orphaned. gdrive-sync runs rclone then POSTs
+# /index (synchronous: sync/diff + upload + link + batch_process trigger); OCR
+# extraction drains async, so test_09 polls GET /status pending. The cold first
+# extraction runs per-figure OCR through deepseek-ocr, so the pending-drain
+# budget is raised (E2E_INDEXER_WAIT, default 2400s -> GDRIVE_TEST_WAIT).
 #
 # Stashes OPENWEBUI_TEST_USER/PASSWORD (+OPENWEBUI_USER) before the wipe and
 # restores them after bootstrap (clear-all deletes .env.local).
@@ -33,7 +35,7 @@ stash=$(mktemp); chmod 600 "$stash"
 trap 'rm -f "$stash"' EXIT
 
 make clear-all
-unset GDRIVE_KB_ID OIKB_API_KEY
+unset GDRIVE_KB_ID
 make bootstrap
 ./scripts/e2e-restore-creds.sh "$stash"
 make preflight
@@ -53,6 +55,6 @@ make api-keys
 make rag-config
 make ocr-bootstrap
 make gdrive-index-bootstrap
-E2E_INDEXER_WAIT="${E2E_INDEXER_WAIT:-2400}" ./scripts/e2e-wait-indexer.sh
-make test
+make gdrive-sync
+GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" make test
 echo "==> test-e2e PASS"

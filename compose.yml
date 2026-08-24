@@ -150,6 +150,11 @@ services:
       dockerfile: Dockerfile
     container_name: kb-api-gateway
     restart: unless-stopped
+    # Run as the host gdrive owner uid so the read-only ./gdrive bind mount
+    # (0700/0600, owner-only from rclone) is readable. Non-root (just the host
+    # owner uid, not root); the gateway writes nothing (stateless). Override
+    # HOST_UID/HOST_GID in .env if the gdrive owner is not uid 1000.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     networks: [graph_internal, edge, owui_net]
     security_opt:
       - no-new-privileges:true
@@ -172,7 +177,17 @@ services:
       - KB_GATEWAY_PORT=8010
       - KB_MAX_CONCURRENCY=${KB_MAX_CONCURRENCY:-16}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    # No data mounts: the gateway is stateless (config via env only).
+      # gdrive index path: the gateway holds the admin key (in docker) and
+      # drives OWUI's sync protocol for /index. Caller's KB_API_KEY is
+      # authorization only. GDRIVE_KB_ID + KB_MAX_SIZE default the /index call.
+      - OPENWEBUI_ADMIN_API_KEY=${OPENWEBUI_ADMIN_API_KEY:-}
+      - GDRIVE_KB_ID=${GDRIVE_KB_ID:-}
+      - GDRIVE_ROOT=/gdrive
+      - KB_MAX_SIZE=${KB_MAX_SIZE:-100mb}
+    # Stateless: no persisted data. The read-only gdrive mount is an INPUT
+    # (source files to index), not state. The gateway never writes to it.
+    volumes:
+      - ./gdrive:/gdrive:ro
     healthcheck:
       # python:3-slim has no curl/wget — use the stdlib (codex #7). /health
       # reflects the OWUI identity dependency (codex #8).
@@ -185,7 +200,7 @@ services:
   openwebui:
     # Custom overlay image: the official Open WebUI image + two build-time
     # patches (path-aware dedup hash in retrieval.py; upload idempotency in
-    # files.py) that stop the oikb gdrive-indexer churn. Built locally from
+    # files.py) that stop KB-sync re-upload churn. Built locally from
     # open-webui/; see open-webui/PATCH.md. The GHCR ref is a local tag (not
     # pushed), so pull_policy: never — `make pull` skips this service;
     # `docker compose build openwebui` (or `make start` on first run) builds it.
@@ -196,7 +211,7 @@ services:
     container_name: kb-openwebui
     restart: unless-stopped
     # Chroma 1.5.x (rust backend) opens a SQLite db per RAG collection. Bulk
-    # ingest (oikb syncing the gdrive tree) creates 100s of collections and
+    # ingest (kb-gateway /index syncing the gdrive tree) creates 100s of collections and
     # exhausts the default 1024 fd soft limit -> SQLITE_CANTOPEN "unable to open
     # database file" on every insert (KB file_count stays 0, uploads time out,
     # OWUI goes unhealthy). Raise nofile so collection creation under load does
@@ -267,85 +282,6 @@ services:
       retries: 10
       start_period: 40s
 
-  gdrive-indexer:
-    # Open WebUI's official sync companion (oikb) running as a daemon. Auto-syncs
-    # the host's ./gdrive tree into the OWUI "gdrive" knowledge base every
-    # GDRIVE_INDEX_INTERVAL. oikb does incremental SHA-256 diffing over OWUI's
-    # sync/diff endpoints, retries, bounded concurrency, include/exclude glob
-    # filters, max-size, and FAILS CLOSED on an empty source (logs "Source is
-    # empty — nothing to sync" and returns without deleting KB files — so a bad
-    # mount cannot mass-delete the KB). See .oikb.yaml and scripts/gdrive-index-
-    # bootstrap.sh. The KB itself is created + RBAC-granted by `make
-    # gdrive-index-bootstrap` (oikb references a pre-existing KB by id; it does
-    # not create KBs). Additive service: no existing service is changed.
-    image: ghcr.io/open-webui/oikb:${OIKB_IMAGE_TAG:-0.4.0}
-    container_name: kb-gdrive-indexer
-    # Profile-gated (no-fallback): this sidecar CANNOT start unprovisioned. With
-    # GDRIVE_KB_ID unset, .oikb.yaml interpolates kb-id to '' and oikb exits 1
-    # ("Invalid entry (needs source + kb-id)") -> restart loop (the "no key" bad
-    # state). Gating it behind the `gdrive` profile means `make start` (no
-    # profile) never creates it; it is started ONLY by `make gdrive-index-bootstrap`
-    # (--profile gdrive), which first writes GDRIVE_KB_ID. `make start` adds
-    # --profile gdrive itself when GDRIVE_KB_ID is already in .env.local, so a
-    # provisioned stack's `make restart` brings it back. On this compose build,
-    # stop/down/ps/logs still manage a running profiled service without the flag.
-    profiles: [gdrive]
-    restart: unless-stopped
-    networks: [owui_net]
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    # Needs OWUI up (it syncs against openwebui:8080). Does NOT need kb-gateway
-    # or graphiti. Internal to owui_net only; NO `ports:` — gdrive-status reaches
-    # oikb's /health via `docker exec`, not a published port.
-    depends_on:
-      openwebui:
-        condition: service_healthy
-    # No env_file: only the interpolated vars below enter the container env, so
-    # the rest of .env.local's secrets are NOT loaded into this sidecar (codex
-    # #5). Bare ${VAR} (NOT ${VAR:?}): compose interpolates ALL services at
-    # parse time, even non-active profiles, and `make start` runs BEFORE
-    # `make gdrive-index-bootstrap` writes these — :? would block the clean
-    # start. The sidecar starts only with --profile gdrive, which start.sh
-    # adds only when GDRIVE_KB_ID is set, and gdrive-index-bootstrap writes all
-    # three together, so a provisioned start always has the real values.
-    environment:
-      - OPEN_WEBUI_URL=http://openwebui:8080
-      - OPEN_WEBUI_API_KEY=${OPENWEBUI_ADMIN_API_KEY}
-      - OIKB_API_KEY=${OIKB_API_KEY}
-      - GDRIVE_KB_ID=${GDRIVE_KB_ID}
-      - GDRIVE_INDEX_INTERVAL=${GDRIVE_INDEX_INTERVAL:-30s}
-      - OIKB_MAX_SIZE=${OIKB_MAX_SIZE:-100mb}
-      # Persist oikb state (history.db + config.yaml) on the bind-mounted /data
-      # (data/oikb on the host) so it survives container recreation. oikb's
-      # CONFIG_DIR defaults to ~/.config/oikb (ephemeral in-container, lost every
-      # recreate). Pointing it at /data makes history.db land on the bind mount;
-      # `make gdrive-index-bootstrap` chowns data/oikb to the oikb uid so appuser
-      # can write it. See oikb config.py (OIKB_CONFIG_DIR) + history.py (_DEFAULT_DB).
-      - OIKB_CONFIG_DIR=/data
-      - LOG_FORMAT=json
-    volumes:
-      # Source tree, read-only. rclone (gdrive-sync) writes here on the host;
-      # oikb only reads + hashes + uploads to OWUI via API.
-      - ./gdrive:/gdrive:ro
-      # oikb reads its config from its working dir (/app); bind-mount the tracked
-      # .oikb.yaml there. ${VAR} interpolation happens inside oikb at load time.
-      - ./.oikb.yaml:/app/.oikb.yaml:ro
-      # oikb daemon state (history.db) on the bind-mount tree so it survives
-      # restarts and moves with ./data to RAID. Created by `make bootstrap`.
-      - ${DATA_ROOT:-./data}/oikb:/data
-    command: ["daemon"]
-    healthcheck:
-      # oikb ships python in its venv (on PATH). /health/ready reflects daemon
-      # liveness (not source sync success — that is reported by /health, which
-      # `make gdrive-status` reads via docker exec).
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/ready',timeout=5).status==200 else 1)\""]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-
   markitdown-ocr:
     # External extraction engine for Open WebUI: runs microsoft/markitdown-ocr
     # with the OCR service replaced by OllamaNativeOCRService (Ollama native
@@ -360,7 +296,7 @@ services:
       context: ./markitdown
     pull_policy: never
     container_name: kb-markitdown-ocr
-    # Profile-gated (no-fallback), like gdrive-indexer. With the `ocr` profile
+    # Profile-gated (no-fallback). With the `ocr` profile
     # off, `make start` never creates this service; it is started ONLY by `make
     # ocr-bootstrap` (--profile ocr), which first builds, waits /health, runs
     # `make ocr-config`, then writes MARKITDOWN_OCR_PROVISIONED=1. `make start`

@@ -13,15 +13,16 @@ natively (no libreoffice), which also solves the PPTX orphan.
 
 ## Data flow
 
-`gdrive → oikb → Open WebUI → markitdown-ocr → deepseek-ocr (Ollama) →
-per-page / per-slide / per-sheet chunks`
+`gdrive → kb-gateway (POST /index) → Open WebUI → markitdown-ocr →
+deepseek-ocr (Ollama) → per-page / per-slide / per-sheet chunks`
 
-oikb uploads a file to Open WebUI; Open WebUI calls the external engine (`PUT
-/process`); markitdown-ocr runs the OCR converters with
-`OllamaNativeOCRService`, splits the result into per-unit documents, and returns
-a JSON list. OWUI turns each into a Document, adds `file_id` / `source`, and
-chunks it. The existing `pathdedup` + idem dedup still run (the engine replaces
-only the loader, not the rest of `process_file`).
+kb-gateway uploads a file to Open WebUI (driving OWUI's sync protocol); Open
+WebUI calls the external engine (`PUT /process`); markitdown-ocr runs the OCR
+converters with `OllamaNativeOCRService`, splits the result into per-unit
+documents, and returns a JSON list. OWUI turns each into a Document, adds
+`file_id` / `source`, and chunks it. The existing `pathdedup` + idem dedup
+still run (the engine replaces only the loader, not the rest of
+`process_file`).
 
 ## Why native `/api/chat` (not the `/v1` shim)
 
@@ -65,8 +66,8 @@ standalone-image converter. A standalone `.png`/`.jpg` routed to the engine
 would hit markitdown's plain `ImageConverter` (exif + optional LLM caption) and
 return near-empty content → orphan. The service instead feeds standalone image
 bytes straight to `OllamaNativeOCRService` and returns one document. (The gdrive
-set excludes standalone images via `.oikb.yaml`, so this branch matters for
-direct uploads, not the synced set.)
+set excludes standalone images via the gateway `DEFAULT_ALLOW` allowlist, so
+this branch matters for direct uploads, not the synced set.)
 
 ## Provisioning (one-time, after `make api-keys`)
 
@@ -103,8 +104,8 @@ would orphan every ingest).
   raises `UnicodeDecodeError` on UTF-8 text (orphaning ~12 UTF-8 docs in the
   first sync). `.csv`/`.html`/`.json` keep their dedicated converters (they
   handle UTF-8 and structure the output). **Not covered:** audio/video (no
-  ffmpeg in v1) → would orphan. Keep those out of the synced set (`.oikb.yaml`
-  already excludes audio/video).
+  ffmpeg in v1) → would orphan. Keep those out of the synced set (the gateway
+  `DEFAULT_ALLOW` allowlist already excludes audio/video).
 - **API key required.** An empty `EXTERNAL_DOCUMENT_LOADER_API_KEY` makes OWUI
   silently skip the external engine and fall back to its default loaders.
   `make ocr-bootstrap` sets a non-empty `OCR_SERVICE_TOKEN`.

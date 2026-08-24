@@ -77,7 +77,8 @@ Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on 
 | `OPENAI_BASE_URL` / `EMBEDDING_MODEL_NAME` | set on the graphiti service in `compose.yml` (from `OLLAMA_HOST` / `EMBEDDER_MODEL`); not in `.env` |
 | `ENV` / `ENABLE_SIGNUP` / `DEFAULT_USER_ROLE` / `ENABLE_API_KEYS` / `USER_PERMISSIONS_FEATURES_API_KEYS` / `RAG_EMBEDDING_MODEL` | Open Web UI behavior |
 | `USER_PERMISSIONS_*` / `ENABLE_OPENAI_API` / `ENABLE_WEB_SEARCH` / `ENABLE_COMMUNITY_SHARING` / `ENABLE_EVALUATION_ARENA_MODELS` / `ENABLE_VERSION_UPDATE_CHECK` / `ENABLE_OTEL` / `WEBUI_FAVICON_URL` | attack-surface + phone-home reduction (full set in `.env.example`) |
-| `OIKB_IMAGE_TAG` / `GDRIVE_INDEX_INTERVAL` / `OIKB_MAX_SIZE` | gdrive auto-index (oikb sidecar): pinned oikb image tag, sync interval (default 30s), max file size (default 100mb). Sync concurrency is hardcoded (4) in `.oikb.yaml`, NOT an env var — oikb interpolates `${VAR:-default}` as strings and compares `concurrency > 1` without coercing, so an env value crashes every sync |
+| `HOST_UID` / `HOST_GID` | kb-gateway runs as this uid:gid so the read-only `./gdrive` bind mount (0700/0600, owner-only from rclone) is readable. Default 1000:1000 |
+| `KB_MAX_SIZE` | gdrive index: max file size for the gateway source walk (default 100mb; strings like 100mb, 2gb). The documents-only allowlist is hardcoded in `gateway/app.py` `DEFAULT_ALLOW` |
 
 `.env.local` — gitignored (`chmod 0600`); secrets + generated keys:
 
@@ -85,10 +86,10 @@ Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on 
 |---|---|---|
 | `WEBUI_SECRET_KEY` | `make bootstrap` (random) | Open Web UI JWT signing key |
 | `OPENWEBUI_USER` / `OPENWEBUI_USER_PASSWORD` | `make api-keys` | the shared agent account (`role=user`) |
-| `OPENWEBUI_ADMIN_API_KEY` | `make api-keys` | admin key (`role=admin`) — a valid `KB_API_KEY` |
+| `OPENWEBUI_ADMIN_API_KEY` | `make api-keys` | admin key (`role=admin`) — a valid `KB_API_KEY`; also injected into kb-gateway (`compose.yml`) for the `/index` OWUI sync writes (caller's `KB_API_KEY` is authorization only) |
 | `OPENWEBUI_USER_API_KEY` | `make api-keys` | agent key (read-scoped) — a valid `KB_API_KEY` |
 | `OPENWEBUI_TEST_USER` / `OPENWEBUI_TEST_PASSWORD` | by hand | existing OWUI user for `make test` |
-| `GDRIVE_KB_ID` / `OIKB_API_KEY` | `make gdrive-index-bootstrap` | the `gdrive` KB id oikb syncs into + the bearer that secures oikb's own daemon endpoints |
+| `GDRIVE_KB_ID` | `make gdrive-index-bootstrap` | the `gdrive` KB id kb-gateway indexes into (POST /index) |
 
 Notes:
 - `KB_API_KEY` is an Open Web UI per-account API key, carried as an **env var**. It is set on the agent host (in that host's env file or shell); on the stack host it may also live in `.env.local`. Its value is one of:
@@ -139,40 +140,56 @@ Host: a CUDA GPU host with enough VRAM for the chat model weights plus the 12-sl
 
 ## KB RAG indexing (gdrive → Open WebUI)
 
-The `gdrive-indexer` sidecar runs [oikb][oikb] (Open WebUI's official sync
-companion) as a daemon, auto-syncing the host `./gdrive` tree into the OWUI
-`gdrive` knowledge base every `GDRIVE_INDEX_INTERVAL` (default 30s). Files
-copied or updated in `gdrive/` are indexed automatically — no manual trigger.
-oikb does incremental SHA-256 diffing over OWUI's `sync/diff` endpoints,
-retries, bounded concurrency, include/exclude glob filters + max-size
-(`.oikb.yaml`), and **fails closed on an empty source** (logs "Source is empty
-— nothing to sync" and returns without deleting KB files, so a bad mount cannot
-mass-delete the KB). It is an additive service; no existing service is changed.
-oikb references a pre-existing KB by id — it does not create KBs.
+The `gdrive` KB is indexed by **kb-gateway** (stateless, no sidecar). `make
+gdrive-sync` runs rclone to sync `./gdrive` from the shared drives, then POSTs
+`/index` to kb-gateway, which walks `./gdrive` read-only and drives OWUI's
+native sync/diff protocol to reconcile the tree into the KB. Indexing is
+**manual/on-demand only**: no daemon, no schedule, no hooks. `make gdrive-index`
+runs POST `/index` alone (no rclone); `make gdrive-status` reads GET `/status`.
+
+`/index` does incremental SHA-256 diffing over OWUI's `sync/diff` endpoints:
+the gateway sends a source manifest, OWUI computes the diff against the live KB
+(the KB itself is the state — no client manifest, no `history.db`), the gateway
+uploads+links+extracts the added/modified set and `sync/cleanup`s the deleted
+set. It **fails closed on an empty source** (0 files + not `?force=1` → 422, no
+`cleanup`, so a bad/empty mount cannot mass-delete the KB). Per-file
+transparency: the response carries `{added, modified, deleted, unmodified,
+errors, ok}` where `errors` lists `{filename, status, error}` per failed file —
+the diagnosis surface (no opaque daemon aggregate). `ok=false` means a real
+upload/extract error (the upload-idempotency + path-aware-dedup patches make
+duplicate-content 400s not occur). kb-gateway references a pre-existing KB by id
+— it does not create KBs.
+
+Posture change: for the `/index`+`/status` path the gateway holds
+`OPENWEBUI_ADMIN_API_KEY` (compose env, from `.env.local`) and uses it for the
+OWUI sync writes. The caller's `KB_API_KEY` is authorization only (identity via
+`owui.whoami`, role via `authorize.is_admin` for `/index`) — it is NOT forwarded
+for the write. `/index` is admin-only; `/status` is read (read-scoped key works).
 
 ### Provisioning (one-time, after `make api-keys`)
 
 `make gdrive-index-bootstrap` creates the `gdrive` KB (find-or-create), grants
 the agent user read access (merged with existing grants so admin-added group
-grants are preserved), generates `OIKB_API_KEY`, writes `GDRIVE_KB_ID` +
-`OIKB_API_KEY` to `.env.local`, and (re)creates the `gdrive-indexer` service. It
-is idempotent. The agent user id is resolved from `OPENWEBUI_USER_API_KEY` via
-`GET /api/v1/auths/` (the same identity-from-key pattern the kb-gateway uses —
-no email env var needed); the read grant lets the read-scoped agent key search /
-RAG the KB (`write_access=False`).
+grants are preserved), and writes `GDRIVE_KB_ID` to `.env.local`. It is
+idempotent. It does NOT start a sidecar (there is none). The agent user id is
+resolved from `OPENWEBUI_USER_API_KEY` via `GET /api/v1/auths/` (the same
+identity-from-key pattern the kb-gateway uses — no email env var needed); the
+read grant lets the read-scoped agent key search / RAG the KB
+(`write_access=False`).
 
 ### Populating the source
 
 `make gdrive-sync` runs `rclone sync --backup-dir --delete-after` of the shared
-drive into `./gdrive` (manual; `gdrive/` is gitignored except a `.gitkeep`
-marker). `sync` is delta: files removed from Drive are deleted from `./gdrive`
-(and oikb drops them from the KB on its next cycle). Deleted/overwritten files
-are NOT lost — rclone moves them (in their original hierarchy) into a dated
-`./.gdrive-backup/<UTC-ISO>/` dir, which sits OUTSIDE `./gdrive` so oikb does not
-re-index them. That backup dir is the recovery net for a bad/empty mount: `sync`
-deletes to match the source, so an empty Drive mount empties `./gdrive` — but
-the removed files are in `./.gdrive-backup/`, not gone. `make clean` clears the
-backup tree (so does `make clear-all`).
+drive into `./gdrive`, then POSTs `/index` to reconcile the tree into the KB
+(manual; `gdrive/` is gitignored except a `.gitkeep` marker). `sync` is delta:
+files removed from Drive are deleted from `./gdrive` (and the chained `/index`
+drops them from the KB via `sync/cleanup`). Deleted/overwritten files are NOT
+lost — rclone moves them (in their original hierarchy) into a dated
+`./.gdrive-backup/<UTC-ISO>/` dir, which sits OUTSIDE `./gdrive` so `/index`
+does not index them. That backup dir is the recovery net for a bad/empty mount:
+`sync` deletes to match the source, so an empty Drive mount empties `./gdrive`
+— but the removed files are in `./.gdrive-backup/`, not gone. `make clean`
+clears the backup tree (so does `make clear-all`).
 
 **Fail-fast + empty-source guard.** Any transfer error aborts the run
 immediately (the report is still written with the failing files + rclone
@@ -230,57 +247,58 @@ section (failing paths + their rclone reason). The `COPY` / `UPDATE` / `DELETE`
 classification handles `--backup-dir` verbs: an overwrite logs `Moved` (old copy
 to backup) then `Copied (new)`, classified `UPDATE`; a delete logs `Moved` then
 `Moved into backup dir`, classified `DELETE` — not the no-backup-dir `Copied
-(replaced existing)` / `Deleted` verbs. oikb picks up new/changed files on its
-next cycle (≤ `GDRIVE_INDEX_INTERVAL`).
+(replaced existing)` / `Deleted` verbs. The chained POST `/index` reconciles
+new/changed/removed files into the KB in the same run (synchronous: sync/diff +
+upload + link + batch_process trigger; OCR extraction drains async).
 
 ### Monitoring
 
-`make gdrive-status` reports the indexer container state, oikb `/health`
-(source status, last sync), `indexed` (OWUI KB file count, read with the agent
-key) vs `source` (allowlisted `gdrive/` file count), `pending` (files linked to
-the KB but not yet extracted by markitdown-ocr — `GET /api/v1/knowledge/{id}/files/pending`),
-and an ETA while the sync is in progress. `file_count` is read from the list endpoint
+`make gdrive-status` reads GET `/status` (kb-gateway, read-scoped key): `source`
+(allowlisted `gdrive/` file count), `indexed` (OWUI KB `file_count`, read with
+the agent key), `pending` (files linked to the KB but not yet extracted by
+markitdown-ocr — `GET /api/v1/knowledge/{id}/files/pending`), and a `✓ COMPLETE`
+(indexed >= source) / `○ remaining=N` status line. No ETA — there is no daemon.
+`?json=1` returns the same fields as machine JSON; `?file=<relpath>` filters the
+per-file list. `file_count` is read from the list endpoint
 (`GET /api/v1/knowledge/`); the detail endpoint has neither `file_count` nor a
 populated `files` array. `file_count` counts only files LINKED to the KB, not
 files whose text is extracted — a file can be linked and still sit at
 `data.status=pending` while extraction catches up; the `pending` line surfaces
 those (a long age alone is not a hang — extraction runs one file at a time, so
 age also grows while the pipeline is busy on other files; cross-check
-`docker logs kb-markitdown-ocr` before assuming a wedge). The oikb source line
-also surfaces per-cycle `errors`/`warnings` (e.g. a file failing to link — OWUI
-rejects it with `400`) as `errors=N (<first error>)`, so a `partial` plateau is
-diagnosable, not mute.
+`docker logs kb-markitdown-ocr` before assuming a wedge). If `indexed` stays
+below `source` with `pending=0`, the per-file `errors` from the last
+`POST /index` hold the WHY (re-run `make gdrive-index` or `make gdrive-sync` and
+read the stderr error list) — surface, do not mask.
 
 ### File types and skips
 
-`.oikb.yaml` allowlists office/text documents only — source code is handled by
-open-codebase-index (single-star bracket patterns `*.[xX][yY]...` for
-case-insensitive `fnmatch` at any depth; `**/*` would miss root-level files —
-fnmatch has no globstar). Binaries
-(`.npy`, audio/video, images, archives, `.svg`/`.drawio`) are simply not listed
-→ excluded. `OIKB_MAX_SIZE` (default 100mb) skips oversized files. OWUI dedups
-by content hash: a file whose content already exists in the KB is rejected with
-`400 Duplicate content`, so oikb reports the source `status=partial`
-**permanently** when `gdrive/` has duplicate-content files (same content,
-different paths). `partial` can also come from a file that fails to link (OWUI
-returns a non-dedup `400`); that cause shows as `errors=N (...)` on the oikb
-source line. `partial` with `file_count > 0` is a healthy steady state,
-not a failure.
+`gateway/app.py` `DEFAULT_ALLOW` allowlists office/text documents only — source
+code is handled by open-codebase-index. Binaries (`.npy`, audio/video, images,
+archives, `.svg`/`.drawio`) are simply not listed → excluded. `KB_MAX_SIZE`
+(default 100mb, `.env`) skips oversized files. The upload-idempotency patch
+keys on `(knowledge_id, directory_id, filename)` and the path-aware-dedup patch
+makes same-content-different-path files hash to different values, so OWUI does
+NOT reject same-content-different-path files as `400 Duplicate content` — they
+index as separate members. A per-file error in the `/index` response is a real
+upload/extract failure (read it), not an expected duplicate.
 
 ### Open-file limit (Chroma)
 
 OWUI's RAG vector store is [Chroma][chroma] 1.5.x (rust backend), which opens a
-SQLite db per collection. Bulk ingest (the first gdrive sync) creates 100s of
-collections and exhausts the default 1024 fd soft limit → `SQLITE_CANTOPEN
-"unable to open database file"` on every insert (KB `file_count` stays 0, oikb
+SQLite db per collection. Bulk ingest (the first gdrive `/index`) creates 100s
+of collections and exhausts the default 1024 fd soft limit → `SQLITE_CANTOPEN
+"unable to open database file"` on every insert (KB `file_count` stays 0,
 uploads time out, OWUI goes `unhealthy`). `compose.yml` sets
 `ulimits.nofile.soft=65536` (hard 524288) on the `openwebui` service to fix
 this — do not remove it.
 
-### Persistent state
+### State
 
-oikb daemon state (`history.db`) lives under `${DATA_ROOT}/oikb` (created by
-`make bootstrap`), so it survives restarts and moves with `./data` to RAID.
+kb-gateway is stateless: it holds no persistent state (no `history.db`, no
+`./data/oikb`). Each `/index` run re-derives state from OWUI via `sync/diff`.
+Only additions vs the prior design: the `./gdrive:/gdrive:ro` mount (input, not
+state) and `OPENWEBUI_ADMIN_API_KEY` in the gateway env (config, not state).
 
 ## markitdown-OCR external extraction service
 
@@ -318,9 +336,9 @@ dependency is down.
 | Need to reach Open WebUI directly (it is behind Caddy; no direct host port) | OWUI is internal-only on `owui_net` | `docker exec kb-openwebui curl -s localhost:8080/...`, or a temporary `docker compose run --rm -p 3001:8080 openwebui` (avoid `:3000` — that is Caddy) |
 | RAG chat is slow; `ollama ps` shows a CPU/GPU split | `MODEL_NAME` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; keep `MODEL_NAME` and `OPENWEBUI_MODEL` in sync |
 | `make health` says `degraded` but the UI works | OWUI `/health` returned non-2xx | inspect the `openwebui` logs; the gateway reports degraded whenever the identity dependency is not healthy |
-| gdrive KB `file_count` stays 0; oikb uploads `time out`; OWUI `unhealthy`; `docker logs kb-openwebui` shows `chromadb ... unable to open database file` | `openwebui` service `ulimits.nofile` lowered or removed → [Chroma][chroma] 1.5.x (rust backend) exhausts the fd limit creating one SQLite db per RAG collection under bulk ingest | restore `ulimits.nofile.soft=65536` (hard 524288) on `openwebui` in `compose.yml`; `docker compose up -d --no-deps --force-recreate openwebui`; oikb retries the sync on its next cycle (≤ `GDRIVE_INDEX_INTERVAL`) |
-| `make gdrive-status` shows oikb `status=partial` permanently with `file_count > 0` | `gdrive/` has duplicate-content files (same content, different paths); OWUI dedups by content hash and rejects the duplicate with `400 Duplicate content` | expected, not a failure — `partial` with files indexed is the healthy steady state; the unique-content files are indexed |
-| oikb sync crashes with `'>' not supported between instances of 'str' and 'int'` right after `sync/diff` | `.oikb.yaml` `concurrency` set via `${VAR:-default}` — oikb interpolates env values as strings and the daemon compares `concurrency > 1` without coercing | keep `concurrency` a literal YAML int in `.oikb.yaml` (hardcoded 4); `interval` and `max-size` are string-parsed and stay env-tunable |
+| gdrive KB `file_count` stays 0; uploads time out; OWUI `unhealthy`; `docker logs kb-openwebui` shows `chromadb ... unable to open database file` | `openwebui` service `ulimits.nofile` lowered or removed → [Chroma][chroma] 1.5.x (rust backend) exhausts the fd limit creating one SQLite db per RAG collection under bulk ingest | restore `ulimits.nofile.soft=65536` (hard 524288) on `openwebui` in `compose.yml`; `docker compose up -d --no-deps --force-recreate openwebui`; re-run `make gdrive-sync` (or `make gdrive-index`) |
+| `make gdrive-status` shows `indexed` below `source` with `pending=0` | a file failed to upload or extract; the per-file `errors` from `POST /index` hold the WHY | re-run `make gdrive-index` (or `make gdrive-sync`) and read the stderr per-file error list (`{filename, status, error}`); `docker logs kb-openwebui` / `docker logs kb-markitdown-ocr` for the upstream cause |
+| `POST /index` returns 422 "source walk yielded 0 files" | the `./gdrive` mount is empty/unreadable, or `GDRIVE_ROOT`/`KB_MAX_SIZE`/`DEFAULT_ALLOW` exclude everything | check `make gdrive-sync` populated `./gdrive`; check `HOST_UID` matches the gdrive owner uid; `?force=1` proceeds with an empty manifest (drives full `cleanup` — use only to drain the KB) |
 
 ## Make targets
 
@@ -343,9 +361,10 @@ dependency is down.
 | `ocr-bootstrap` | build + start `markitdown-ocr`, point OWUI at it (`CONTENT_EXTRACTION_ENGINE=external`), write `MARKITDOWN_OCR_PROVISIONED=1` to `.env.local` (run after `make api-keys`; idempotent; no fallback) |
 | `ocr-config` | set the OWUI external-extraction keys (engine + URL + API key); re-run to re-assert after a DB reset |
 | `ocr-disable` | clear the external engine + remove the marker + recreate `openwebui` (no KB reset; existing OCR'd members unchanged until re-ingested) |
-| `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./gdrive-exclude.conf` (`[<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections |
-| `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, generate `OIKB_API_KEY`, write `GDRIVE_KB_ID` + `OIKB_API_KEY` to `.env.local`, start the indexer (run after `make api-keys`; idempotent) |
-| `gdrive-status` | gdrive RAG indexing status: indexer + oikb source health, indexed vs source counts, pending (linked-not-extracted), ETA if syncing |
+| `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./gdrive-exclude.conf` (`[<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections; then POSTs `/index` to reconcile the tree into the KB (`--index-all` for a full re-index; fail-fast on `ok=false`) |
+| `gdrive-index` | POST `/index` alone (no rclone): reconcile `./gdrive` into the KB via kb-gateway (admin; incremental). `INDEX_ALL=1` for a full re-index |
+| `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, write `GDRIVE_KB_ID` to `.env.local` (run after `make api-keys`; idempotent; no sidecar) |
+| `gdrive-status` | GET `/status` (kb-gateway): `source` vs `indexed` counts, `pending` (linked-not-extracted), `✓ COMPLETE` / `○ remaining=N` (no ETA — no daemon) |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clear` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
 | `clear-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + delete `.env.local` |
@@ -472,5 +491,4 @@ Notes:
 [mcp]: https://modelcontextprotocol.io/
 [huggingface]: https://huggingface.co/
 [nomic-embed-text]: https://huggingface.co/nomic-ai/nomic-embed-text
-[oikb]: https://github.com/open-webui/oikb
 [chroma]: https://www.trychroma.com/

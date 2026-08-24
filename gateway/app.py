@@ -15,7 +15,9 @@ import os
 import secrets
 import threading
 import time
+import hashlib
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -137,9 +139,11 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method):
         path = self.path.split("?", 1)[0]
         qs = self.path.split("?", 1)[1] if "?" in self.path else ""
-        # /health is ungated and cheap; no concurrency gate.
+        # /health + /openapi.json are ungated and cheap; no concurrency gate.
         if path == "/health" and method == "GET":
             return self._health()
+        if path == "/openapi.json" and method == "GET":
+            return self._openapi()
         try:
             with _concurrency:
                 self._route(method, path, qs)
@@ -196,6 +200,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/users" and method == "POST":
             identity = self._auth()
             return self._create_user(identity, self._read_body())
+        if path == "/index" and method == "POST":
+            identity = self._auth()
+            return self._index(identity, qs)
+        if path == "/status" and method == "GET":
+            identity = self._auth()
+            return self._status(identity, qs)
         raise GatewayError(404, "not found: %s %s" % (method, path))
 
     # -- memory operations --
@@ -320,8 +330,255 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             log.error("rollback: user delete failed for user %s: %s", user_id, e)
 
+    # -- gdrive index: stateless sync drive + status --
+
+    def _index(self, identity, qs):
+        """POST /index?source=gdrive&kb_id=<id>[&force=1][&dry_run=1][&reindex_all=1].
+        Admin-only. Walks the source mount, drives OWUI's sync/diff protocol
+        with the gateway's held admin key, returns per-file results. Stateless:
+        the KB is the state (no manifest file)."""
+        if not authorize.is_admin(identity):
+            raise GatewayError(403, "admin role required for /index")
+        admin_key = owui._admin_key()  # OwuiError -> 503 if unset
+        source = _qs(qs, "source", "gdrive")
+        if source != "gdrive":
+            raise GatewayError(400, "unknown source %r (Phase 1: 'gdrive' only)" % source)
+        kb_id = _qs(qs, "kb_id", os.environ.get("GDRIVE_KB_ID", ""))
+        if not kb_id:
+            raise GatewayError(400, "kb_id required (query kb_id or GDRIVE_KB_ID env)")
+        force = _qs_bool(qs, "force", False)
+        dry_run = _qs_bool(qs, "dry_run", False)
+        reindex_all = _qs_bool(qs, "reindex_all", False)
+        root = os.environ.get("GDRIVE_ROOT", "/gdrive")
+        max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
+        allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
+
+        files = walk_source(root, allow, max_size)  # [{filename,path,checksum,size,abspath}]
+        if not files and not force:
+            raise GatewayError(422, "source walk yielded 0 files - refusing "
+                                    "(mount failure?). Use force=1 to proceed.")
+        manifest = [{"filename": f["filename"], "path": f["path"],
+                     "checksum": f["checksum"], "size": f["size"]} for f in files]
+        by_key = {(f["path"], f["filename"]): f for f in files}
+
+        # reindex_all: drain the KB first so the whole source is re-uploaded.
+        drain_file_ids, drain_dir_ids = [], []
+        if reindex_all:
+            lst = owui.list_kb_files(admin_key, kb_id)
+            drain_file_ids = [it.get("id") for it in (lst.get("items") or []) if it.get("id")]
+            drain_dir_ids = [d.get("id") for d in (lst.get("directories") or []) if d.get("id")]
+            if drain_file_ids or drain_dir_ids:
+                owui.sync_cleanup(admin_key, kb_id, drain_file_ids, drain_dir_ids)
+
+        diff = owui.sync_diff(admin_key, kb_id, manifest)
+        directory_map = diff.get("directory_map") or {}
+        added = diff.get("added") or []
+        modified = diff.get("modified") or []
+        deleted = diff.get("deleted") or []
+        rmdir = diff.get("rmdir") or []
+        unmodified = diff.get("unmodified_count") or 0
+        log.info("/index kb=%s added=%d modified=%d deleted=%d unmodified=%d",
+                 kb_id, len(added), len(modified), len(deleted), unmodified)
+
+        if dry_run:
+            return self._ok({"dry_run": True, "added": len(added),
+                             "modified": len(modified), "deleted": len(deleted),
+                             "unmodified": unmodified,
+                             "mkdir": diff.get("mkdir") or []})
+
+        errors = []
+        file_models = []
+        add_items = []
+        for entry in added + modified:
+            fn = entry.get("filename")
+            path = entry.get("path", "")
+            info = by_key.get((path, fn))
+            if not info:
+                errors.append({"filename": fn, "status": "error",
+                               "error": "not found in source walk"})
+                continue
+            dir_id = directory_map.get(path) or ""
+            try:
+                data_bytes = open(info["abspath"], "rb").read()
+            except Exception as e:
+                errors.append({"filename": fn, "status": "error",
+                               "error": "source read failed: %s" % e})
+                continue
+            try:
+                fm = owui.upload_file(admin_key, kb_id, info["checksum"],
+                                      dir_id, fn, data_bytes)
+            except owui.OwuiError as e:
+                errors.append({"filename": fn, "status": "error", "error": str(e)})
+                continue
+            file_models.append(fm)
+            add_items.append({"file_id": fm["id"], "directory_id": dir_id})
+            # modified: the old file_id (if the entry carries one) is now orphan.
+            if entry.get("file_id") and entry in modified:
+                drain_file_ids.append(entry["file_id"])
+
+        if add_items:
+            try:
+                owui.batch_add(admin_key, kb_id, add_items)
+            except owui.OwuiError as e:
+                errors.append({"filename": "<batch_add>", "status": "error", "error": str(e)})
+        if file_models:
+            try:
+                bp = owui.batch_process(admin_key, file_models, kb_id)
+                for r in (bp.get("results") or []):
+                    if r.get("status") not in ("completed", "ok"):
+                        errors.append({"file_id": r.get("file_id"), "status": r.get("status"),
+                                       "error": r.get("error")})
+                errors.extend(bp.get("errors") or [])
+            except owui.OwuiError as e:
+                errors.append({"filename": "<batch_process>", "status": "error", "error": str(e)})
+
+        cleanup_file_ids = [d.get("file_id") for d in deleted if d.get("file_id")]
+        cleanup_dir_ids = list(rmdir)
+        if cleanup_file_ids or cleanup_dir_ids:
+            try:
+                owui.sync_cleanup(admin_key, kb_id, cleanup_file_ids, cleanup_dir_ids)
+            except owui.OwuiError as e:
+                errors.append({"filename": "<sync_cleanup>", "status": "error", "error": str(e)})
+
+        self._ok({"added": len(added), "modified": len(modified),
+                  "deleted": len(deleted), "unmodified": unmodified,
+                  "errors": errors, "ok": len(errors) == 0})
+
+    def _status(self, identity, qs):
+        """GET /status?source=gdrive&kb_id=<id>[&file=<relpath>][&json=1].
+        Read-only. Returns source count, OWUI file_count, pending, and per-file
+        state (re-derived live; no stored last-run state). Caller's KB_API_KEY
+        must read the KB (read-scoped key works)."""
+        source = _qs(qs, "source", "gdrive")
+        if source != "gdrive":
+            raise GatewayError(400, "unknown source %r (Phase 1: 'gdrive' only)" % source)
+        kb_id = _qs(qs, "kb_id", os.environ.get("GDRIVE_KB_ID", ""))
+        if not kb_id:
+            raise GatewayError(400, "kb_id required (query kb_id or GDRIVE_KB_ID env)")
+        as_json = _qs_bool(qs, "json", False)
+        relpath = _qs(qs, "file", "")
+        # status reads use the caller's own key (read-scoped works).
+        read_key = self.headers.get("Authorization", "")[len("Bearer "):].strip()
+        root = os.environ.get("GDRIVE_ROOT", "/gdrive")
+        allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
+        max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
+        files = walk_source(root, allow, max_size)
+        source_count = len(files)
+        indexed = owui.kb_file_count(read_key, kb_id)
+        pending = owui.pending_files(read_key, kb_id)
+        lst = None
+        try:
+            lst = owui.list_kb_files(read_key, kb_id)
+        except owui.OwuiError:
+            lst = None
+        items = (lst or {}).get("items") or []
+        per_file = [{"filename": it.get("filename"), "hash": it.get("hash"),
+                     "directory_id": ((it.get("meta") or {}).get("data") or {}).get("directory_id"),
+                     "status": ((it.get("data") or {}).get("status"))}
+                    for it in items]
+        if relpath:
+            per_file = [p for p in per_file if p.get("filename") == os.path.basename(relpath)]
+        summary = {"source": source, "kb_id": kb_id,
+                   "source_count": source_count,
+                   "indexed_count": indexed,
+                   "pending": len(pending) if pending is not None else None,
+                   "files": per_file}
+        if as_json:
+            return self._ok(summary)
+        # human-readable: glyphs, no emoji, no ETA (no daemon)
+        idx = indexed if indexed is not None else "?"
+        pen_s = "%d" % len(pending) if isinstance(pending, list) else "<unavailable>"
+        lines = ["source (gdrive)   : %d allowlisted files" % source_count,
+                 "indexed (OWUI KB) : %s" % idx,
+                 "pending (OWUI)    : %s files awaiting extraction" % pen_s]
+        if isinstance(indexed, int) and source_count and indexed >= source_count:
+            lines.append("status            : ✓ sync COMPLETE (indexed >= source)")
+        elif isinstance(indexed, int):
+            lines.append("status            : ○ remaining=%d" % (source_count - indexed))
+        body = "\n".join(lines)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body.encode())))
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+    def _openapi(self):
+        self._send(200, OPENAPI_SPEC)
+
 
 # --- utils ---
+
+# gdrive index: documents-only allowlist. Source code is handled by
+# open-codebase-index, not the OWUI KB.
+DEFAULT_ALLOW = {"docx", "pdf", "pptx", "xlsx", "txt", "md", "html", "json", "log", "tex"}
+
+_SKIP_NAMES = {".sync-reports", ".sync.lock"}
+
+
+def walk_source(root, allow, max_size):
+    """Walk `root` and return one entry per allowlisted, in-size file:
+    [{filename, path, checksum, size, abspath}]. `filename` is the basename,
+    `path` is the directory relpath from `root` (POSIX, "" at root) — the shape
+    OWUI sync/diff expects. `checksum` is the raw-file sha256. Skips symlinks,
+    .sync-reports, .sync.lock. Empty list if root missing/empty (caller guards)."""
+    out = []
+    if not os.path.isdir(root):
+        return out
+    for dirpath, dirs, filenames in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in _SKIP_NAMES]
+        for fn in filenames:
+            if fn in _SKIP_NAMES:
+                continue
+            ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
+            if ext not in allow:
+                continue
+            abspath = os.path.join(dirpath, fn)
+            try:
+                if os.path.islink(abspath) or not os.path.isfile(abspath):
+                    continue
+                size = os.path.getsize(abspath)
+            except OSError:
+                continue
+            if size > max_size:
+                continue
+            rel = os.path.relpath(abspath, root)
+            d_rel = os.path.dirname(rel).replace(os.sep, "/")
+            try:
+                h = hashlib.sha256()
+                with open(abspath, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        h.update(chunk)
+                checksum = h.hexdigest()
+            except OSError:
+                continue
+            out.append({"filename": fn, "path": d_rel, "checksum": checksum,
+                        "size": size, "abspath": abspath})
+    return out
+
+
+def _parse_size(s):
+    """'100mb' / '100mb' -> bytes. Suffixes: b, k/kb, m/mb, g/gb (case-insensitive,
+    optional 'b'). Default 100 MiB on bad input."""
+    s = (s or "").strip().lower()
+    if not s:
+        return 100 * 1024 * 1024
+    mult = 1
+    for suf, m in (("gb", 1 << 30), ("g", 1 << 30), ("mb", 1 << 20),
+                   ("m", 1 << 20), ("kb", 1 << 10), ("k", 1 << 10), ("b", 1)):
+        if s.endswith(suf):
+            s = s[:-len(suf)]
+            mult = m
+            break
+    try:
+        return int(s) * mult
+    except ValueError:
+        return 100 * 1024 * 1024
+
+
+def _parse_allow(s):
+    """Comma-separated extensions -> set (lowercased, no leading dot)."""
+    return {x.strip().lstrip(".").lower() for x in (s or "").split(",") if x.strip()}
+
 
 def _req(body, key):
     val = body.get(key)
@@ -355,6 +612,73 @@ def _qs_int(qs, key, default):
             except Exception:
                 return default
     return default
+
+
+def _qs(qs, key, default=""):
+    """First query value for `key`, or `default`. URL-decoded."""
+    if not qs:
+        return default
+    for pair in qs.split("&"):
+        k, _, v = pair.partition("=")
+        if k == key:
+            return urllib.parse.unquote_plus(v) if v else default
+    return default
+
+
+def _qs_bool(qs, key, default=False):
+    """Truthy: 1, true, yes, on (case-insensitive)."""
+    v = _qs(qs, key, None)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+# --- OpenAPI 3.1 spec (hand-written; served ungated at GET /openapi.json) ---
+# Documents the gateway surface so callers (gdrive-sync, the kb skill, tests)
+# can discover it. Stdlib only — a static dict. Validation lives in the handlers
+# (_req, _qs, _qs_bool, _qs_int); this spec is descriptive.
+OPENAPI_SPEC = {
+    "openapi": "3.1.0",
+    "info": {"title": "kb-gateway", "version": "1.0",
+             "description": "Stack-side authorization + Graphiti bridge + admin "
+                            "user provisioning + stateless gdrive index sync."},
+    "paths": {
+        "/health": {"get": {"summary": "Process + OWUI reachability", "security": []}},
+        "/openapi.json": {"get": {"summary": "This document", "security": []}},
+        "/index": {"post": {
+            "summary": "Index (reconcile) a source into an OWUI KB (admin only)",
+            "security": [{"bearerAuth": []}],
+            "parameters": [
+                {"name": "source", "in": "query", "schema": {"type": "string", "default": "gdrive"}},
+                {"name": "kb_id", "in": "query", "required": False, "schema": {"type": "string", "format": "uuid"}},
+                {"name": "force", "in": "query", "schema": {"type": "boolean", "default": False}},
+                {"name": "dry_run", "in": "query", "schema": {"type": "boolean", "default": False}},
+                {"name": "reindex_all", "in": "query", "schema": {"type": "boolean", "default": False}}],
+            "responses": {"200": {"description": "per-file index result"},
+                          "403": {"description": "admin role required"},
+                          "422": {"description": "empty source (use force=1)"}}}},
+        "/status": {"get": {
+            "summary": "KB index status (read; read-scoped key works)",
+            "security": [{"bearerAuth": []}],
+            "parameters": [
+                {"name": "source", "in": "query", "schema": {"type": "string", "default": "gdrive"}},
+                {"name": "kb_id", "in": "query", "required": False, "schema": {"type": "string", "format": "uuid"}},
+                {"name": "file", "in": "query", "required": False, "schema": {"type": "string"}},
+                {"name": "json", "in": "query", "schema": {"type": "boolean", "default": False}}],
+            "responses": {"200": {"description": "status (text or json)"}}}},
+        "/admin/users": {"post": {"summary": "Admin user provisioning (admin only)", "security": [{"bearerAuth": []}]}},
+        "/memory/whoami": {"get": {"summary": "Caller identity", "security": [{"bearerAuth": []}]}},
+        "/memory/groups": {"get": {"summary": "List memory groups", "security": [{"bearerAuth": []}]}},
+        "/memory/status": {"get": {"summary": "Graphiti status", "security": [{"bearerAuth": []}]}},
+        "/memory/episodes": {"get": {"summary": "List episodes", "security": [{"bearerAuth": []}]}},
+        "/memory/add": {"post": {"summary": "Add memory", "security": [{"bearerAuth": []}]}},
+        "/memory/search": {"post": {"summary": "Search facts", "security": [{"bearerAuth": []}]}},
+        "/memory/forget": {"post": {"summary": "Clear a Group", "security": [{"bearerAuth": []}]}},
+        "/memory/delete-edge": {"post": {"summary": "Delete an edge", "security": [{"bearerAuth": []}]}},
+        "/memory/delete-episode": {"post": {"summary": "Delete an episode", "security": [{"bearerAuth": []}]}}},
+    "components": {"securitySchemes": {"bearerAuth": {
+        "type": "http", "scheme": "bearer", "description": "KB_API_KEY (OWUI API key)"}}},
+}
 
 
 def main():
