@@ -7,11 +7,12 @@
 #
 # OCR is provisioned BEFORE the gdrive set ingests so image-bearing documents
 # are OCR'd (non-empty), not orphaned. gdrive-sync runs rclone then POSTs
-# /index (synchronous: sync/diff + upload + link); extraction + embedding run
-# in OWUI's per-upload background task and drain async, so test_09 polls GET
-# /status pending. The cold first extraction runs per-figure OCR through
-# deepseek-ocr, so the pending-drain
-# budget is raised (E2E_INDEXER_WAIT, default 2400s -> GDRIVE_TEST_WAIT).
+# /index (synchronous: sync/diff + upload + re-trigger failed; the OWUI
+# per-upload background task links after extract+embed). Extraction + embedding
+# drain async, so test_09 polls GET /status for the real drain terminal state
+# (pending+processing=0 AND completed+failed>=source). The cold first extraction
+# runs per-figure OCR through deepseek-ocr, so the pending-drain budget is
+# raised (E2E_INDEXER_WAIT, default 2400s -> GDRIVE_TEST_WAIT).
 #
 # Stashes OPENWEBUI_TEST_USER/PASSWORD (+OPENWEBUI_USER) before the wipe and
 # restores them after bootstrap (clear-all deletes .env.local).

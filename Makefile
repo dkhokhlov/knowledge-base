@@ -116,7 +116,7 @@ gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant agent read + writ
 	  || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (the read-scoped agent key; run: make api-keys)"; exit 1; }
 	@./scripts/gdrive-index-bootstrap.sh
 
-gdrive-status: ## Show gdrive index status via kb-gateway GET /status (source vs indexed, pending)
+gdrive-status: ## Show gdrive index status via kb-gateway GET /status (completed/pending/processing/failed)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \

@@ -150,21 +150,33 @@ runs POST `/index` alone (no rclone); `make gdrive-status` reads GET `/status`.
 `/index` does incremental SHA-256 diffing over OWUI's `sync/diff` endpoints:
 the gateway sends a source manifest, OWUI computes the diff against the live KB
 (the KB itself is the state — no client manifest, no `history.db`), the gateway
-uploads+links+extracts the added/modified set and `sync/cleanup`s the deleted
-set. It **fails closed on an empty source** (0 files + not `?force=1` → 422, no
-`cleanup`, so a bad/empty mount cannot mass-delete the KB). Per-file
-transparency: the response carries `{added, modified, deleted, unmodified,
-errors, ok}` where `errors` lists `{filename, status, error}` per failed file —
-the diagnosis surface (no opaque daemon aggregate). `ok=false` means a real
-upload/extract error (the upload-idempotency + path-aware-dedup patches make
-duplicate-content 400s not occur). kb-gateway references a pre-existing KB by id
-— it does not create KBs.
+uploads the added/modified set and `sync/cleanup`s the deleted set. The gateway
+does NOT link files itself: `POST /files/` with `metadata.knowledge_id` queues
+OWUI's per-upload background task that runs the full pipeline — extract
+(markitdown-ocr) → embed into the KB collection → link — so that task is the
+sole linker (the link is a valid completion proxy: vectors are written before
+the link). After the upload + cleanup, `/index` re-triggers any `failed` file
+(delete + re-upload so a fresh background task is queued; the upload-idempotency
+patch returns an existing same-hash file WITHOUT re-queueing, so the delete
+first is required). With `?retry_pending=1` it also re-triggers files still
+`pending` (stalled in OCR) — operator-initiated, not the default, since it
+interrupts in-flight OCR. It **fails closed on an empty source** (0 files + not
+`?force=1` → 422, no `cleanup`, so a bad/empty mount cannot mass-delete the KB).
+Per-file transparency: the response carries `{added, modified, deleted,
+unmodified, retried, errors, ok}` where `errors` lists `{filename, status,
+error}` per failed upload/dir-create/re-trigger — the diagnosis surface (no
+opaque daemon aggregate). `ok=false` means a real upload/extract error (the
+upload-idempotency + path-aware-dedup patches make duplicate-content 400s not
+occur). kb-gateway references a pre-existing KB by id — it does not create KBs.
 
 Posture change: for the `/index`+`/status` path the gateway holds
 `OPENWEBUI_ADMIN_API_KEY` (compose env, from `.env.local`) and uses it for the
-OWUI sync writes. The caller's `KB_API_KEY` is authorization only (identity via
+OWUI sync writes AND the `/status` file scan (`GET /files/` is user-scoped — a
+read-scoped caller key sees only its own files, but the KB files were uploaded
+by the admin). The caller's `KB_API_KEY` is authorization only (identity via
 `owui.whoami`, role via `authorize.is_admin` for `/index`) — it is NOT forwarded
-for the write. `/index` is admin-only; `/status` is read (read-scoped key works).
+for the write. `/index` is admin-only; `/status` accepts any valid key (the
+admin key is used internally for the scan).
 
 ### Provisioning (one-time, after `make api-keys`)
 
@@ -249,29 +261,45 @@ to backup) then `Copied (new)`, classified `UPDATE`; a delete logs `Moved` then
 `Moved into backup dir`, classified `DELETE` — not the no-backup-dir `Copied
 (replaced existing)` / `Deleted` verbs. The chained POST `/index` reconciles
 new/changed/removed files into the KB in the same run (synchronous: sync/diff +
-upload + link). Extraction + embedding run in OWUI's per-upload background task
-(queued by POST /files/ with metadata.knowledge_id) and drain async; poll
-GET /status until pending=0.
+upload + re-trigger failed; the OWUI background task links after extract+embed).
+Extraction + embedding run in that per-upload background task (queued by POST
+/files/ with metadata.knowledge_id) and drain async; poll GET /status until
+pending+processing=0 (see Monitoring). `--retry-pending` forwards
+`?retry_pending=1` so a stalled drain re-triggers its pending files.
 
 ### Monitoring
 
-`make gdrive-status` reads GET `/status` (kb-gateway, read-scoped key): `source`
-(allowlisted `gdrive/` file count), `indexed` (OWUI KB `file_count`, read with
-the agent key), `pending` (files linked to the KB but not yet extracted by
-markitdown-ocr — `GET /api/v1/knowledge/{id}/files/pending`), and a `✓ COMPLETE`
-(indexed >= source) / `○ remaining=N` status line. No ETA — there is no daemon.
-`?json=1` returns the same fields as machine JSON; `?file=<relpath>` filters the
-per-file list. `file_count` is read from the list endpoint
-(`GET /api/v1/knowledge/`); the detail endpoint has neither `file_count` nor a
-populated `files` array. `file_count` counts only files LINKED to the KB, not
-files whose text is extracted — a file can be linked and still sit at
-`data.status=pending` while extraction catches up; the `pending` line surfaces
-those (a long age alone is not a hang — extraction runs one file at a time, so
-age also grows while the pipeline is busy on other files; cross-check
-`docker logs kb-markitdown-ocr` before assuming a wedge). If `indexed` stays
-below `source` with `pending=0`, the per-file `errors` from the last
-`POST /index` hold the WHY (re-run `make gdrive-index` or `make gdrive-sync` and
-read the stderr error list) — surface, do not mask.
+`make gdrive-status` reads GET `/status` (kb-gateway). `/status` reports real
+per-file progress from OWUI `file.data.status`, paged via
+`GET /api/v1/files/?content=false` (the `/knowledge/{id}/files` list defers
+`File.data`, so status reads null there; `GET /files/` returns `data.status` +
+`data.error`). OWUI's status vocabulary:
+
+| field | meaning |
+|---|---|
+| `source_count` | allowlisted `gdrive/` file count (gateway source walk) |
+| `indexed_count` | files with `data.status=completed` — extracted, embedded in the KB collection, linked (searchable) |
+| `pending` | files with `data.status=pending` — in the extraction phase (the slow OCR/GPU work) or queued. Extraction does not update status until it finishes, so a file mid-OCR reads `pending`; this is the GPU-busy signal |
+| `processing` | files with `data.status=processing` — the KB embedding + link phase (brief), set in `_process_handler` right before the second `process_file` |
+| `failed` | files with `data.status=failed`; `failed_files` lists `{filename, error}` |
+
+The drain is terminal when `pending+processing=0` AND `completed+failed`
+covers `source_count`. The human output uses glyphs (✓/✗/○), no ETA — there is
+no daemon. `?json=1` returns the same fields as machine JSON; `?file=<relpath>`
+filters the per-file list.
+
+`indexed_count` counts files whose text is extracted AND embedded AND linked
+(not just linked): a file linked but still extracting reads `pending`, not
+`completed`, so `/status` reports "done" only when the GPU drain has actually
+finished. A long `pending` age alone is not a hang — extraction runs many files
+concurrently (the `process_in_background=True` pipelining), so `pending` climbs
+then drains; cross-check `docker logs kb-markitdown-ocr` before assuming a
+wedge. A `failed` entry with `error="Failed to link file … to knowledge …"` is
+a double-link race (a second link insert collided with an existing one); it
+must not occur — the background task is the sole linker. Other `failed` entries
+(empty content, OCR timeout) are genuine source-file issues: re-run `make
+gdrive-sync` (or `make gdrive-index`) to re-trigger them, or `make gdrive-sync
+--retry-pending` if a file is stuck `pending`.
 
 ### File types and skips
 
@@ -339,7 +367,7 @@ dependency is down.
 | RAG chat is slow; `ollama ps` shows a CPU/GPU split | `MODEL_NAME` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; keep `MODEL_NAME` and `OPENWEBUI_MODEL` in sync |
 | `make health` says `degraded` but the UI works | OWUI `/health` returned non-2xx | inspect the `openwebui` logs; the gateway reports degraded whenever the identity dependency is not healthy |
 | gdrive KB `file_count` stays 0; uploads time out; OWUI `unhealthy`; `docker logs kb-openwebui` shows `chromadb ... unable to open database file` | `openwebui` service `ulimits.nofile` lowered or removed → [Chroma][chroma] 1.5.x (rust backend) exhausts the fd limit creating one SQLite db per RAG collection under bulk ingest | restore `ulimits.nofile.soft=65536` (hard 524288) on `openwebui` in `compose.yml`; `docker compose up -d --no-deps --force-recreate openwebui`; re-run `make gdrive-sync` (or `make gdrive-index`) |
-| `make gdrive-status` shows `indexed` below `source` with `pending=0` | a file failed to upload or extract; the per-file `errors` from `POST /index` hold the WHY | re-run `make gdrive-index` (or `make gdrive-sync`) and read the stderr per-file error list (`{filename, status, error}`); `docker logs kb-openwebui` / `docker logs kb-markitdown-ocr` for the upstream cause |
+| `make gdrive-status` shows `completed` below `source` with `pending+processing=0` | a file failed to upload or extract; `/status` `failed_files` + the per-file `errors` from the last `POST /index` hold the WHY | re-run `make gdrive-index` (or `make gdrive-sync`) to re-trigger failed; `docker logs kb-openwebui` / `docker logs kb-markitdown-ocr` for the upstream cause |
 | `POST /index` returns 422 "source walk yielded 0 files" | the `./gdrive` mount is empty/unreadable, or `GDRIVE_ROOT`/`KB_MAX_SIZE`/`DEFAULT_ALLOW` exclude everything | check `make gdrive-sync` populated `./gdrive`; check `HOST_UID` matches the gdrive owner uid; `?force=1` proceeds with an empty manifest (drives full `cleanup` — use only to drain the KB) |
 
 ## Make targets
@@ -363,10 +391,10 @@ dependency is down.
 | `ocr-bootstrap` | build + start `markitdown-ocr`, point OWUI at it (`CONTENT_EXTRACTION_ENGINE=external`), write `MARKITDOWN_OCR_PROVISIONED=1` to `.env.local` (run after `make api-keys`; idempotent; no fallback) |
 | `ocr-config` | set the OWUI external-extraction keys (engine + URL + API key); re-run to re-assert after a DB reset |
 | `ocr-disable` | clear the external engine + remove the marker + recreate `openwebui` (no KB reset; existing OCR'd members unchanged until re-ingested) |
-| `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./gdrive-exclude.conf` (`[<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections; then POSTs `/index` to reconcile the tree into the KB (`--index-all` for a full re-index; fail-fast on `ok=false`) |
+| `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./gdrive-exclude.conf` (`[<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections; then POSTs `/index` to reconcile the tree into the KB (`--index-all` for a full re-index; `--retry-pending` to re-trigger stalled pending; fail-fast on `ok=false`) |
 | `gdrive-index` | POST `/index` alone (no rclone): reconcile `./gdrive` into the KB via kb-gateway (admin; incremental). `INDEX_ALL=1` for a full re-index |
 | `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, write `GDRIVE_KB_ID` to `.env.local` (run after `make api-keys`; idempotent; no sidecar) |
-| `gdrive-status` | GET `/status` (kb-gateway): `source` vs `indexed` counts, `pending` (linked-not-extracted), `✓ COMPLETE` / `○ remaining=N` (no ETA — no daemon) |
+| `gdrive-status` | GET `/status` (kb-gateway): `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`, `✓ COMPLETE` / `○ in-flight=N` (no ETA — no daemon). Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
 | `clean-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + delete `.env.local` |

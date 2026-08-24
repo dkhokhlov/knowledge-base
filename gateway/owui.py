@@ -9,11 +9,18 @@ per-user API-key generation (codex #3).
 
 For the gdrive index path (/index, /status) the posture differs: the gateway
 holds OPENWEBUI_ADMIN_API_KEY (compose env) and uses it for the OWUI sync
-writes (sync/diff, upload, batch/add, batch/process, sync/cleanup). The
-caller's KB_API_KEY is authorization only (identity via whoami, role via
-authorize.is_admin) — it is NOT forwarded for the write. This keeps the admin
-key off the host for skill/agent callers; only the operator-run gdrive-sync
-passes the admin KB_API_KEY. See _admin_key().
+writes (sync/diff, upload, dirs/create, sync/cleanup, list files, delete
+file). The caller's KB_API_KEY is authorization only (identity via whoami,
+role via authorize.is_admin) — it is NOT forwarded for the write. This keeps
+the admin key off the host for skill/agent callers; only the operator-run
+gdrive-sync passes the admin KB_API_KEY. See _admin_key().
+
+The gateway does NOT link files itself: POST /files/ with
+metadata.knowledge_id queues OWUI's per-upload background task that extracts
+(markitdown-ocr) -> embeds into the KB collection -> links. That background
+task is the sole linker; /status reads file.data.status (via GET /files/) to
+report real completed/pending/failed, and /index re-triggers failed (and, on
+request, stalled pending) files by deleting + re-uploading them.
 
 Raises OwuiError (mapped by app.py to 503 on transport failure, left as the
 caller's concern for 4xx). Duplicate-email on add_user is surfaced as a
@@ -43,9 +50,10 @@ def _timeout():
 
 def _index_timeout():
     """Timeout for the /index sync-protocol calls (sync/diff, dirs/create,
-    files/batch/add, sync/cleanup, list files). The 15s identity timeout is too
-    short for a 159-file manifest diff or a drained cleanup, so the index path
-    uses this ceiling. Tunable via OWUI_INDEX_TIMEOUT (default 300s)."""
+    sync/cleanup, list files, delete file). The 15s identity timeout is too
+    short for a 159-file manifest diff, a paginated file-status scan, or a
+    drained cleanup, so the index path uses this ceiling. Tunable via
+    OWUI_INDEX_TIMEOUT (default 300s)."""
     return float(os.environ.get("OWUI_INDEX_TIMEOUT", "300"))
 
 
@@ -283,43 +291,67 @@ def upload_file(admin_key, kb_id, file_hash, directory_id, filename, data_bytes)
     return data
 
 
-def batch_add(admin_key, kb_id, items):
-    """POST /api/v1/knowledge/{id}/files/batch/add. `items` is a list of
-    {file_id, directory_id}. Links the files to the KB. Returns the response
-    dict. Raises OwuiError on non-200."""
-    code, data, txt = _j("POST", "/api/v1/knowledge/%s/files/batch/add" % kb_id,
-                         admin_key, items, timeout=_index_timeout())
-    if code != 200:
-        raise OwuiError("batch_add -> HTTP %s: %s" % (code, (txt or "")[:200]))
-    return data
+def list_file_status(admin_key, kb_id):
+    """GET /api/v1/files/?content=false&page=N, paged until `total` is covered
+    (OWUI hardcodes PAGE_SIZE=50). Filters items by
+    meta.data.knowledge_id == kb_id. Returns [{file_id, filename, file_hash,
+    directory_id, status, error}]. This is the real progress signal: the
+    /knowledge/{id}/files list defers File.data (status reads null there), but
+    GET /files/ returns data.status + data.error (content=false strips the
+    large content key but keeps status + error). Admin key sees every file
+    (BYPASS_ADMIN_ACCESS_CONTROL); a read-scoped caller key would see only its
+    own files, so /status uses the admin key. Raises OwuiError on transport
+    failure or non-200."""
+    out = []
+    page = 1
+    while True:
+        code, data, txt = _j("GET", "/api/v1/files/?content=false&page=%d" % page,
+                             admin_key, timeout=_index_timeout())
+        if code != 200 or not isinstance(data, dict):
+            raise OwuiError("list_file_status page %d -> HTTP %s: %s"
+                            % (page, code, (txt or "")[:200]))
+        items = data.get("items") or []
+        for it in items:
+            mdata = ((it.get("meta") or {}).get("data") or {})
+            if mdata.get("knowledge_id") != kb_id:
+                continue
+            d = it.get("data") or {}
+            out.append({"file_id": it.get("id"), "filename": it.get("filename"),
+                        "file_hash": mdata.get("file_hash"),
+                        "directory_id": mdata.get("directory_id"),
+                        "status": d.get("status"), "error": d.get("error")})
+        # Last page (short) or covered the reported total. Safety bound below.
+        if len(items) < 50 or page * 50 >= (data.get("total") or 0):
+            break
+        page += 1
+        if page > 200:  # >10k files: stop paging rather than loop unbounded
+            break
+    return out
+
+
+def delete_file(admin_key, file_id):
+    """DELETE /api/v1/files/{id}. Admin can delete any file; OWUI cleans the KB
+    associations + embeddings + the file-{id} vector collection first. Used by
+    /index's re-trigger to remove a failed/stalled file before re-upload so the
+    upload-idempotency reuse (same-hash -> return existing without re-queueing
+    the background task) does not block a fresh extraction. Returns True on
+    success, raises OwuiError on non-200/204."""
+    code, _, txt = _j("DELETE", "/api/v1/files/%s" % file_id, admin_key,
+                      timeout=_index_timeout())
+    if code not in (200, 204):
+        raise OwuiError("delete_file %s -> HTTP %s: %s" % (file_id, code, (txt or "")[:200]))
+    return True
 
 
 def list_kb_files(admin_key, kb_id):
-    """GET /api/v1/knowledge/{id}/files. Returns {items:[{id,hash,filename,
-    data,meta,...}], directories:[...], breadcrumbs, total}. Raises OwuiError
-    on non-200."""
-    code, data, txt = _j("GET", "/api/v1/knowledge/%s/files" % kb_id, admin_key, timeout=_index_timeout())
+    """GET /api/v1/knowledge/{id}/files?limit=1000. Admin-only `limit` override
+    (PAGE_ITEM_COUNT default is 30) so reindex_all's drain + dry_run see EVERY
+    linked file, not just page 1. Returns {items:[{id,hash,filename,data,meta,
+    ...}], directories:[...], breadcrumbs, total}. Note: this list defers
+    File.data (status reads null) — use list_file_status for status. Raises
+    OwuiError on non-200."""
+    code, data, txt = _j("GET", "/api/v1/knowledge/%s/files?limit=1000" % kb_id,
+                         admin_key, timeout=_index_timeout())
     if code != 200 or not isinstance(data, dict):
         raise OwuiError("list_kb_files -> HTTP %s: %s" % (code, (txt or "")[:200]))
-    return data
-
-
-def kb_file_count(read_key, kb_id):
-    """GET /api/v1/knowledge/ (list) -> file_count for kb_id, or None if the KB
-    is not visible to the key. Read-scoped key works (read grant)."""
-    code, data, _ = _j("GET", "/api/v1/knowledge/", read_key)
-    if code != 200 or not isinstance(data, dict):
-        return None
-    for k in (data.get("items") or data.get("data") or []):
-        if k.get("id") == kb_id:
-            return k.get("file_count")
-    return None
-
-
-def pending_files(read_key, kb_id):
-    """GET /api/v1/knowledge/{id}/files/pending -> list of linked-not-extracted
-    files, or None on failure. Read-scoped key works."""
-    code, data, _ = _j("GET", "/api/v1/knowledge/%s/files/pending" % kb_id, read_key)
-    if code != 200 or not isinstance(data, list):
-        return None
     return data

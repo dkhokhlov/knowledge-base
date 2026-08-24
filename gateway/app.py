@@ -351,13 +351,17 @@ class Handler(BaseHTTPRequestHandler):
     # -- gdrive index: stateless sync drive + status --
 
     def _index(self, identity, qs):
-        """POST /index?source=gdrive&kb_id=<id>[&force=1][&dry_run=1][&reindex_all=1].
-        Admin-only. Walks the source mount, drives OWUI's sync/diff protocol
-        with the gateway's held admin key, returns per-file results. Stateless:
-        the KB is the state (no manifest file). dry_run never mutates (returns
-        the plan only). New source subdirs are created via dirs/create before
-        their files are uploaded (sync/diff's directory_map only covers existing
-        paths; without this, new-subdir files would land at KB root)."""
+        """POST /index?source=gdrive&kb_id=<id>[&force=1][&dry_run=1]
+        [&reindex_all=1][&retry_pending=1]. Admin-only. Walks the source mount,
+        drives OWUI's sync/diff protocol with the gateway's held admin key,
+        returns per-file results. Stateless: the KB is the state (no manifest
+        file). dry_run never mutates (returns the plan only). New source subdirs
+        are created via dirs/create before their files are uploaded (sync/diff's
+        directory_map only covers existing paths; without this, new-subdir files
+        would land at KB root). The gateway does NOT link files itself — OWUI's
+        per-upload background task is the sole linker (extract -> embed -> link)
+        — and re-triggers failed files (plus stalled pending with
+        retry_pending=1) by deleting + re-uploading them."""
         if not authorize.is_admin(identity):
             raise GatewayError(403, "admin role required for /index")
         admin_key = owui._admin_key()  # OwuiError -> 503 if unset
@@ -370,6 +374,7 @@ class Handler(BaseHTTPRequestHandler):
         force = _qs_bool(qs, "force", False)
         dry_run = _qs_bool(qs, "dry_run", False)
         reindex_all = _qs_bool(qs, "reindex_all", False)
+        retry_pending = _qs_bool(qs, "retry_pending", False)
         root = os.environ.get("GDRIVE_ROOT", "/gdrive")
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
@@ -426,6 +431,10 @@ class Handler(BaseHTTPRequestHandler):
         log.info("/index kb=%s added=%d modified=%d deleted=%d unmodified=%d",
                  kb_id, len(added), len(modified), len(deleted), unmodified)
 
+        # errors is initialized BEFORE the mkdir loop so a create_directory
+        # failure inside that loop records an error (an append before
+        # initialization would NameError -> 500 on a dir-create fail).
+        errors = []
         # Create the new directories (mkdir) shallowest-first so each segment's
         # parent_id is known. sync/diff returns mkdir sorted by depth; create each
         # missing segment via dirs/create and extend directory_map to cover it.
@@ -448,8 +457,6 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 directory_map[p] = d.get("id") or ""
 
-        errors = []
-        add_items = []
         orphan_file_ids = []  # modified: stale_file_ids to clean after the new link
         for entry in added + modified:
             fn = entry.get("filename")
@@ -474,29 +481,24 @@ class Handler(BaseHTTPRequestHandler):
                 # One slow/timed-out upload is a per-file error, not a run abort.
                 errors.append({"filename": fn, "status": "error", "error": str(e)})
                 continue
-            add_items.append({"file_id": fm["id"], "directory_id": dir_id})
-            # modified: OWUI carries the OLD file id as `stale_file_id` (added
-            # entries never carry it). It is now an orphan -> clean below
+            # modified: OWUI carries the prior file id as `stale_file_id`
+            # (added entries never carry it). It is an orphan -> clean below
             # (sync_cleanup is tolerant of an id the idempotency patch already
-            # reclaimed during the new upload).
+            # reclaimed during the new upload). The background task links the
+            # new file after extract+embed (sole linker).
             if entry.get("stale_file_id"):
                 orphan_file_ids.append(entry["stale_file_id"])
 
-        if add_items:
-            try:
-                owui.batch_add(admin_key, kb_id, add_items)
-            except (owui.OwuiError, OSError) as e:
-                errors.append({"filename": "<batch_add>", "status": "error", "error": str(e)})
-        # No batch_process call here. OWUI's upload handler (POST /files/ with
-        # metadata.knowledge_id) queues a per-file background task that runs the
-        # full pipeline: extract (markitdown-ocr) -> embed into the KB collection
-        # (process_file(collection_name=knowledge_id)) -> link. batch_process
-        # (retrieval/process/files/batch) reads file.data.content directly and
-        # does NOT extract, so calling it immediately after upload would run
-        # BEFORE the background task populates content -> every file reports
-        # "content is empty" and no vectors are written by this call. The
-        # background task is the embedder; /status polls file.data.status until
-        # the drain completes (pending -> 0).
+        # The gateway does NOT link files. POST /files/ with
+        # metadata.knowledge_id queues OWUI's per-upload background task that
+        # runs the full pipeline — extract (markitdown-ocr) -> embed into the KB
+        # collection (process_file(collection_name=knowledge_id)) -> link. That
+        # task is the sole linker, so the link is a valid completion proxy
+        # (vectors are written before the link). add_file_to_knowledge_by_id
+        # has no exists-check, so a second link insert (a double-link race)
+        # would IntegrityError -> "Failed to link file ..." -> data.status=
+        # 'failed' on a successfully-extracted file; the gateway avoids this by
+        # not inserting a link itself.
 
         cleanup_file_ids = orphan_file_ids + [d.get("file_id") for d in deleted if d.get("file_id")]
         cleanup_dir_ids = list(rmdir)
@@ -506,15 +508,76 @@ class Handler(BaseHTTPRequestHandler):
             except (owui.OwuiError, OSError) as e:
                 errors.append({"filename": "<sync_cleanup>", "status": "error", "error": str(e)})
 
+        # Re-trigger: self-heal failed files (and, with retry_pending=1, stalled
+        # pending) by deleting + re-uploading so a fresh background task is
+        # queued. The upload-idempotency patch returns an existing same-hash file
+        # WITHOUT re-queueing the task, so the delete first is required to retry.
+        # Default retries only `failed` (a failed file is not actively
+        # processing); retry_pending=1 also retries `pending` (operator-initiated
+        # for stalled pending after the drain — not the default, to avoid
+        # interrupting in-flight OCR). Each retry target is mapped back to its
+        # source by the content hash (meta.data.file_hash == the source checksum
+        # set at upload), then re-uploaded into its original directory.
+        retry_statuses = {"failed"}
+        if retry_pending:
+            retry_statuses.add("pending")
+        retried = 0
+        by_hash = {f["checksum"]: f for f in files}
+        try:
+            file_status = owui.list_file_status(admin_key, kb_id)
+        except (owui.OwuiError, OSError) as e:
+            file_status = None
+            errors.append({"filename": "<re-trigger>", "status": "error",
+                           "error": "list_file_status failed: %s" % e})
+        if file_status is not None:
+            for st in file_status:
+                if st.get("status") not in retry_statuses:
+                    continue
+                fn = st.get("filename") or st.get("file_id") or "?"
+                src = by_hash.get(st.get("file_hash"))
+                if not src:
+                    errors.append({"filename": fn, "status": "error",
+                                   "error": "re-trigger: no source for hash"})
+                    continue
+                try:
+                    owui.delete_file(admin_key, st["file_id"])
+                except (owui.OwuiError, OSError) as e:
+                    errors.append({"filename": fn, "status": "error",
+                                   "error": "re-trigger delete failed: %s" % e})
+                    continue
+                dir_id = directory_map.get(src["path"]) or ""
+                try:
+                    data_bytes = open(src["abspath"], "rb").read()
+                    owui.upload_file(admin_key, kb_id, src["checksum"],
+                                     dir_id, src["filename"], data_bytes)
+                except (owui.OwuiError, OSError) as e:
+                    errors.append({"filename": fn, "status": "error",
+                                   "error": "re-trigger re-upload failed: %s" % e})
+                    continue
+                retried += 1
+        if retried:
+            log.info("/index kb=%s retried=%d (retry_pending=%s)",
+                     kb_id, retried, retry_pending)
+
         self._ok({"added": len(added), "modified": len(modified),
                   "deleted": len(deleted), "unmodified": unmodified,
-                  "errors": errors, "ok": len(errors) == 0})
+                  "retried": retried, "errors": errors, "ok": len(errors) == 0})
 
     def _status(self, identity, qs):
         """GET /status?source=gdrive&kb_id=<id>[&file=<relpath>][&json=1].
-        Read-only. Returns source count, OWUI file_count, pending, and per-file
-        state (re-derived live; no stored last-run state). Caller's KB_API_KEY
-        must read the KB (read-scoped key works)."""
+        Read-only. Reports real per-file progress from OWUI file.data.status
+        (via GET /files/?content=false, paged). OWUI's status vocabulary:
+          pending    = extraction phase (the slow GPU/OCR work) or queued —
+                       extraction does not update status until it finishes, so
+                       a file mid-OCR reads pending (the GPU-busy signal);
+          processing = the KB embedding + link phase (brief), set in
+                       _process_handler right before the second process_file;
+          completed  = extracted + embedded in the KB collection + linked;
+          failed     = error at any stage (error string in data.error).
+        Re-derived live; no stored last-run state. Uses the gateway's held
+        admin key for the file scan (GET /files/ is user-scoped — a read-scoped
+        caller key sees only its own files, but the KB files were uploaded by
+        the admin); the caller's KB_API_KEY is authorization only."""
         source = _qs(qs, "source", "gdrive")
         if source != "gdrive":
             raise GatewayError(400, "unknown source %r (Phase 1: 'gdrive' only)" % source)
@@ -523,45 +586,52 @@ class Handler(BaseHTTPRequestHandler):
             raise GatewayError(400, "kb_id required (query kb_id or GDRIVE_KB_ID env)")
         as_json = _qs_bool(qs, "json", False)
         relpath = _qs(qs, "file", "")
-        # status reads use the caller's own key (read-scoped works).
-        read_key = self.headers.get("Authorization", "")[len("Bearer "):].strip()
+        admin_key = owui._admin_key()  # OwuiError -> 503 if unset
         root = os.environ.get("GDRIVE_ROOT", "/gdrive")
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
         files = walk_source(root, allow, max_size)
         source_count = len(files)
-        indexed = owui.kb_file_count(read_key, kb_id)
-        pending = owui.pending_files(read_key, kb_id)
-        lst = None
-        try:
-            lst = owui.list_kb_files(read_key, kb_id)
-        except owui.OwuiError:
-            lst = None
-        items = (lst or {}).get("items") or []
-        per_file = [{"filename": it.get("filename"), "hash": it.get("hash"),
-                     "directory_id": ((it.get("meta") or {}).get("data") or {}).get("directory_id"),
-                     "status": ((it.get("data") or {}).get("status")),
-                     "error": ((it.get("data") or {}).get("error"))}
-                    for it in items]
+        file_status = owui.list_file_status(admin_key, kb_id)
+        completed = sum(1 for s in file_status if s.get("status") == "completed")
+        pending = sum(1 for s in file_status if s.get("status") == "pending")
+        processing = sum(1 for s in file_status if s.get("status") == "processing")
+        failed = [s for s in file_status if s.get("status") == "failed"]
+        in_flight = pending + processing
+        per_file = [{"filename": s.get("filename"), "status": s.get("status"),
+                     "error": s.get("error")} for s in file_status]
         if relpath:
-            per_file = [p for p in per_file if p.get("filename") == os.path.basename(relpath)]
+            per_file = [p for p in per_file
+                        if p.get("filename") == os.path.basename(relpath)]
         summary = {"source": source, "kb_id": kb_id,
                    "source_count": source_count,
-                   "indexed_count": indexed,
-                   "pending": len(pending) if pending is not None else None,
+                   "indexed_count": completed,
+                   "pending": pending,
+                   "processing": processing,
+                   "failed": len(failed),
+                   "failed_files": [{"filename": f.get("filename"),
+                                     "error": f.get("error")} for f in failed],
                    "files": per_file}
         if as_json:
             return self._ok(summary)
-        # human-readable: glyphs, no emoji, no ETA (no daemon)
-        idx = indexed if indexed is not None else "?"
-        pen_s = "%d" % len(pending) if isinstance(pending, list) else "<unavailable>"
+        # human-readable: glyphs (✓/✗/○), no emoji, no ETA (no daemon). pending
+        # = GPU/OCR in flight (the busy signal); processing = embed + link.
         lines = ["source (gdrive)   : %d allowlisted files" % source_count,
-                 "indexed (OWUI KB) : %s" % idx,
-                 "pending (OWUI)    : %s files awaiting extraction" % pen_s]
-        if isinstance(indexed, int) and source_count and indexed >= source_count:
-            lines.append("status            : ✓ sync COMPLETE (indexed >= source)")
-        elif isinstance(indexed, int):
-            lines.append("status            : ○ remaining=%d" % (source_count - indexed))
+                 "indexed (OWUI KB) : %d completed (searchable)" % completed,
+                 "pending (OWUI)    : %d in extraction (OCR/GPU)" % pending,
+                 "processing (OWUI) : %d embedding + linking" % processing,
+                 "failed (OWUI)     : %d" % len(failed)]
+        for f in failed[:20]:
+            lines.append("  ✗ %s — %s" % (f.get("filename") or "?",
+                                          (f.get("error") or "")[:80]))
+        if in_flight == 0 and not failed:
+            lines.append("status            : ✓ sync COMPLETE (drained, no failures)")
+        elif in_flight == 0:
+            lines.append("status            : ○ drain complete with %d failure(s) "
+                         "(re-run /index to re-trigger failed)" % len(failed))
+        else:
+            lines.append("status            : ○ in-flight=%d (pending=%d processing=%d)"
+                         % (in_flight, pending, processing))
         body = "\n".join(lines)
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -729,7 +799,8 @@ OPENAPI_SPEC = {
                 {"name": "kb_id", "in": "query", "required": False, "schema": {"type": "string", "format": "uuid"}},
                 {"name": "force", "in": "query", "schema": {"type": "boolean", "default": False}},
                 {"name": "dry_run", "in": "query", "schema": {"type": "boolean", "default": False}},
-                {"name": "reindex_all", "in": "query", "schema": {"type": "boolean", "default": False}}],
+                {"name": "reindex_all", "in": "query", "schema": {"type": "boolean", "default": False}},
+                {"name": "retry_pending", "in": "query", "schema": {"type": "boolean", "default": False}}],
             "responses": {"200": {"description": "per-file index result"},
                           "403": {"description": "admin role required"},
                           "422": {"description": "empty source (use force=1)"}}}},

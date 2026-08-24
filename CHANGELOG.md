@@ -8,6 +8,40 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`/index` no longer links files; `/status` reports real per-file progress.**
+  The gateway stopped calling `files/batch/add` (link): `POST /files/` with
+  `metadata.knowledge_id` queues OWUI's per-upload background task that runs the
+  full pipeline — extract (markitdown-ocr) → embed into the KB collection → link
+  — so that task is the sole linker (vectors are written before the link, making
+  the link a valid completion proxy). `batch_add` linked before extraction,
+  which raced the background task's own auto-link
+  (`add_file_to_knowledge_by_id` has no exists-check → `IntegrityError` →
+  swallowed → `_process_handler` raised "Failed to link file …" →
+  `data.status='failed'`) on ~14/159 successfully-extracted files (false
+  failures; their vectors were present + searchable) AND made `/status` report
+  "done" while the GPU drain was still running. `/status` now reads
+  `file.data.status` paged via `GET /api/v1/files/?content=false` (the
+  `/knowledge/{id}/files` list defers `File.data`, so status read null there):
+  `indexed_count` = `completed` (extracted + embedded + linked, searchable),
+  `pending` = in extraction (OCR/GPU) or queued, `processing` = embedding +
+  linking, `failed` = `{filename, error}`. Drain is terminal when
+  `pending+processing=0` AND `completed+failed` covers `source_count`. Removed
+  `kb_file_count` + `pending_files` helpers (the `file_count`/`/files/pending`
+  reads they drove were the premature-done root cause). `/index` now re-triggers
+  `failed` files every run (delete + re-upload so a fresh background task is
+  queued — the upload-idempotency patch returns an existing same-hash file
+  WITHOUT re-queueing, so the delete first is required); `?retry_pending=1`
+  (off by default — interrupts in-flight OCR) also re-triggers `pending`.
+  Response gains `retried`. `list_kb_files` passes `?limit=1000` (admin override
+  of the 30-item default) so `reindex_all`'s drain + `dry_run` see every file.
+  Fixed an `errors`-before-init `NameError` (a `create_directory` failure inside
+  the mkdir loop hit `errors.append` before `errors = []` → 500). `tests/test_09`
+  gates on the real drain (`pending+processing=0` AND `completed+failed>=source`,
+  not the old false-green `pending=0`), fails on any "Failed to link" regression,
+  surfaces genuine failures as a notice, and runs a deterministic semantic
+  search (first completed file's stem → require ≥1 hit). `gdrive-sync` gains
+  `--retry-pending` (→ `?retry_pending=1`) + logs `retried`. `docs/operations.md`
+  updated for the new flow + `/status` vocabulary.
 - **Replaced the `oikb` gdrive-indexer sidecar with a stateless indexer in
   kb-gateway.** The opaque `oikb` daemon (failed with 4/159 files indexed, no
   errors surfaced) is removed. gdrive indexing is now `POST /index` + `GET
