@@ -23,7 +23,7 @@ grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$' .env.local \
 # Step 2: recreate openwebui so it reloads the cleared extraction config.
 # --profile ocr is passed explicitly (a one-off) so compose loads the ocr
 # services; --no-deps + the openwebui arg recreate only openwebui (the
-# markitdown-ocr container is left running until the next make start/clear,
+# markitdown-ocr container is left running until the next make start/clean,
 # which — without the marker — will not bring it back).
 set -a; . ./.env; . ./.env.local; set +a
 echo "recreating openwebui so it reloads the cleared extraction config"

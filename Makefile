@@ -11,7 +11,7 @@ DATA_DIR := ./data
         health test test-e2e api-keys admin-signup rag-config \
         ocr-bootstrap ocr-config ocr-disable \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
-        shell-owui shell-neo4j shell-graphiti shell-caddy clear clear-all clean
+        shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-backup
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -137,10 +137,10 @@ shell-graphiti: ## Shell into the graphiti container
 shell-caddy: ## Shell into the Caddy gateway container
 	@docker exec -it kb-graphiti-gateway sh
 
-clear: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.local.
+clean: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.local.
 	@$(COMPOSE) down --remove-orphans
 
-clear-all: ## Full wipe: clear + DELETE ./data + ./.gdrive-backup + remove .env.local. Keeps .env and configs.
+clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + remove .env.local. Keeps .env and configs.
 	@$(COMPOSE) down --remove-orphans --volumes
 	@# Remove ./data as root via a throwaway container: OWUI (root) and Neo4j
 	@# (neo4j uid) write bind-mount files the host user cannot delete, so a host
@@ -150,6 +150,6 @@ clear-all: ## Full wipe: clear + DELETE ./data + ./.gdrive-backup + remove .env.
 	@rm -rf ./.gdrive-backup
 	@echo "Wiped containers, ./data, ./.gdrive-backup, and .env.local. .env, graphiti/config.yaml, caddy/Caddyfile are preserved."
 
-clean: ## Remove the rclone --backup-dir retention tree (./.gdrive-backup). Non-destructive: does not touch the stack, ./data, or .env.local.
+clean-backup: ## Remove the rclone --backup-dir retention tree (./.gdrive-backup). Non-destructive: does not touch the stack, ./data, or .env.local.
 	@rm -rf ./.gdrive-backup
 	@echo "Removed ./.gdrive-backup (rclone sync backup retention)."

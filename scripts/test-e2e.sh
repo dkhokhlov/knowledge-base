@@ -7,9 +7,10 @@
 #
 # OCR is provisioned BEFORE the gdrive set ingests so image-bearing documents
 # are OCR'd (non-empty), not orphaned. gdrive-sync runs rclone then POSTs
-# /index (synchronous: sync/diff + upload + link + batch_process trigger); OCR
-# extraction drains async, so test_09 polls GET /status pending. The cold first
-# extraction runs per-figure OCR through deepseek-ocr, so the pending-drain
+# /index (synchronous: sync/diff + upload + link); extraction + embedding run
+# in OWUI's per-upload background task and drain async, so test_09 polls GET
+# /status pending. The cold first extraction runs per-figure OCR through
+# deepseek-ocr, so the pending-drain
 # budget is raised (E2E_INDEXER_WAIT, default 2400s -> GDRIVE_TEST_WAIT).
 #
 # Stashes OPENWEBUI_TEST_USER/PASSWORD (+OPENWEBUI_USER) before the wipe and
@@ -34,11 +35,18 @@ stash=$(mktemp); chmod 600 "$stash"
   [ -n "${OPENWEBUI_USER:-}" ] && printf 'OPENWEBUI_USER=%s\n' "$OPENWEBUI_USER" || true; } > "$stash"
 trap 'rm -f "$stash"' EXIT
 
-make clear-all
+make clean-all
 unset GDRIVE_KB_ID
 make bootstrap
 ./scripts/e2e-restore-creds.sh "$stash"
 make preflight
+# Rebuild locally-built images whose code changed since the last run, so the
+# e2e tests current code (clean-all wipes volumes/data, NOT images; `up -d`
+# without --build reuses the existing image). kb-gateway is stdlib-only so this
+# is fast. openwebui (patched) + markitdown-ocr are heavy; markitdown-ocr is
+# rebuilt by `make ocr-bootstrap` below, openwebui is rebuilt only when its
+# patches change (manual: `docker compose build openwebui`).
+docker compose build kb-gateway
 make start
 
 H="${KB_HOST:-http://localhost:${KB_HOST_PORT:-3000}}"

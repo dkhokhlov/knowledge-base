@@ -176,6 +176,7 @@ class Handler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             pass
         except Exception as e:  # never leak a stack trace to the client
+            log.exception("unhandled error on %s %s", method, path)
             self._err(500, "internal error: %s" % e)
 
     def _route(self, method, path, qs):
@@ -436,11 +437,18 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 parent_p = "/".join(segments[:depth - 1])
                 parent_id = directory_map.get(parent_p)  # None -> top-level
-                d = owui.create_directory(admin_key, kb_id, segments[depth - 1], parent_id)
+                try:
+                    d = owui.create_directory(admin_key, kb_id, segments[depth - 1], parent_id)
+                except (owui.OwuiError, OSError) as e:
+                    # socket.timeout (OSError) is not always wrapped as OwuiError.
+                    # A failed dir leaves deeper segments without a parent -> stop
+                    # this path; its files fall back to dir_id="" (KB root).
+                    errors.append({"path": p, "status": "error",
+                                   "error": "create_directory failed: %s" % e})
+                    break
                 directory_map[p] = d.get("id") or ""
 
         errors = []
-        file_models = []
         add_items = []
         orphan_file_ids = []  # modified: stale_file_ids to clean after the new link
         for entry in added + modified:
@@ -461,10 +469,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 fm = owui.upload_file(admin_key, kb_id, info["checksum"],
                                       dir_id, fn, data_bytes)
-            except owui.OwuiError as e:
+            except (owui.OwuiError, OSError) as e:
+                # socket.timeout (OSError) is not always wrapped as OwuiError.
+                # One slow/timed-out upload is a per-file error, not a run abort.
                 errors.append({"filename": fn, "status": "error", "error": str(e)})
                 continue
-            file_models.append(fm)
             add_items.append({"file_id": fm["id"], "directory_id": dir_id})
             # modified: OWUI carries the OLD file id as `stale_file_id` (added
             # entries never carry it). It is now an orphan -> clean below
@@ -476,25 +485,25 @@ class Handler(BaseHTTPRequestHandler):
         if add_items:
             try:
                 owui.batch_add(admin_key, kb_id, add_items)
-            except owui.OwuiError as e:
+            except (owui.OwuiError, OSError) as e:
                 errors.append({"filename": "<batch_add>", "status": "error", "error": str(e)})
-        if file_models:
-            try:
-                bp = owui.batch_process(admin_key, file_models, kb_id)
-                for r in (bp.get("results") or []):
-                    if r.get("status") not in ("completed", "ok"):
-                        errors.append({"file_id": r.get("file_id"), "status": r.get("status"),
-                                       "error": r.get("error")})
-                errors.extend(bp.get("errors") or [])
-            except owui.OwuiError as e:
-                errors.append({"filename": "<batch_process>", "status": "error", "error": str(e)})
+        # No batch_process call here. OWUI's upload handler (POST /files/ with
+        # metadata.knowledge_id) queues a per-file background task that runs the
+        # full pipeline: extract (markitdown-ocr) -> embed into the KB collection
+        # (process_file(collection_name=knowledge_id)) -> link. batch_process
+        # (retrieval/process/files/batch) reads file.data.content directly and
+        # does NOT extract, so calling it immediately after upload would run
+        # BEFORE the background task populates content -> every file reports
+        # "content is empty" and no vectors are written by this call. The
+        # background task is the embedder; /status polls file.data.status until
+        # the drain completes (pending -> 0).
 
         cleanup_file_ids = orphan_file_ids + [d.get("file_id") for d in deleted if d.get("file_id")]
         cleanup_dir_ids = list(rmdir)
         if cleanup_file_ids or cleanup_dir_ids:
             try:
                 owui.sync_cleanup(admin_key, kb_id, cleanup_file_ids, cleanup_dir_ids)
-            except owui.OwuiError as e:
+            except (owui.OwuiError, OSError) as e:
                 errors.append({"filename": "<sync_cleanup>", "status": "error", "error": str(e)})
 
         self._ok({"added": len(added), "modified": len(modified),
@@ -531,7 +540,8 @@ class Handler(BaseHTTPRequestHandler):
         items = (lst or {}).get("items") or []
         per_file = [{"filename": it.get("filename"), "hash": it.get("hash"),
                      "directory_id": ((it.get("meta") or {}).get("data") or {}).get("directory_id"),
-                     "status": ((it.get("data") or {}).get("status"))}
+                     "status": ((it.get("data") or {}).get("status")),
+                     "error": ((it.get("data") or {}).get("error"))}
                     for it in items]
         if relpath:
             per_file = [p for p in per_file if p.get("filename") == os.path.basename(relpath)]

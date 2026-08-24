@@ -188,8 +188,8 @@ lost — rclone moves them (in their original hierarchy) into a dated
 `./.gdrive-backup/<UTC-ISO>/` dir, which sits OUTSIDE `./gdrive` so `/index`
 does not index them. That backup dir is the recovery net for a bad/empty mount:
 `sync` deletes to match the source, so an empty Drive mount empties `./gdrive`
-— but the removed files are in `./.gdrive-backup/`, not gone. `make clean`
-clears the backup tree (so does `make clear-all`).
+— but the removed files are in `./.gdrive-backup/`, not gone. `make clean-backup`
+clears the backup tree (so does `make clean-all`).
 
 **Fail-fast + empty-source guard.** Any transfer error aborts the run
 immediately (the report is still written with the failing files + rclone
@@ -249,7 +249,9 @@ to backup) then `Copied (new)`, classified `UPDATE`; a delete logs `Moved` then
 `Moved into backup dir`, classified `DELETE` — not the no-backup-dir `Copied
 (replaced existing)` / `Deleted` verbs. The chained POST `/index` reconciles
 new/changed/removed files into the KB in the same run (synchronous: sync/diff +
-upload + link + batch_process trigger; OCR extraction drains async).
+upload + link). Extraction + embedding run in OWUI's per-upload background task
+(queued by POST /files/ with metadata.knowledge_id) and drain async; poll
+GET /status until pending=0.
 
 ### Monitoring
 
@@ -319,7 +321,7 @@ dependency is down.
 |---|---|---|
 | `make start` rejects with empty `WEBUI_SECRET_KEY` | `.env.local` missing or key empty | run `make bootstrap` (not raw `docker compose up`, which does not fail-fast on empty secrets) |
 | RAG search returns 0 hits; file embedding `process/status = failed` | `rag.ollama.base_url` stale (OWUI persists it on first boot, ignores later `OLLAMA_HOST` changes) | `make rag-config` (re-syncs to `OLLAMA_HOST`); `make preflight` warns on drift; test_04 catches it |
-| RAG chat confabulates (wrong vendor, invented file names) | strict-grounding RAG template not set (model falls back to its own knowledge) | `make rag-config`; re-run after any DB reset/rebuild (`make clear-all` reverts it) |
+| RAG chat confabulates (wrong vendor, invented file names) | strict-grounding RAG template not set (model falls back to its own knowledge) | `make rag-config`; re-run after any DB reset/rebuild (`make clean-all` reverts it) |
 | Agent chat returns `Model not found` | non-admin user lacks read access on the chat model | `make api-keys` (grants `*` read on `MODEL_NAME` to the agent user) |
 | kb-gateway returns `503 identity service unavailable` | Open WebUI unreachable from the gateway (identity resolution fails closed) | check `make health`, the `openwebui` container, and `owui_net`; the gateway cannot authorize without OWUI |
 | kb-gateway `/admin/users` returns `501` | deployed OWUI image lacks the provisioning endpoints | check `OPENWEBUI_IMAGE_TAG`; gateway startup log prints `provisioning=missing ...` listing the absent paths |
@@ -366,14 +368,14 @@ dependency is down.
 | `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, write `GDRIVE_KB_ID` to `.env.local` (run after `make api-keys`; idempotent; no sidecar) |
 | `gdrive-status` | GET `/status` (kb-gateway): `source` vs `indexed` counts, `pending` (linked-not-extracted), `✓ COMPLETE` / `○ remaining=N` (no ETA — no daemon) |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
-| `clear` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
-| `clear-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + delete `.env.local` |
-| `clean` | remove the `./.gdrive-backup/` rclone sync retention tree (non-destructive: does not touch the stack, `./data`, or `.env.local`) |
+| `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
+| `clean-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + delete `.env.local` |
+| `clean-backup` | remove the `./.gdrive-backup/` rclone sync retention tree (non-destructive: does not touch the stack, `./data`, or `.env.local`) |
 
-- `clear` preserves all state (clean recreate).
-- `clear-all` wipes data, the generated secret, and the gdrive backup retention.
-- `clear-all` keeps `.env`, `graphiti/config.yaml`, and `caddy/Caddyfile`.
-- `clean` removes only `./.gdrive-backup/` (rclone sync retention); it does not tear down the stack.
+- `clean` preserves all state (clean recreate).
+- `clean-all` wipes data, the generated secret, and the gdrive backup retention.
+- `clean-all` keeps `.env`, `graphiti/config.yaml`, and `caddy/Caddyfile`.
+- `clean-backup` removes only `./.gdrive-backup/` (rclone sync retention); it does not tear down the stack.
 
 ## Hardening reference
 

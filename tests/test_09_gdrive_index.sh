@@ -79,8 +79,10 @@ for e in (d.get("errors") or [])[:20]:
 fi
 
 # --- poll GET /status until extraction drains (pending=0) -------------------
-# batch_process is non-blocking; OCR extraction drains async. Poll /status
-# (read key) for pending=0 up to GDRIVE_TEST_WAIT (default 600s).
+# Extraction + embedding run in OWUI's per-upload background task (queued by
+# POST /files/ with metadata.knowledge_id), not via a gateway batch_process
+# call. They drain async. Poll /status (read key) for pending=0 up to
+# GDRIVE_TEST_WAIT (default 600s).
 section "poll GET /status (pending drain)"
 wait_s="${GDRIVE_TEST_WAIT:-600}"
 deadline=$(( $(date +%s) + wait_s ))

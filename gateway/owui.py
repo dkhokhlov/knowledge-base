@@ -41,7 +41,15 @@ def _timeout():
     return float(os.environ.get("OWUI_TIMEOUT", "15"))
 
 
-def _req(method, path, token=None, body=None):
+def _index_timeout():
+    """Timeout for the /index sync-protocol calls (sync/diff, dirs/create,
+    files/batch/add, sync/cleanup, list files). The 15s identity timeout is too
+    short for a 159-file manifest diff or a drained cleanup, so the index path
+    uses this ceiling. Tunable via OWUI_INDEX_TIMEOUT (default 300s)."""
+    return float(os.environ.get("OWUI_INDEX_TIMEOUT", "300"))
+
+
+def _req(method, path, token=None, body=None, timeout=None):
     url = _base() + path
     data = json.dumps(body).encode() if body is not None else None
     headers = {}
@@ -51,7 +59,7 @@ def _req(method, path, token=None, body=None):
         headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=_timeout()) as r:
+        with urllib.request.urlopen(req, timeout=timeout or _timeout()) as r:
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, (e.read().decode() or "")
@@ -59,8 +67,8 @@ def _req(method, path, token=None, body=None):
         raise OwuiError("OWUI unreachable: %s" % e)
 
 
-def _j(method, path, token=None, body=None):
-    code, txt = _req(method, path, token, body)
+def _j(method, path, token=None, body=None, timeout=None):
+    code, txt = _req(method, path, token, body, timeout)
     try:
         data = json.loads(txt) if txt else None
     except Exception:
@@ -191,7 +199,7 @@ def sync_diff(admin_key, kb_id, manifest):
     {added, modified, deleted, mkdir, rmdir, unmodified_count, directory_map}.
     Raises OwuiError on transport failure or non-200."""
     code, data, txt = _j("POST", "/api/v1/knowledge/%s/sync/diff" % kb_id,
-                         admin_key, {"manifest": manifest})
+                         admin_key, {"manifest": manifest}, timeout=_index_timeout())
     if code != 200 or not isinstance(data, dict):
         raise OwuiError("sync_diff -> HTTP %s: %s" % (code, (txt or "")[:200]))
     return data
@@ -201,7 +209,8 @@ def sync_cleanup(admin_key, kb_id, file_ids, dir_ids):
     """POST /api/v1/knowledge/{id}/sync/cleanup. Removes orphan files + empty
     dirs. Returns True on success, raises OwuiError on non-200."""
     code, _, txt = _j("POST", "/api/v1/knowledge/%s/sync/cleanup" % kb_id,
-                      admin_key, {"file_ids": file_ids or [], "dir_ids": dir_ids or []})
+                      admin_key, {"file_ids": file_ids or [], "dir_ids": dir_ids or []},
+                      timeout=_index_timeout())
     if code != 200:
         raise OwuiError("sync_cleanup -> HTTP %s: %s" % (code, (txt or "")[:200]))
     return True
@@ -216,7 +225,8 @@ def create_directory(admin_key, kb_id, name, parent_id):
     directory model dict {id, name, parent_id, ...}. Raises OwuiError on
     transport failure or non-200."""
     code, data, txt = _j("POST", "/api/v1/knowledge/%s/dirs/create" % kb_id,
-                         admin_key, {"name": name, "parent_id": parent_id})
+                         admin_key, {"name": name, "parent_id": parent_id},
+                         timeout=_index_timeout())
     if code != 200 or not isinstance(data, dict) or not data.get("id"):
         raise OwuiError("create_directory %s/%s -> HTTP %s: %s" % (kb_id, name, code, (txt or "")[:200]))
     return data
@@ -278,21 +288,9 @@ def batch_add(admin_key, kb_id, items):
     {file_id, directory_id}. Links the files to the KB. Returns the response
     dict. Raises OwuiError on non-200."""
     code, data, txt = _j("POST", "/api/v1/knowledge/%s/files/batch/add" % kb_id,
-                         admin_key, items)
+                         admin_key, items, timeout=_index_timeout())
     if code != 200:
         raise OwuiError("batch_add -> HTTP %s: %s" % (code, (txt or "")[:200]))
-    return data
-
-
-def batch_process(admin_key, files, collection_name):
-    """POST /api/v1/retrieval/process/files/batch. `files` is a list of
-    FileModel dicts (the upload_file responses). Triggers extraction + indexing
-    per file. Returns {results:[{file_id,status,error}], errors:[...]} — the
-    per-file transparency surface. Raises OwuiError on non-200."""
-    code, data, txt = _j("POST", "/api/v1/retrieval/process/files/batch",
-                         admin_key, {"files": files, "collection_name": collection_name})
-    if code != 200 or not isinstance(data, dict):
-        raise OwuiError("batch_process -> HTTP %s: %s" % (code, (txt or "")[:200]))
     return data
 
 
@@ -300,7 +298,7 @@ def list_kb_files(admin_key, kb_id):
     """GET /api/v1/knowledge/{id}/files. Returns {items:[{id,hash,filename,
     data,meta,...}], directories:[...], breadcrumbs, total}. Raises OwuiError
     on non-200."""
-    code, data, txt = _j("GET", "/api/v1/knowledge/%s/files" % kb_id, admin_key)
+    code, data, txt = _j("GET", "/api/v1/knowledge/%s/files" % kb_id, admin_key, timeout=_index_timeout())
     if code != 200 or not isinstance(data, dict):
         raise OwuiError("list_kb_files -> HTTP %s: %s" % (code, (txt or "")[:200]))
     return data

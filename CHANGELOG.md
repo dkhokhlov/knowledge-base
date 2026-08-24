@@ -33,6 +33,39 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `POST /index` + poll `GET /status`. The OWUI path-aware-dedup +
   upload-idempotency patches STAY (the gateway depends on them). Greenfield:
   no backward-compat; the KB may be drained + re-indexed freely.
+- **`/index` hardening (review + verification fixes).** `dry_run=1` now returns
+  the plan before any mutation (previously `dry_run=1&reindex_all=1` drained the
+  KB while reporting a no-op). New source subdirs are created via
+  `POST /dirs/create` before their files upload (`sync/diff`'s `directory_map`
+  only covers existing paths; without this, new-subdir files landed at KB root).
+  Modified-entry orphans use `stale_file_id` (the field OWUI returns) and are
+  merged into the final `sync/cleanup`. `walk_source` fails closed on
+  `OSError` (a dropped file would reappear as `deleted` → cleanup → data loss).
+  `upload_file` escapes the Content-Disposition filename. The unused `{}` POST
+  body is drained so HTTP/1.1 keep-alive (Caddy's reused upstream) stays
+  aligned — without it every other `/index` call 501'd with
+  `Unsupported method ('{}POST')`. `/index` no longer calls
+  `retrieval/process/files/batch`: that endpoint reads `file.data.content`
+  directly and does NOT extract, so calling it right after upload ran BEFORE
+  OWUI's per-upload background task populated content → every file reported
+  "content is empty" and no vectors were written by the call (the spurious
+  errors were also double-counted from both `results` and `errors`). OWUI's
+  upload handler (POST /files/ with `metadata.knowledge_id`) already queues the
+  full per-file pipeline — extract (markitdown-ocr) → embed into the KB
+  collection (`process_file(collection_name=knowledge_id)`) → link — so the
+  gateway now stops at `files/batch/add` (link) and lets the background task
+  embed; `/status` polls `file.data.status` (+`error`, now surfaced per file)
+  until pending drains to 0. `KB_INDEX_CHUNK` is removed (no chunked embed
+  step); `OWUI_INDEX_TIMEOUT` (default 300s) stays for the sync-protocol calls
+  (sync/diff, dirs/create, batch/add, sync/cleanup, list files). The catch-all
+  logs the traceback (transparency). `gdrive-index-bootstrap` force-recreates
+  kb-gateway after writing `GDRIVE_KB_ID` so the gateway receives the admin
+  key + KB id.
+- **`make` targets renamed to standard convention.** `clear` → `clean`
+  (teardown; keeps `./data` + `.env.local`), `clear-all` → `clean-all` (full
+  wipe), and the misused `clean` (rclone `./.gdrive-backup` retention tree) →
+  `clean-backup`. Callers (`test-e2e.sh`, `e2e-restore-creds.sh`,
+  `ocr-disable.sh`) + docs updated.
 - **`gdrive-sync` now delta-syncs with backup retention.** Switched from
   `rclone copy` (additive, never deleted) to `rclone sync --backup-dir
   --delete-after`: files removed from Drive are deleted from `./gdrive` (and
@@ -43,8 +76,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   bad/empty Drive mount empties `./gdrive` — but the removed files are
   recoverable from `./.gdrive-backup/`, not gone. The sync report gains a
   `backup-dir` header and a "Files backed up (deleted/overwritten)" line.
-  `./.gdrive-backup/` is gitignored; new `make clean` clears it (so does
-  `make clear-all`).
+  `./.gdrive-backup/` is gitignored; new `make clean-backup` clears it (so does
+  `make clean-all`).
 - **`gdrive-sync` fail-fast + empty-source guard + non-downloadable exclude
   list.** Any transfer error now aborts the run immediately (the report is still
   written with the failing files + rclone reasons) instead of continuing to the
@@ -312,7 +345,7 @@ clean-state e2e harness.
   `num_ctx 8192` loads ~20 GB, fits the GPU; a fact is searchable in ~9 s warm
   (~30 s cold, model load).
   `OPENWEBUI_MODEL` must equal `MODEL_NAME` so only one 14B instance loads.
-- **`make test-e2e` harness.** Destructive orchestrator: `clear-all` ->
+- **`make test-e2e` harness.** Destructive orchestrator: `clean-all` ->
   `bootstrap` -> restore creds -> `preflight` -> `start` -> health poll ->
   `admin-signup` -> `api-keys` -> `rag-config` -> `test`. Stashes / restores
   `OPENWEBUI_TEST_USER/PASSWORD` around the wipe; refuses (no wipe) if unset.
@@ -347,7 +380,7 @@ clean-state e2e harness.
   callers keep the logical `user:<email>` form.
 - **LLM was hitting api.openai.com.** `compose.yml` now sets `OPENAI_BASE_URL`
   on the graphiti service so extraction reaches Ollama.
-- **`clear-all` wipe.** OWUI (root) and Neo4j (neo4j uid) write bind-mount
+- **`clean-all` wipe.** OWUI (root) and Neo4j (neo4j uid) write bind-mount
   files the host user cannot delete, so `rm -rf ./data` aborted midway and left
   a stale `.env.local`. Now wipes `./data` as root via a throwaway `alpine`
   container so the wipe completes.
