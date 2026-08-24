@@ -8,6 +8,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`kb_gateway.py user-create` gains a `--json` flag.** The default output is
+  human-readable `key: value` lines (`email`, `temp_password`, `kb_api_key`,
+  `role`, `id`); pass `--json` to emit the raw JSON response instead, so a script
+  can `json.load` stdout and extract `kb_api_key` / `temp_password` without
+  parsing prose. `--email` + `--name` remain required. SKILL.md documents both.
+
 - **`make test` is fast and deterministic; the full real-gdrive drain moved to
   `make test-e2e` only.** `tests/test_09_gdrive_index.sh` (the full real-gdrive
   `/index` + drain audit — slow, coupled to the live rclone-synced corpus) is

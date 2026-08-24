@@ -167,6 +167,9 @@ def cmd_user_create(base, key, a):
     if a.role:
         body["role"] = a.role
     d = jget(base, key, "POST", "/admin/users", body)
+    if a.json:
+        print(json.dumps(d, indent=2))
+        return
     print("email:         %s" % d.get("email", "?"))
     print("temp_password: %s" % d.get("temp_password", "?"))
     print("kb_api_key:     %s" % d.get("kb_api_key", "?"))
@@ -215,6 +218,8 @@ def main():
     sp = sub.add_parser("user-create", help="ADMIN: create a new KB user + issue its KB_API_KEY")
     sp.add_argument("--email", required=True); sp.add_argument("--name", required=True)
     sp.add_argument("--role", default="user", help="role (default user; admin only may call)")
+    sp.add_argument("--json", action="store_true",
+                   help="emit the raw JSON response (scriptable) instead of human-readable fields")
 
     a = p.parse_args()
     for ef in a.env_file:

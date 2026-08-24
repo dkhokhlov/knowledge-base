@@ -275,13 +275,18 @@ generated temporary password, and their `KB_API_KEY`.
 
 ```
 python3 "$G" $E user-create --email alice@example.com --name Alice
-# admin KB_API_KEY only; prints: email, temp_password, kb_api_key, role, id
+# admin KB_API_KEY only; --email + --name are required; prints: email,
+# temp_password, kb_api_key, role, id (human-readable key: value lines).
+# Add --json to emit the raw JSON response instead (scriptable: parse
+# kb_api_key / temp_password with json.load).
 ```
 
 Rules:
 - **Admin-only.** `KB_API_KEY` must resolve to an Open WebUI `admin`. Non-admin
   → `403`. Unsupported image (missing provisioning endpoints) → `501`.
 - **What is returned:** `email`, `temp_password`, `kb_api_key`, `role`, `id`.
+  Default output is human-readable `key: value` lines; pass `--json` for the raw
+  JSON response (so a script can `json.load` stdout and extract `kb_api_key`).
 - **Relay to the requesting administrator ONLY.** Do NOT persist the
   returned `temp_password` or `kb_api_key` anywhere (the gateway never persists
   them; they exist only in this one response). The admin hands them to the new
