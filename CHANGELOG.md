@@ -30,6 +30,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `clean-all && bootstrap` to recompute the first-user email (or edit
   `.env.local` by hand). The kb skill is unaffected (auth via `KB_API_KEY`, not
   user/password); only illustrative `agent@local.test` prose was generalized.
+- **`MARKITDOWN_OCR_PROVISIONED` moved from `.env.local` to `.env`** (it is a
+  non-sensitive state marker, not a secret; `.env.local` is for secrets).
+  `make ocr-bootstrap` now writes it to `.env`; `make ocr-disable` and
+  `make clean-all` remove it from `.env` (clean-all drops it so a post-wipe
+  `make start` does not add `--profile ocr` against a wiped `OCR_SERVICE_TOKEN`).
+  `OCR_SERVICE_TOKEN` stays in `.env.local`. `preflight.sh` now sources `.env`
+  for the OCR-provisioned check (was `.env.local`-only).
+- **`HOST_UID` / `HOST_GID` moved from `.env` to `.env.local`** (per-machine
+  values, not machine-independent config). `make bootstrap` now generates them
+  into `.env.local` from the current user's `id -u` / `id -g` (kept if already
+  set — override there if the gdrive owner uid:gid differs; `make clean-all`
+  wipes `.env.local` and the next bootstrap re-derives them). Removed from
+  `.env.example`. `compose.yml` interpolates them from the shell env (the
+  container-creating targets source `.env.local`); absent → default 1000:1000.
 
 - **`kb_gateway.py user-create` gains a `--json` flag.** The default output is
   human-readable `key: value` lines (`email`, `temp_password`, `kb_api_key`,

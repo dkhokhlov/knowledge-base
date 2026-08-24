@@ -153,7 +153,7 @@ shell-caddy: ## Shell into the Caddy gateway container
 clean: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.local.
 	@$(COMPOSE) down --remove-orphans
 
-clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + remove .env.local. Keeps .env and configs.
+clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + remove .env.local. Keeps .env config (drops the OCR marker) and configs.
 	@$(COMPOSE) down --remove-orphans --volumes
 	@# Remove ./data as root via a throwaway container: OWUI (root) and Neo4j
 	@# (neo4j uid) write bind-mount files the host user cannot delete, so a host
@@ -161,7 +161,11 @@ clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + remove .env.
 	@docker run --rm -v "$(CURDIR)/$(DATA_DIR):/data" alpine sh -c "rm -rf /data/*"
 	@rm -f .env.local
 	@rm -rf ./.gdrive-backup
-	@echo "Wiped containers, ./data, ./.gdrive-backup, and .env.local. .env, graphiti/config.yaml, caddy/Caddyfile are preserved."
+	@# Drop the OCR-provisioned marker from .env (it lives in .env, which
+	@# clean-all otherwise preserves; without this a `make start` would add
+	@# --profile ocr against a wiped OCR_SERVICE_TOKEN). .env config is kept.
+	@if [ -f .env ]; then sed -i '/^MARKITDOWN_OCR_PROVISIONED=/d' .env; fi
+	@echo "Wiped containers, ./data, ./.gdrive-backup, and .env.local. .env, graphiti/config.yaml, caddy/Caddyfile are preserved (the OCR marker is dropped from .env)."
 
 clean-backup: ## Remove the rclone --backup-dir retention tree (./.gdrive-backup). Non-destructive: does not touch the stack, ./data, or .env.local.
 	@rm -rf ./.gdrive-backup

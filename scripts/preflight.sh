@@ -113,13 +113,13 @@ else
 fi
 
 # --- markitdown-ocr provisioned? check engine drift + OCR model -------------
-# Only runs when MARKITDOWN_OCR_PROVISIONED=1 in .env.local. Reads
+# Only runs when MARKITDOWN_OCR_PROVISIONED=1 in .env. Reads
 # rag.content_extraction_engine straight from webui.db (read-only) and WARNs if
 # it is not "external" (drift -> OWUI uses its default loaders, not the engine).
 # Also WARNs if the OCR model is not pulled in host Ollama (ingest would orphan).
 ocr_prov=0
 (
-  set -a; . ./.env.local 2>/dev/null; set +a
+  set -a; . ./.env 2>/dev/null; . ./.env.local 2>/dev/null; set +a
   [ "${MARKITDOWN_OCR_PROVISIONED:-0}" = "1" ] && echo yes
 ) | grep -q yes && ocr_prov=1
 

@@ -102,6 +102,13 @@ KB_DOMAIN="${KB_DOMAIN:-$(. ./.env 2>/dev/null; printf '%s' "${KB_DOMAIN:-local.
 ensure_value .env.local OPENWEBUI_FIRST_USER "admin@${KB_DOMAIN}"
 ensure_secret .env.local OPENWEBUI_FIRST_PASSWORD
 
+# kb-gateway run user: derive from the current user (id -u/id -g) so the
+# read-only ./gdrive bind mount (owner-only from rclone) is readable. Kept if
+# already set (operator override); clean-all wipes .env.local so a fresh
+# bootstrap re-derives from the current user.
+ensure_value .env.local HOST_UID "$(id -u)"
+ensure_value .env.local HOST_GID "$(id -g)"
+
 chmod 600 .env.local
 printf '  set .env.local permissions to 0600\n'
 

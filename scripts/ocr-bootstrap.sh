@@ -10,7 +10,7 @@
 #   4. wait for its /health (via the compose healthcheck) to go green;
 #   5. run `make ocr-config` (set CONTENT_EXTRACTION_ENGINE=external + URL +
 #      API key in the OWUI DB);
-#   6. write MARKITDOWN_OCR_PROVISIONED=1 to .env.local ONLY on success, so
+#   6. write MARKITDOWN_OCR_PROVISIONED=1 to .env ONLY on success, so
 #      `make start`/`make restart` bring the service back with --profile ocr.
 #
 # Preconditions:
@@ -59,6 +59,31 @@ PY
     printf '%s=%s\n' "$key" "$val" >> .env.local
   fi
   chmod 600 .env.local
+}
+
+# Set key=val in .env (replace if present, else append). For non-secret state
+# markers (MARKITDOWN_OCR_PROVISIONED) that belong in .env, not .env.local.
+# Preserves file perms: open(f,"w") rewrites the existing inode.
+update_env() {
+  local key="$1" val="$2"
+  if grep -q "^${key}=" .env; then
+    python3 - "$key" "$val" <<'PY'
+import sys
+key, val = sys.argv[1], sys.argv[2]
+f = ".env"
+out = []; seen = False
+for ln in open(f).read().splitlines():
+    if ln.startswith(key + "="):
+        out.append(key + "=" + val); seen = True
+    else:
+        out.append(ln)
+if not seen:
+    out.append(key + "=" + val)
+open(f, "w").write("\n".join(out) + "\n")
+PY
+  else
+    printf '%s=%s\n' "$key" "$val" >> .env
+  fi
 }
 
 if [ -z "${OCR_SERVICE_TOKEN:-}" ]; then
@@ -110,6 +135,6 @@ printf '==> configuring Open WebUI external extraction engine\n'
 ./scripts/ocr-config.sh enable
 
 # Step 6: write the marker so `make start`/`make restart` add --profile ocr.
-update_env_local MARKITDOWN_OCR_PROVISIONED 1
+update_env MARKITDOWN_OCR_PROVISIONED 1
 printf '\nDone. markitdown-ocr is OWUI'\''s external extraction engine.\n'
 printf 'Logs: docker logs -f kb-markitdown-ocr   |   Disable: make ocr-disable\n'

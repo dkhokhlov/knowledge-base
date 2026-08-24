@@ -2,7 +2,7 @@
 # Disable the markitdown-ocr external extraction engine (no KB reset):
 #   1. scripts/ocr-config.sh disable — clears CONTENT_EXTRACTION_ENGINE +
 #      EXTERNAL_DOCUMENT_LOADER_URL/API_KEY/HEADERS in the OWUI DB AND removes
-#      the MARKITDOWN_OCR_PROVISIONED marker from .env.local;
+#      the MARKITDOWN_OCR_PROVISIONED marker from .env;
 #   2. recreate openwebui so it reloads the cleared extraction config.
 #
 # New uploads then use OWUI's default loaders. Existing OCR'd members keep

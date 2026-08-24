@@ -124,7 +124,7 @@ else:
     print("OK    external extraction engine CLEARED (OWUI default loaders)")
 PY
 
-# Disable also drops the MARKITDOWN_OCR_PROVISIONED marker from .env.local so
+# Disable also drops the MARKITDOWN_OCR_PROVISIONED marker from .env so
 # `make start`/`make restart` no longer add --profile ocr. (Enable writes the
 # marker in ocr-bootstrap.sh, after the service is healthy + this config sticks.)
 # This is a bash heredoc (not a Makefile inline heredoc): GNU make splits each
@@ -133,9 +133,9 @@ PY
 if [ "$MODE" = disable ]; then
   python3 - <<'PY'
 import os
-key = "MARKITDOWN_OCR_PROVISIONED"; f = ".env.local"
+key = "MARKITDOWN_OCR_PROVISIONED"; f = ".env"
 out = [ln for ln in open(f).read().splitlines() if not ln.startswith(key + "=")]
-open(f, "w").write("\n".join(out) + "\n"); os.chmod(f, 0o600)
-print("OK    removed %s marker from .env.local" % key)
+open(f, "w").write("\n".join(out) + "\n")
+print("OK    removed %s marker from .env" % key)
 PY
 fi

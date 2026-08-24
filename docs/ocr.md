@@ -81,7 +81,7 @@ this branch matters for direct uploads, not the synced set.)
    `EXTERNAL_DOCUMENT_LOADER_URL=http://markitdown-ocr:8080` + the API key in
    the OWUI DB (`/api/v1/retrieval/config/update`, merge semantics), then
    read-back-asserts each key stuck;
-6. writes `MARKITDOWN_OCR_PROVISIONED=1` to `.env.local` **only on success**.
+6. writes `MARKITDOWN_OCR_PROVISIONED=1` to `.env` **only on success**.
 
 `make start` / `make restart` then add `--profile ocr` automatically when the
 marker is set. Idempotent. **No fallback:** if any step fails, the marker is NOT

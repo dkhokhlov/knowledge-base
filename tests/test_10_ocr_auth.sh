@@ -12,7 +12,7 @@
 # printed or passed on the command line.
 #
 # Tolerant: SKIPs (passes with a notice) when markitdown-ocr is not provisioned
-# (MARKITDOWN_OCR_PROVISIONED!=1 in .env.local) so `make test` runs clean in a
+# (MARKITDOWN_OCR_PROVISIONED!=1 in .env) so `make test` runs clean in a
 # bare environment.
 set -u
 . "$(dirname "$0")/lib.sh"
