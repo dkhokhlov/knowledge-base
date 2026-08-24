@@ -237,18 +237,26 @@ next cycle (≤ `GDRIVE_INDEX_INTERVAL`).
 
 `make gdrive-status` reports the indexer container state, oikb `/health`
 (source status, last sync), `indexed` (OWUI KB file count, read with the agent
-key) vs `source` (allowlisted `gdrive/` file count), and an ETA while the sync
-is in progress. `file_count` is read from the list endpoint
+key) vs `source` (allowlisted `gdrive/` file count), `pending` (files linked to
+the KB but not yet extracted by markitdown-ocr — `GET /api/v1/knowledge/{id}/files/pending`),
+and an ETA while the sync is in progress. `file_count` is read from the list endpoint
 (`GET /api/v1/knowledge/`); the detail endpoint has neither `file_count` nor a
-populated `files` array. The oikb source line also surfaces per-cycle
-`errors`/`warnings` (e.g. a file failing to link — OWUI rejects it with `400`)
-as `errors=N (<first error>)`, so a `partial` plateau is diagnosable, not mute.
+populated `files` array. `file_count` counts only files LINKED to the KB, not
+files whose text is extracted — a file can be linked and still sit at
+`data.status=pending` while extraction catches up; the `pending` line surfaces
+those (a long age alone is not a hang — extraction runs one file at a time, so
+age also grows while the pipeline is busy on other files; cross-check
+`docker logs kb-markitdown-ocr` before assuming a wedge). The oikb source line
+also surfaces per-cycle `errors`/`warnings` (e.g. a file failing to link — OWUI
+rejects it with `400`) as `errors=N (<first error>)`, so a `partial` plateau is
+diagnosable, not mute.
 
 ### File types and skips
 
-`.oikb.yaml` allowlists office/text documents + source-code extensions (single-
-star bracket patterns `*.[xX][yY]...` for case-insensitive `fnmatch` at any
-depth; `**/*` would miss root-level files — fnmatch has no globstar). Binaries
+`.oikb.yaml` allowlists office/text documents only — source code is handled by
+open-codebase-index (single-star bracket patterns `*.[xX][yY]...` for
+case-insensitive `fnmatch` at any depth; `**/*` would miss root-level files —
+fnmatch has no globstar). Binaries
 (`.npy`, audio/video, images, archives, `.svg`/`.drawio`) are simply not listed
 → excluded. `OIKB_MAX_SIZE` (default 100mb) skips oversized files. OWUI dedups
 by content hash: a file whose content already exists in the KB is rejected with
@@ -337,7 +345,7 @@ dependency is down.
 | `ocr-disable` | clear the external engine + remove the marker + recreate `openwebui` (no KB reset; existing OCR'd members unchanged until re-ingested) |
 | `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./gdrive-exclude.conf` (`[<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections |
 | `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, generate `OIKB_API_KEY`, write `GDRIVE_KB_ID` + `OIKB_API_KEY` to `.env.local`, start the indexer (run after `make api-keys`; idempotent) |
-| `gdrive-status` | gdrive RAG indexing status: indexer + oikb source health, indexed vs source counts, ETA if syncing |
+| `gdrive-status` | gdrive RAG indexing status: indexer + oikb source health, indexed vs source counts, pending (linked-not-extracted), ETA if syncing |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clear` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
 | `clear-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + delete `.env.local` |
