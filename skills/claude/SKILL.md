@@ -52,6 +52,12 @@ them). Pure vector retrieval — no LLM call. Lower distance = better match
 (cosine; 0 best). Wrapper: `retrieve <kb-id> "<query>" [--k N] [--no-hybrid]`
 (`--k` default 4; `--no-hybrid` = pure vector, no hybrid search).
 
+- **To confirm a specific file is searchable**, retrieve by its **literal
+  filename stem** with a higher `--k` (e.g. 20). A generic concept query can be
+  outranked by topically-similar documents and report not-found even after the
+  file is fully indexed and extracted. The filename stem is the discriminator
+  that ranks the target file first.
+
 ### Chat (RAG)
 
 `POST /memory/rag` (via the kb-gateway) — body
