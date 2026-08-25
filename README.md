@@ -216,11 +216,11 @@ Measured warm on the GPU host (one 14B ctx-baked model loaded). The first call a
 | Operation | Endpoint | Median latency |
 |---|---|---|
 | add (queue -> 202, episode queued) | `POST /memory/add` | ~54 ms |
-| retrieve facts (search) | `POST /memory/search` | ~89 ms |
+| retrieve facts | `POST /memory/retrieve` | ~89 ms |
 | fetch raw episodes | `GET /memory/episodes?max=20` | ~57 ms |
-| add -> fact searchable (async extraction, warm model) | add + poll `/memory/search` | ~9 s |
+| add -> fact searchable (async extraction, warm model) | add + poll `/memory/retrieve` | ~9 s |
 
-- `/memory/search` returns **facts** (`entity_edges`; fact text + `valid_at` / `invalid_at`) via Graphiti RAG: the query is embedded (`nomic-embed-text`), matched by vector similarity over nodes, then refined by graph traversal. The original `add` text is not returned.
+- `/memory/retrieve` returns **facts** (`entity_edges`; fact text + `valid_at` / `invalid_at`) via Graphiti RAG: the query is embedded (`nomic-embed-text`), matched by vector similarity over nodes, then refined by graph traversal. The original `add` text is not returned.
 - `/memory/episodes` returns the raw **episodes**: the original `add` texts, verbatim, in order. No embedding, no LLM, no graph traversal.
 
 ### RAG (Open Web UI)
@@ -275,7 +275,7 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 
 - Embedding dimensions must be 768 for [`nomic-embed-text`][nomic-embed-text]. Change `EMBEDDER_MODEL` and `EMBEDDER_DIMENSIONS` together if you swap models. The bootstrap reads `EMBEDDER_DIMENSIONS` to set both the embedder and the vector index dim (Graphiti defaults to 1024, which would reject 768-dim writes).
 - [Graphiti][graphiti] extraction uses **`json_schema` structured outputs** over Chat Completions. The image's default client targets the OpenAI Responses API (Ollama cannot satisfy it — extraction silently stores nothing), so `graphiti/bootstrap.py` injects the stock `OpenAIGenericClient` (>= 0.29 defaults to `json_schema`, which Ollama enforces server-side) at `temperature=0`. With plain `json_object` mode a 14B local model echoes the response schema back as values (Neo4j then rejects the nested MAP); `json_schema` prevents that.
-- Extraction is **async**: `POST /memory/add` returns `200` as soon as the episode is queued, but each episode runs several LLM extraction calls before a fact is searchable. With the ctx-baked model (`num_ctx=8192`, ~20 GB, fits the GPU) a fact is searchable in ~9 s warm (~30 s cold, model load); do not treat a bare `200` (or even a stored episode) as proof of extraction — poll `/memory/search` for the probe.
+- Extraction is **async**: `POST /memory/add` returns `200` as soon as the episode is queued, but each episode runs several LLM extraction calls before a fact is searchable. With the ctx-baked model (`num_ctx=8192`, ~20 GB, fits the GPU) a fact is searchable in ~9 s warm (~30 s cold, model load); do not treat a bare `200` (or even a stored episode) as proof of extraction — poll `/memory/retrieve` for the probe.
 - The extraction LLM (`GRAPHITI_MODEL`, built from `OLLAMA_MODEL_BASE`) **must be a non-reasoning model.** Graphiti 0.29.3 calls it with `max_tokens=16384`; a reasoning model (one with a thinking chain) spends the budget on its thinking and emits no `content` (`finish_reason=length`) → `json.loads('')` → extraction silently stores nothing, even with `json_schema` enforcement. `qwen2.5:14b-ctx8192` (the default `GRAPHITI_MODEL`) is non-reasoning and tested reliable. Ollama's `/v1/chat/completions` does not honor `think=false`, so suppressing reasoning that way is not an option.
 - The `/v1` endpoint ignores `num_ctx` in the request body, so `make pull-models` bakes `OLLAMA_MODEL_CONTEXT` (default `8192`) into `GRAPHITI_MODEL` via a `PARAMETER num_ctx` Modelfile (see [`Modelfile_qwen2_5`](Modelfile_qwen2_5) and [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant)). The remote GPU host (~22.5 GB VRAM) cannot hold the stock 14B at the default 32k context (~53 GB) — it spills to CPU and extraction crawls; `num_ctx=8192` loads ~20 GB and fits. `OPENWEBUI_MODEL` (chat) and `GRAPHITI_MODEL` (extraction) are independent; the defaults are equal so one 14B instance loads, but they may differ. `make preflight` verifies the extraction model exists and its `num_ctx` matches.
 - There are no shared write groups. Each account writes to its own personal group (logical `user:<email>`, stored by Graphiti as `user-<sanitized-email>` e.g. `user-agent-local-test`); reads span all groups, so cross-account knowledge is shared read-only.

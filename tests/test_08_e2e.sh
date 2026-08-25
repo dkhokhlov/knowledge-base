@@ -2,7 +2,7 @@
 # System integration test: comprehensive kb-gateway end-to-end surface.
 # Drives skills/claude/scripts/kb_gateway.py through every gateway endpoint
 # the agent surface exposes:
-#   whoami, status, groups, add, search, episodes, delete-edge,
+#   whoami, status, groups, add, retrieve, episodes, delete-edge,
 #   delete-episode, forget
 # Exercises delete-edge (via a fact uuid, since /memory/episodes does not
 # serialize entity_edges) and delete-episode, which test_06 does not cover.
@@ -66,24 +66,24 @@ section "fact extracted (searchable after async extraction)"
 # first cryostat fact to appear IS this add's.
 fact_found=0
 for i in $(seq 1 42); do
-  if kbrun $KB search "cryostat lattice-D" --k 5 2>/dev/null | grep -qE "cryostat|lattice-D"; then fact_found=1; break; fi
+  if kbrun $KB retrieve "cryostat lattice-D" --k 5 2>/dev/null | grep -qE "cryostat|lattice-D"; then fact_found=1; break; fi
   sleep 10
 done
-if [ "$fact_found" = 1 ]; then pass "fact extracted (cryostat in /memory/search)"; else fail "no fact in 420s (cryostat not searchable)"; fi
+if [ "$fact_found" = 1 ]; then pass "fact extracted (cryostat in /memory/retrieve)"; else fail "no fact in 420s (cryostat not searchable)"; fi
 
 section "delete-edge (fact uuid) + delete-episode"
 # Pick the first fact whose JSON contains the stable noun "cryostat" (the
 # group was emptied above, so this is this add's fact). Gating on fact_found
 # avoids f[0] being an unrelated fact when the probe is absent. The run-id
 # number is NOT used (extraction sometimes drops it).
-FACT_UUID=$(kbrun $KB search "cryostat lattice-D" --k 5 2>/dev/null | python3 -c 'import sys,json; f=json.load(sys.stdin).get("facts") or []; print(next((x["uuid"] for x in f if "cryostat" in json.dumps(x).lower()), ""))' 2>/dev/null)
+FACT_UUID=$(kbrun $KB retrieve "cryostat lattice-D" --k 5 2>/dev/null | python3 -c 'import sys,json; f=json.load(sys.stdin).get("facts") or []; print(next((x["uuid"] for x in f if "cryostat" in json.dumps(x).lower()), ""))' 2>/dev/null)
 EP_UUID=$(kbrun $KB episodes --max 20 2>/dev/null | python3 -c 'import sys,json; eps=json.load(sys.stdin).get("episodes") or []; print(next((e["uuid"] for e in eps if str(e.get("name","")).startswith("e2e-")), eps[0]["uuid"] if eps else ""))' 2>/dev/null)
 if [ "$fact_found" = 1 ] && [ -n "$FACT_UUID" ]; then
   DELOUT=$(kbrun $KB delete-edge "$FACT_UUID") || true
   printf '%s' "$DELOUT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("uuid") else 1)' && pass "delete-edge ${FACT_UUID}" || fail "delete-edge failed"
-  # verify the edge is gone from search
-  kbrun $KB search "$RID" --k 5 2>/dev/null | grep -q "$FACT_UUID" \
-    && fail "delete-edge: ${FACT_UUID} still in search" \
+  # verify the edge is gone from retrieve
+  kbrun $KB retrieve "$RID" --k 5 2>/dev/null | grep -q "$FACT_UUID" \
+    && fail "delete-edge: ${FACT_UUID} still in retrieve" \
     || pass "delete-edge verified gone"
 else
   fail "no probe fact uuid to delete-edge (fact_found=${fact_found})"

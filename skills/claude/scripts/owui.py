@@ -138,7 +138,7 @@ def cmd_search_kbs(base, key, a):
     print(json.dumps({"kbs": kbs}))
 
 
-def cmd_search(base, key, a):
+def cmd_retrieve(base, key, a):
     body = {"collection_names": [a.kb_id], "query": a.query, "k": a.k, "hybrid": not a.no_hybrid}
     d = jget(base, key, "POST", "/api/v1/retrieval/query/collection", body)
     hits = flatten_chroma(d)
@@ -542,7 +542,7 @@ def cmd_index_projects(base, key, a):
     print(json.dumps(result))
 
 
-def cmd_search_projects(base, key, a):
+def cmd_retrieve_projects(base, key, a):
     me = _whoami(base, key)
     account = a.account or me.get("email", "?")
     d = jget(base, key, "GET", "/api/v1/knowledge/")
@@ -640,7 +640,7 @@ def main():
     sp = sub.add_parser("kb", help="print one knowledge base metadata"); sp.add_argument("id")
     sp = sub.add_parser("search-kbs", help="search KB names"); sp.add_argument("query")
 
-    sp = sub.add_parser("search", help="semantic-search documents in a KB")
+    sp = sub.add_parser("retrieve", help="retrieve documents from a KB (semantic)")
     sp.add_argument("kb_id"); sp.add_argument("query")
     sp.add_argument("--k", type=int, default=4); sp.add_argument("--no-hybrid", action="store_true")
 
@@ -658,8 +658,8 @@ def main():
     sp.add_argument("--wait", action="store_true", help="poll until the drain completes (deadline 600s)")
     sp.add_argument("--no-cleanup", action="store_true", help="do not delete KB files whose source is gone")
 
-    sp = sub.add_parser("search-projects",
-                        help="search across project-memory KBs (filters: --host/--project/--account/--kb-glob)")
+    sp = sub.add_parser("retrieve-projects",
+                        help="retrieve across project-memory KBs (filters: --host/--project/--account/--kb-glob)")
     sp.add_argument("query")
     sp.add_argument("--host", default=None, help="filter by host segment (name starts with <host>--)")
     sp.add_argument("--project", default=None, help="substring filter on the project part of the KB name")
@@ -681,8 +681,8 @@ def main():
 
     {
         "whoami": cmd_whoami, "kbs": cmd_kbs, "kb": cmd_kb, "search-kbs": cmd_search_kbs,
-        "search": cmd_search, "rag": cmd_rag, "file": cmd_file,
-        "index-projects": cmd_index_projects, "search-projects": cmd_search_projects,
+        "retrieve": cmd_retrieve, "rag": cmd_rag, "file": cmd_file,
+        "index-projects": cmd_index_projects, "retrieve-projects": cmd_retrieve_projects,
         "status-projects": cmd_status_projects,
     }[a.cmd](base, key, a)
 

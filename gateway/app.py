@@ -200,11 +200,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/memory/add" and method == "POST":
             identity = self._auth()
             return self._add(identity, self._read_body())
-        if path == "/memory/search" and method == "POST":
+        if path == "/memory/retrieve" and method == "POST":
             self._auth()
             body = self._read_body()
             query = _req(body, "query")
-            return self._search(query, body)
+            return self._retrieve(query, body)
         if path == "/memory/forget" and method == "POST":
             identity = self._auth()
             return self._forget(identity, self._read_body())
@@ -249,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
         graphiti.add_memory(group, name, text, source_description)
         self._ok({"ok": True, "group": group})
 
-    def _search(self, query, body):
+    def _retrieve(self, query, body):
         max_facts = int(body.get("k") or 10)
         groups = neo4j.discover_groups()
         facts = graphiti.search_facts(groups, query, max_facts)
@@ -908,7 +908,7 @@ OPENAPI_SPEC = {
         "/memory/status": {"get": {"summary": "Graphiti status", "security": [{"bearerAuth": []}]}},
         "/memory/episodes": {"get": {"summary": "List episodes", "security": [{"bearerAuth": []}]}},
         "/memory/add": {"post": {"summary": "Add memory", "security": [{"bearerAuth": []}]}},
-        "/memory/search": {"post": {"summary": "Search facts", "security": [{"bearerAuth": []}]}},
+        "/memory/retrieve": {"post": {"summary": "Retrieve facts", "security": [{"bearerAuth": []}]}},
         "/memory/forget": {"post": {"summary": "Clear a Group", "security": [{"bearerAuth": []}]}},
         "/memory/delete-edge": {"post": {"summary": "Delete an edge", "security": [{"bearerAuth": []}]}},
         "/memory/delete-episode": {"post": {"summary": "Delete an episode", "security": [{"bearerAuth": []}]}},

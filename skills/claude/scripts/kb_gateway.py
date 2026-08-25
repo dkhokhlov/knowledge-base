@@ -94,8 +94,8 @@ def cmd_add(base, key, a):
     print(json.dumps(d))
 
 
-def cmd_search(base, key, a):
-    d = jget(base, key, "POST", "/memory/search", {"query": a.query, "k": a.k})
+def cmd_retrieve(base, key, a):
+    d = jget(base, key, "POST", "/memory/retrieve", {"query": a.query, "k": a.k})
     print(json.dumps({"facts": d.get("facts", [])}))
 
 
@@ -140,7 +140,7 @@ def main():
     sp.add_argument("--group", help="only your own personal group_id is accepted; any other group -> 403 (no shared write groups). Default: your personal user:<email>.")
     sp.add_argument("--source-description", help="optional source description")
 
-    sp = sub.add_parser("search", help="search facts across ALL groups (read-only)")
+    sp = sub.add_parser("retrieve", help="retrieve facts across ALL groups (read-only)")
     sp.add_argument("query"); sp.add_argument("--k", type=int, default=10)
 
     sp = sub.add_parser("episodes", help="list episodes across ALL groups (read-only)")
@@ -161,7 +161,7 @@ def main():
     key = api_key()
 
     {
-        "whoami": cmd_whoami, "groups": cmd_groups, "add": cmd_add, "search": cmd_search,
+        "whoami": cmd_whoami, "groups": cmd_groups, "add": cmd_add, "retrieve": cmd_retrieve,
         "episodes": cmd_episodes, "status": cmd_status, "forget": cmd_forget,
         "delete-edge": cmd_delete_edge, "delete-episode": cmd_delete_episode,
     }[a.cmd](base, key, a)

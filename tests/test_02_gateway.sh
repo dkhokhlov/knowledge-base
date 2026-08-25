@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # System integration test: kb-gateway read path. Exercises Caddy -> kb-gateway
 # -> graphiti (REST) -> Neo4j with the admin KB_API_KEY: whoami (identity from
-# key), groups (Neo4j discovery), search (read-all facts), episodes, status.
+# key), groups (Neo4j discovery), retrieve (read-all facts), episodes, status.
 # Read-only; no graph writes.
 set -u
 . "$(dirname "$0")/lib.sh"
@@ -44,9 +44,9 @@ section "kb-gateway groups (Neo4j group discovery)"
 code=$(code GET /memory/groups)
 [ "$code" = 200 ] && pass "groups -> 200" || fail "groups -> HTTP $code (want 200)"
 
-section "kb-gateway search (read-all facts across all groups)"
-code=$(code POST /memory/search '{"query":"bootstrap test probe","k":5}')
-[ "$code" = 200 ] && pass "search -> 200" || fail "search -> HTTP $code (want 200)"
+section "kb-gateway retrieve (read-all facts across all groups)"
+code=$(code POST /memory/retrieve '{"query":"bootstrap test probe","k":5}')
+[ "$code" = 200 ] && pass "retrieve -> 200" || fail "retrieve -> HTTP $code (want 200)"
 
 section "kb-gateway episodes (read-all)"
 code=$(code GET /memory/episodes)

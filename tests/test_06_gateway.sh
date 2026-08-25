@@ -61,28 +61,28 @@ section "write persisted (fact searchable after async extraction)"
 # add returns 202. A bare 202 is not proof; an episode alone is not proof
 # (extraction can store the episode yet produce no facts — the OpenAIClient
 # failure mode). The real signal is a FACT whose text contains the stable
-# noun "cryostat"/"lattice-D" in /memory/search, which proves the
+# noun "cryostat"/"lattice-D" in /memory/retrieve, which proves the
 # OpenAIGenericClient extracted entities+facts. Poll up to 5 min. The agent
 # group is empty at test start (fresh e2e, or a prior run's cleanup), so the
 # first cryostat fact IS this add's.
 fact_found=0; ep_found=0
 for i in $(seq 1 60); do
-  if [ "$fact_found" != 1 ] && curl -s "$G/memory/search" -H "$USER" -H "$CT" -d "{\"query\":\"cryostat lattice-D\",\"k\":5}" | grep -qE "cryostat|lattice-D"; then fact_found=1; fi
+  if [ "$fact_found" != 1 ] && curl -s "$G/memory/retrieve" -H "$USER" -H "$CT" -d "{\"query\":\"cryostat lattice-D\",\"k\":5}" | grep -qE "cryostat|lattice-D"; then fact_found=1; fi
   if [ "$ep_found" != 1 ] && curl -s "$G/memory/episodes?max=50" -H "$USER" | grep -q "t06-${TS}"; then ep_found=1; fi
   [ "$fact_found" = 1 ] && break
   sleep 5
 done
 if [ "$fact_found" = 1 ]; then
-  pass "fact extracted (cryostat in /memory/search)"
+  pass "fact extracted (cryostat in /memory/retrieve)"
 elif [ "$ep_found" = 1 ]; then
   fail "episode stored but no fact in 300s (t06-${TS} in episodes only) — extraction failed"
 else
   fail "add returned 200 but cryostat never searchable in 300s — memory write silently failed"
 fi
 
-section "read-all (agent search + episodes across all groups)"
-code=$(gwcode "$USER" POST /memory/search '{"query":"t06 probe","k":5}')
-[ "$code" = 200 ] && pass "agent search -> 200" || fail "agent search -> $code (want 200)"
+section "read-all (agent retrieve + episodes across all groups)"
+code=$(gwcode "$USER" POST /memory/retrieve '{"query":"t06 probe","k":5}')
+[ "$code" = 200 ] && pass "agent retrieve -> 200" || fail "agent retrieve -> $code (want 200)"
 code=$(gwcode "$USER" GET /memory/episodes)
 [ "$code" = 200 ] && pass "agent episodes -> 200" || fail "agent episodes -> $code (want 200)"
 
