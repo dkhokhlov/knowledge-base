@@ -10,11 +10,11 @@ The gateway is fronted by Caddy at KB_HOST: memory/facts under /memory/*, admin
 provisioning at POST /admin/users, aggregated health at /health. OWUI REST is at
 the same KB_HOST root (/api/*). One URL, one key.
 
-Config resolution priority (same as owui.py):
-    CLI flags  >  environment variables  >  --env-file (repeatable; e.g. .env then .env.local)
+Config: the wrapper is a thin client. It reads ONLY two env vars from the
+shell environment — KB_HOST and KB_API_KEY. It does not read .env / .env.local
+files (set both in your shell before invoking it).
 
-Env vars: KB_HOST (or KB_HOST_PORT), KB_API_KEY
-          (fallback OPENWEBUI_USER_API_KEY).
+Env vars: KB_HOST, KB_API_KEY.
 """
 import argparse
 import json
@@ -25,48 +25,17 @@ import urllib.parse
 import urllib.request
 
 
-def load_env_file(path):
-    """Parse KEY=VALUE lines from a .env-style file into os.environ, OVERRIDING
-    any inherited value (explicit --env-file wins over the shell env; a later
-    --env-file wins over an earlier one). No ${} interpolation (values literal)."""
-    if not path or not os.path.exists(path):
-        return
-    with open(path) as f:
-        for ln in f:
-            s = ln.strip()
-            if not s or s.startswith("#") or "=" not in s:
-                continue
-            k, v = s.split("=", 1)
-            k = k.strip()
-            v = v.strip()
-            if v and v[0] in ("'", '"'):
-                q = v[0]
-                end = v.find(q, 1)
-                v = v[1:end] if end != -1 else v[1:]
-            elif "#" in v:
-                v = v.split("#", 1)[0].strip()
-            os.environ[k] = v
-
-
-def base_url(args):
-    if args.base_url:
-        return args.base_url.rstrip("/")
+def base_url():
     if os.environ.get("KB_HOST"):
         return os.environ["KB_HOST"].rstrip("/")
-    if os.environ.get("KB_HOST_PORT"):
-        return "http://localhost:%s" % os.environ["KB_HOST_PORT"]
-    sys.exit("FAIL  no KB_HOST: pass --base-url or set KB_HOST "
-             "(or KB_HOST_PORT, or --env-file)")
+    sys.exit("FAIL  no KB_HOST: set KB_HOST in your shell env "
+             "(e.g. export KB_HOST=http://localhost:3000)")
 
 
-def api_key(args):
-    if args.key:
-        return args.key
+def api_key():
     if os.environ.get("KB_API_KEY"):
         return os.environ["KB_API_KEY"]
-    if os.environ.get("OPENWEBUI_USER_API_KEY"):
-        return os.environ["OPENWEBUI_USER_API_KEY"]
-    sys.exit("FAIL  no API key: pass --key or set KB_API_KEY (or --env-file)")
+    sys.exit("FAIL  no API key: set KB_API_KEY in your shell env")
 
 
 def call(base, key, method, path, body=None, query=None):
@@ -173,10 +142,6 @@ def main():
         description="Thin REST client for the kb-gateway (Graphiti memory + "
                     "admin user provisioning). Authorized server-side via KB_API_KEY.",
     )
-    p.add_argument("--base-url", help="KB_HOST URL (e.g. http://localhost:3000)")
-    p.add_argument("--key", help="API key (KB_API_KEY)")
-    p.add_argument("--env-file", action="append", default=[],
-                   help=".env-style file to load KB_HOST + key from (repeatable)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("whoami", help="print the key's email + role (identity from the gateway)")
@@ -208,10 +173,8 @@ def main():
     sp.add_argument("--role", default="user", help="role (default user; admin only may call)")
 
     a = p.parse_args()
-    for ef in a.env_file:
-        load_env_file(ef)
-    base = base_url(a)
-    key = api_key(a)
+    base = base_url()
+    key = api_key()
 
     {
         "whoami": cmd_whoami, "groups": cmd_groups, "add": cmd_add, "search": cmd_search,

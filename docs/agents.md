@@ -10,8 +10,8 @@ under `/memory/*`, `POST /admin/users`, and `/health`. An agent holds only
 
 | Surface | Path | Auth | Use |
 |---|---|---|---|
-| Open WebUI REST | `KB_HOST/api/*` | `Bearer <KB_API_KEY>` | chat, RAG, files, knowledge bases |
-| kb-gateway memory | `KB_HOST/memory/*` | `Bearer <KB_API_KEY>` | Graphiti facts: whoami, groups, add, search, episodes, status, forget, delete-edge, delete-episode |
+| Open WebUI REST | `KB_HOST/api/*` | `Bearer <KB_API_KEY>` | files, knowledge bases, projects memory (humans/admins also RAG directly here with an explicit `model`) |
+| kb-gateway memory | `KB_HOST/memory/*` | `Bearer <KB_API_KEY>` | Graphiti facts (whoami, groups, add, search, episodes, status, forget, delete-edge, delete-episode) + RAG chat (`POST /memory/rag`; the gateway inserts the chat model from `OPENWEBUI_MODEL`) |
 | kb-gateway admin | `KB_HOST/admin/users` (POST) | `Bearer <KB_API_KEY>` (admin) | create a new KB user (returns temp password + `KB_API_KEY`) |
 | health | `KB_HOST/health` | none | read-only stack probe |
 
@@ -44,9 +44,11 @@ Python 3.10+ stdlib:
   `search`, `episodes`, `status`, `forget`, `delete-edge`, `delete-episode`) and
   admin (`user-create`).
 
-Both read `KB_HOST` (fallback synth from `KB_HOST_PORT`) + `KB_API_KEY` (fallback
-`OPENWEBUI_USER_API_KEY`) from the environment or `--env-file` (repeatable; load
-`.env` then `.env.local`).
+Both read ONLY `KB_HOST` + `KB_API_KEY` from the shell environment — no
+`.env` / `.env.local` files, no `--env-file`, no other env vars. Set both in
+your shell before invoking them (`export KB_HOST=...` / `export KB_API_KEY=...`).
+RAG chat is proxied by the kb-gateway (`POST /memory/rag`), which inserts the
+chat model server-side; the wrappers carry no model.
 
 ### Triggers
 
@@ -67,7 +69,7 @@ are recognized.
 ### Install per tool
 
 Install the matching `skills/<tool>/` directory into the tool's skill location,
-then point the wrappers at `.env` / `.env.local`:
+then set `KB_HOST` + `KB_API_KEY` in your shell env:
 
 | Tool | Install location | Trigger |
 |---|---|---|
@@ -99,34 +101,36 @@ copies normally.
 
 ## Example flows
 
-Set `E` once to load `KB_HOST` (`.env`) + `KB_API_KEY` (`.env.local`):
+Export `KB_HOST` + `KB_API_KEY` once (the wrappers read only those two):
 
 ```
-KB=~/SOURCE/Deployments/knowledgebase          # this repo
-E="--env-file $KB/.env --env-file $KB/.env.local"
+export KB_HOST=http://localhost:3000            # or your KB_HOST
+export KB_API_KEY="$OPENWEBUI_USER_API_KEY"     # from .env.local (make api-keys)
 S=~/.claude/skills/kb/scripts                   # your tool's installed skill dir
 ```
 
 ### Verify identity
 
 ```
-python3 "$S/owui.py"      $E whoami    # OWUI: email + role
-python3 "$S/kb_gateway.py" $E whoami    # kb-gateway: email + role + id (derived from the key)
+python3 "$S/owui.py" whoami    # OWUI: email + role
+python3 "$S/kb_gateway.py" whoami    # kb-gateway: email + role + id (derived from the key)
 ```
 
 ### Open WebUI KBs (read-scoped)
 
 ```
-python3 "$S/owui.py" $E kbs                          # list visible KBs
-python3 "$S/owui.py" $E search-kbs "main"            # find a KB by name
-python3 "$S/owui.py" $E search <kb-id> "XSL streaming"   # raw chunks (you synthesize)
-python3 "$S/owui.py" $E rag "What is XSL?" --kb <kb-id>  # RAG chat (LLM answer from the KB)
+python3 "$S/owui.py" kbs                          # list visible KBs
+python3 "$S/owui.py" search-kbs "main"            # find a KB by name
+python3 "$S/owui.py" search <kb-id> "XSL streaming"   # raw chunks (you synthesize)
+python3 "$S/owui.py" rag "What is XSL?" --kb <kb-id>  # RAG chat (LLM answer from the KB)
 ```
 
 RAG chat needs `make rag-config` (strict-grounding template + synced embedding
 URL); without it the model confabulates. Ground the chat via the top-level
 `files` field only (`{"type":"collection","id":"<kb-id>"}`) — a `knowledge` field
-is ignored.
+is ignored. The `/kb` skill reaches RAG via `POST /memory/rag` (the kb-gateway
+inserts the chat model from `OPENWEBUI_MODEL`; send no `model` field); humans/admins
+RAG directly at `POST /api/chat/completions` with an explicit `model`.
 
 ### Projects memory (owui.py, user key)
 
@@ -148,11 +152,11 @@ are easy to reason about (`search-projects` returns compact JSON
 `{"kbs":N,"hits":[{"repo","kb_name","file","text"}],"errors":[...]}`).
 
 ```
-python3 "$S/owui.py" $E index-projects --dry-run                  # plan only
-python3 "$S/owui.py" $E index-projects --project knowledgebase --wait   # index this repo, wait for drain
-python3 "$S/owui.py" $E status-projects                           # current repo's drain status (walks up cwd)
-python3 "$S/owui.py" $E search-projects "QPU scheduling"          # across ALL your project KBs
-python3 "$S/owui.py" $E search-projects "X" --host mini2 --project knowledgebase   # filtered
+python3 "$S/owui.py" index-projects --dry-run                  # plan only
+python3 "$S/owui.py" index-projects --project knowledgebase --wait   # index this repo, wait for drain
+python3 "$S/owui.py" status-projects                           # current repo's drain status (walks up cwd)
+python3 "$S/owui.py" search-projects "QPU scheduling"          # across ALL your project KBs
+python3 "$S/owui.py" search-projects "X" --host mini2 --project knowledgebase   # filtered
 ```
 
 **Workflow**: run `index-projects` at session start (so this session's memory is
@@ -166,13 +170,13 @@ file is delete-then-uploaded so no stale vectors; orphans are deleted).
 ### Facts memory (Graphiti, kb-gateway)
 
 ```
-python3 "$S/kb_gateway.py" $E groups                              # list all groups that have data
-python3 "$S/kb_gateway.py" $E add "Project Atlas uses a QPU scheduler" --name atlas
-python3 "$S/kb_gateway.py" $E search "QPU scheduling" --k 5        # facts across ALL groups (read-only)
-python3 "$S/kb_gateway.py" $E episodes --max 20                    # episodes across ALL groups (read-only)
-python3 "$S/kb_gateway.py" $E status                               # graphiti server + DB status
-python3 "$S/kb_gateway.py" $E forget user:<me>                     # clear YOUR group (owner/admin)
-python3 "$S/kb_gateway.py" $E delete-edge <uuid>                   # delete one edge (owner/admin)
+python3 "$S/kb_gateway.py" groups                              # list all groups that have data
+python3 "$S/kb_gateway.py" add "Project Atlas uses a QPU scheduler" --name atlas
+python3 "$S/kb_gateway.py" search "QPU scheduling" --k 5        # facts across ALL groups (read-only)
+python3 "$S/kb_gateway.py" episodes --max 20                    # episodes across ALL groups (read-only)
+python3 "$S/kb_gateway.py" status                               # graphiti server + DB status
+python3 "$S/kb_gateway.py" forget user:<me>                     # clear YOUR group (owner/admin)
+python3 "$S/kb_gateway.py" delete-edge <uuid>                   # delete one edge (owner/admin)
 ```
 
 Model: writes go to your own personal group (logical `user:<email>`, stored by
@@ -184,7 +188,7 @@ owning the target group or admin.
 ### Create a new KB user (admin only)
 
 ```
-python3 "$S/kb_gateway.py" $E user-create --email alice@example.com --name Alice
+python3 "$S/kb_gateway.py" user-create --email alice@example.com --name Alice
 # prints: email, temp_password, kb_api_key, role, id  — relay to the admin ONLY; do not persist
 ```
 

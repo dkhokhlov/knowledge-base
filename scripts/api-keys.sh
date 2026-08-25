@@ -132,10 +132,11 @@ else:
 # --- 3b. grant '*' read on the chat model so the agent user can RAG chat -----
 # Without a model access grant, a non-admin user sees 0 models and
 # /api/chat/completions returns "Model not found". Same '*' pattern as KB grants.
-# Grant the chat model the agent actually requests: OPENWEBUI_MODEL (read by the
-# kb skill wrapper), falling back to MODEL_NAME (the stack's chat LLM), then the
-# built-in default. .env keeps OPENWEBUI_MODEL in sync with MODEL_NAME.
-CHAT_MODEL = os.environ.get("OPENWEBUI_MODEL") or os.environ.get("MODEL_NAME") or "gemma4:12b"
+# Grant the chat model the agent actually requests: OPENWEBUI_MODEL (inserted by
+# the kb-gateway for POST /memory/rag), then the built-in default. OPENWEBUI_MODEL
+# (chat) is independent from GRAPHITI_MODEL (extraction); .env may set them
+# differently. The default must be a model `make pull-models` creates.
+CHAT_MODEL = os.environ.get("OPENWEBUI_MODEL") or "qwen2.5:14b-ctx8192"
 code, ml, _ = jget("GET", "/api/models", admin_jwt)
 mids = []
 if code == 200 and isinstance(ml, dict):

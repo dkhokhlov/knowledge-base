@@ -17,21 +17,22 @@ DATA_DIR := ./data
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + admin-signup + api-keys (auto OCR) + rag-config + gdrive KB. Leaves the stack running.
+provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + admin-signup + api-keys (auto OCR) + projects-bootstrap + rag-config + gdrive KB. Leaves the stack running.
 	@set -e; \
-	  echo "==> 1/7 bootstrap (creates .env/.env.local + secrets + ./data dirs)"; make bootstrap; \
-	  echo "==> 2/7 pull-models (BLOCKING: pulls base LLM + ctx variant + embedder + deepseek-ocr from Ollama)"; make pull-models; \
-	  echo "==> 3/7 start (preflight + docker compose up -d, + --profile ocr when OCR_ENABLED=true)"; make start; \
+	  echo "==> 1/8 bootstrap (creates .env/.env.local + secrets + ./data dirs)"; make bootstrap; \
+	  echo "==> 2/8 pull-models (BLOCKING: pulls base LLM + ctx variant + embedder + deepseek-ocr from Ollama)"; make pull-models; \
+	  echo "==> 3/8 start (preflight + docker compose up -d, + --profile ocr when OCR_ENABLED=true)"; make start; \
 	  echo "==> waiting for stack /health (OWUI has a 40s start period)..."; \
 	  set -a; . ./.env; set +a; \
 	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
 	  i=0; until curl -sf "$$H/health" >/dev/null 2>&1; do i=$$((i+1)); [ $$i -lt 60 ] \
 	    || { echo "stack did not become healthy in 120s ($$H/health)" >&2; exit 1; }; sleep 2; done; \
 	  echo "  stack healthy ($$H/health)"; \
-	  echo "==> 4/7 admin-signup (creates the admin@<KB_DOMAIN> account)"; make admin-signup; \
-	  echo "==> 5/7 api-keys (admin + agent keys; auto-configures OWUI -> markitdown-ocr when OCR_ENABLED=true)"; make api-keys; \
-	  echo "==> 6/7 rag-config (strict-grounding RAG template + rag.ollama.base_url sync)"; make rag-config; \
-	  echo "==> 7/7 gdrive-index-bootstrap (creates the gdrive KB + grants agent read + writes GDRIVE_KB_ID)"; make gdrive-index-bootstrap; \
+	  echo "==> 4/8 admin-signup (creates the admin@<KB_DOMAIN> account)"; make admin-signup; \
+	  echo "==> 5/8 api-keys (admin + agent keys; auto-configures OWUI -> markitdown-ocr when OCR_ENABLED=true)"; make api-keys; \
+	  echo "==> 6/8 projects-bootstrap (one-time admin enable of workspace.knowledge so user keys can create project-memory KBs)"; make projects-bootstrap; \
+	  echo "==> 7/8 rag-config (strict-grounding RAG template + rag.ollama.base_url sync)"; make rag-config; \
+	  echo "==> 8/8 gdrive-index-bootstrap (creates the gdrive KB + grants agent read + writes GDRIVE_KB_ID)"; make gdrive-index-bootstrap; \
 	  echo; echo "==> provision complete — stack is running."; \
 	  echo "    Populate the gdrive KB (one-time, ~40 min):  make gdrive-sync"; \
 	  echo "    Everyday restart:                            make start"
@@ -45,7 +46,7 @@ preflight: ## Read-only checks: docker, secrets, Ollama, required models
 pull: ## Pull all images
 	@$(COMPOSE) pull
 
-pull-models: ## Pull base LLM, create the ctx-baked variant (MODEL_NAME), pull embedder
+pull-models: ## Pull base LLM, create the ctx-baked variant (GRAPHITI_MODEL), pull embedder
 	@./scripts/pull-models.sh
 
 start: ## Start the stack detached (run `make bootstrap` first)

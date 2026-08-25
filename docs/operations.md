@@ -14,20 +14,20 @@ and the full hardening reference. For the trust model and architecture see the
 - Pull the models you will use:
   ```
   make pull-models        # pulls OLLAMA_MODEL_BASE, creates the ctx-baked
-                          # MODEL_NAME (PARAMETER num_ctx), pulls nomic-embed-text
+                          # GRAPHITI_MODEL (PARAMETER num_ctx), pulls nomic-embed-text
   ```
-  Equivalent to `ollama pull <OLLAMA_MODEL_BASE>`, a `Modelfile`-driven `ollama create <MODEL_NAME>`, and `ollama pull nomic-embed-text`. The `/v1` endpoint ignores `num_ctx` in requests, so the context window is baked into `MODEL_NAME`; `make preflight` verifies it.
+  Equivalent to `ollama pull <OLLAMA_MODEL_BASE>`, a `Modelfile`-driven `ollama create <GRAPHITI_MODEL>`, and `ollama pull nomic-embed-text`. The `/v1` endpoint ignores `num_ctx` in requests, so the context window is baked into `GRAPHITI_MODEL`; `make preflight` verifies it.
 
 ### Custom model (ctx-baked variant)
 
-`MODEL_NAME` (default `qwen2.5:14b-ctx8192`) is **not a stock Ollama model**. It is a local variant created from `OLLAMA_MODEL_BASE` with the context window baked in. Ollama's `/v1` endpoint ignores `num_ctx` in request bodies, so the window must be set in a Modelfile. The reference Modelfile for the default config is committed as [`Modelfile_qwen2_5`](../Modelfile_qwen2_5) (repo root):
+`GRAPHITI_MODEL` (default `qwen2.5:14b-ctx8192`) is **not a stock Ollama model**. It is a local variant created from `OLLAMA_MODEL_BASE` with the context window baked in. Ollama's `/v1` endpoint ignores `num_ctx` in request bodies, so the window must be set in a Modelfile. The reference Modelfile for the default config is committed as [`Modelfile_qwen2_5`](../Modelfile_qwen2_5) (repo root):
 
 ```
 FROM qwen2.5:14b
 PARAMETER num_ctx 8192
 ```
 
-`make pull-models` builds the variant from `OLLAMA_MODEL_BASE` / `OLLAMA_MODEL_CONTEXT` / `MODEL_NAME` (it generates the Modelfile from the env vars, so it stays generic). Manual equivalent using the committed file:
+`make pull-models` builds the variant from `OLLAMA_MODEL_BASE` / `OLLAMA_MODEL_CONTEXT` / `GRAPHITI_MODEL` (it generates the Modelfile from the env vars, so it stays generic). Manual equivalent using the committed file:
 
 ```
 ollama pull qwen2.5:14b                      # OLLAMA_MODEL_BASE (stock)
@@ -36,14 +36,14 @@ ollama create qwen2.5:14b-ctx8192 -f Modelfile_qwen2_5
 ollama pull nomic-embed-text                 # embedder (stock)
 ```
 
-Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on a ~22.5 GB GPU (extraction crawls); `num_ctx 8192` loads ~20 GB and fits. `OPENWEBUI_MODEL` MUST equal `MODEL_NAME` so only one 14B instance loads. To re-bake after changing `OLLAMA_MODEL_CONTEXT` or `OLLAMA_MODEL_BASE`, re-run `make pull-models && make restart`. If a same-size alias is already loaded with a long keep-alive, `ollama stop` + `ollama rm` it first — Ollama will not evict an unexpired model to load the new one. `make preflight` verifies the model exists and its `num_ctx` matches `OLLAMA_MODEL_CONTEXT`.
+Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on a ~22.5 GB GPU (extraction crawls); `num_ctx 8192` loads ~20 GB and fits. `OPENWEBUI_MODEL` (chat) and `GRAPHITI_MODEL` (extraction) are independent; the defaults are equal so one 14B instance loads, but they may differ. To re-bake after changing `OLLAMA_MODEL_CONTEXT` or `OLLAMA_MODEL_BASE`, re-run `make pull-models && make restart`. If a same-size alias is already loaded with a long keep-alive, `ollama stop` + `ollama rm` it first — Ollama will not evict an unexpired model to load the new one. `make preflight` verifies the model exists and its `num_ctx` matches `OLLAMA_MODEL_CONTEXT`.
 
 ## Configuration
 
 - `.env` — gitignored, copied from `.env.template` (the tracked template). No secrets; `OLLAMA_HOST` + `KB_HOST` are commented out (deployment-specific) — set them in your shell env, or uncomment here:
   - ports, image tags, model names, Neo4j memory, tunables, `OLLAMA_HOST`, `OCR_ENABLED` (OCR config flag, default `true`; decided before `make bootstrap`, overridable per run via `make <target> OCR_ENABLED=false`).
 - `OLLAMA_HOST` — Ollama's native client env var: the full URL where [Graphiti][graphiti] and [Open WebUI][open-webui] reach [Ollama][ollama]. Set in shell env or `.env` (shell overrides `.env`).
-  - [Graphiti][graphiti] reads it fresh on every start (compose sets `OPENAI_BASE_URL=$OLLAMA_HOST/v1` for the REST server, and `MODEL_NAME` / `EMBEDDING_MODEL_NAME` / `EMBEDDER_DIMENSIONS` from `.env`).
+  - [Graphiti][graphiti] reads it fresh on every start (compose sets `OPENAI_BASE_URL=$OLLAMA_HOST/v1` for the REST server, and the graphiti container's native `MODEL_NAME` var (mapped from `.env` `GRAPHITI_MODEL`) / `EMBEDDING_MODEL_NAME` / `EMBEDDER_DIMENSIONS` from `.env`).
   - [Open WebUI][open-webui] persists the Ollama URL in its DB on **first boot** and ignores later env changes.
     - Chat URL: admin API `POST /ollama/config/update` with `{"ENABLE_OLLAMA_API":true,"OLLAMA_BASE_URLS":["http://<ollama-host>:11434"],"OLLAMA_API_CONFIGS":{}}`, or wipe `./data/openwebui` and restart.
     - RAG embedding URL (`rag.ollama.base_url`) is a **separate** persisted key; the chat update above does **not** change it. A stale value leaves chat working but breaks file embedding (`process/status` = `failed`, RAG search returns 0 hits). `make rag-config` syncs it to `OLLAMA_HOST` (idempotent); `make preflight` warns if it has drifted. `make test` (test_04) catches this drift.
@@ -72,7 +72,7 @@ Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on 
 | `KB_HOST` | the single public URL agents/clients point at (deployment-specific; commented in `.env.template` — set in shell env, default `http://localhost:3000`); HTTPS/VPN if non-local |
 | `NEO4J_USER` / `NEO4J_PASSWORD` / `NEO4J_DATABASE` | Neo4j auth + db (container-network only) |
 | `NEO4J_HEAP_INITIAL` / `NEO4J_HEAP_MAX` / `NEO4J_PAGECACHE` | Neo4j memory |
-| `OLLAMA_MODEL_BASE` / `OLLAMA_MODEL_CONTEXT` / `MODEL_NAME` / `OPENWEBUI_MODEL` | LLM model. `make pull-models` pulls `OLLAMA_MODEL_BASE` and creates `MODEL_NAME` as a ctx-baked variant (`PARAMETER num_ctx` = `OLLAMA_MODEL_CONTEXT`) — the `/v1` endpoint ignores `num_ctx` in requests, so it must be baked into the model. `OPENWEBUI_MODEL` MUST equal `MODEL_NAME` so only one 14B instance loads on the GPU. The skill reads `OPENWEBUI_MODEL`. |
+| `OLLAMA_MODEL_BASE` / `OLLAMA_MODEL_CONTEXT` / `GRAPHITI_MODEL` / `OPENWEBUI_MODEL` | LLM model. `make pull-models` pulls `OLLAMA_MODEL_BASE` and creates `GRAPHITI_MODEL` as a ctx-baked variant (`PARAMETER num_ctx` = `OLLAMA_MODEL_CONTEXT`) — the `/v1` endpoint ignores `num_ctx` in requests, so it must be baked into the model. `OPENWEBUI_MODEL` (chat) and `GRAPHITI_MODEL` (extraction) are independent; the defaults are equal so one 14B instance loads on the GPU, but they may differ. The kb-gateway reads `OPENWEBUI_MODEL` (inserts it for `/memory/rag`); the skill wrapper reads only `KB_HOST`/`KB_API_KEY`. |
 | `EMBEDDER_MODEL` / `EMBEDDER_DIMENSIONS` | embedder (must be `nomic-embed-text` @ 768; the bootstrap sets the embedder + vector index to `EMBEDDER_DIMENSIONS`) |
 | `SEMAPHORE_LIMIT` | graphiti_core extraction concurrency (default 3) |
 | `OPENAI_BASE_URL` / `EMBEDDING_MODEL_NAME` | set on the graphiti service in `compose.yml` (from `OLLAMA_HOST` / `EMBEDDER_MODEL`); not in `.env` |
@@ -101,8 +101,9 @@ Notes:
   - the admin key (`OPENWEBUI_ADMIN_API_KEY`, `role=admin`), or
   - the agent key (`OPENWEBUI_USER_API_KEY`, read-scoped), or
   - a per-account key issued by the gateway (`POST /admin/users`) and relayed to the account.
-  The CLI falls back to `OPENWEBUI_USER_API_KEY` if `KB_API_KEY` is unset.
-- `make api-keys` is idempotent; `FORCE=1 make api-keys` rotates (replaces) the keys. It also grants `*` read on the chat model (`MODEL_NAME`) to the agent user, so a non-admin agent can do RAG chat — without it the agent sees 0 models and chat returns `Model not found`.
+  The skill CLI reads ONLY `KB_API_KEY` (no fallback) — set it in the shell env
+  to one of the above (e.g. `export KB_API_KEY="$OPENWEBUI_USER_API_KEY"`).
+- `make api-keys` is idempotent; `FORCE=1 make api-keys` rotates (replaces) the keys. It also grants `*` read on the chat model (`OPENWEBUI_MODEL`) to the agent user, so a non-admin agent can do RAG chat — without it the agent sees 0 models and chat returns `Model not found`.
 - Hand the **read-scoped agent key** to agents, **not** the admin key — the admin key bypasses access control. For a hard API-layer read-only lock on every key (including the admin key), use Settings -> Admin -> API Key Endpoint Restrictions (`ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS`).
 - The kb-gateway never persists `KB_API_KEY` server-side — it is stateless. The key arrives as `Authorization: Bearer` on each request and is used only to resolve `(id, email, role)` via Open Web UI; the server stores no key material.
 - kb-gateway internal env: `OWUI_URL`, `GRAPHITI_URL`, `NEO4J_URL`, `KB_GATEWAY_PORT` are hardcoded in `compose.yml`; `KB_MAX_CONCURRENCY` (default 16) is interpolated from `.env`; `OWUI_TIMEOUT`, `GRAPHITI_TIMEOUT`, `NEO4J_TIMEOUT`, `KB_MAX_BODY` are code defaults (overridable via env). None are in `.env.template`.
@@ -129,7 +130,7 @@ contexts (client connect vs server bind). Unit env params:
 | `OLLAMA_DEBUG` | `1` | Verbose logs. |
 | `OLLAMA_MAX_LOADED_MODELS` | (commented) | Optional cap on loaded models; disabled. |
 
-Host: a CUDA GPU host with enough VRAM for the chat model weights plus the 12-slot KV cache. Keep `MODEL_NAME` in `.env` inside this VRAM budget; a larger model spills to CPU (50/50 split) and slows RAG. `OLLAMA_CONTEXT_LENGTH=32000` clamps the model native context (262144) per request.
+Host: a CUDA GPU host with enough VRAM for the chat model weights plus the 12-slot KV cache. Keep `GRAPHITI_MODEL` and `OPENWEBUI_MODEL` in `.env` inside this VRAM budget; a larger model spills to CPU (50/50 split) and slows extraction/RAG. `OLLAMA_CONTEXT_LENGTH=32000` clamps the model native context (262144) per request.
 
 ## Persistent data and moving to RAID
 
@@ -433,21 +434,21 @@ dependency is down.
 | `make start` rejects with empty `WEBUI_SECRET_KEY` | `.env.local` missing or key empty | run `make bootstrap` (not raw `docker compose up`, which does not fail-fast on empty secrets) |
 | RAG search returns 0 hits; file embedding `process/status = failed` | `rag.ollama.base_url` stale (OWUI persists it on first boot, ignores later `OLLAMA_HOST` changes) | `make rag-config` (re-syncs to `OLLAMA_HOST`); `make preflight` warns on drift; test_04 catches it |
 | RAG chat confabulates (wrong vendor, invented file names) | strict-grounding RAG template not set (model falls back to its own knowledge) | `make rag-config`; re-run after any DB reset/rebuild (`make clean-all` reverts it) |
-| Agent chat returns `Model not found` | non-admin user lacks read access on the chat model | `make api-keys` (grants `*` read on `MODEL_NAME` to the agent user) |
+| Agent chat returns `Model not found` | non-admin user lacks read access on the chat model | `make api-keys` (grants `*` read on `OPENWEBUI_MODEL` to the agent user) |
 | kb-gateway returns `503 identity service unavailable` | Open WebUI unreachable from the gateway (identity resolution fails closed) | check `make health`, the `openwebui` container, and `owui_net`; the gateway cannot authorize without OWUI |
 | kb-gateway `/admin/users` returns `501` | deployed OWUI image lacks the provisioning endpoints | check `OPENWEBUI_IMAGE_TAG`; gateway startup log prints `provisioning=missing ...` listing the absent paths |
-| kb-gateway returns `401` | bad or missing `KB_API_KEY` | verify the key: `kb_gateway.py ... whoami`; confirm `KB_API_KEY` (or the `OPENWEBUI_USER_API_KEY` fallback) is set |
+| kb-gateway returns `401` | bad or missing `KB_API_KEY` | verify the key: `kb_gateway.py ... whoami`; confirm `KB_API_KEY` is set in the shell env (the CLI reads only `KB_API_KEY`, no fallback) |
 | `add --group G` returns `403` | only your own personal group is writable (no shared write groups) | omit `--group` to write to `user:<email>`; reads are how knowledge is shared |
 | `add` returns `200` but the fact never appears in `search` | extraction failed or is still running — `add` is async (202) and each episode runs several LLM calls; a fact is searchable in ~9 s warm (~30 s cold, model load) | poll `/memory/search` for the probe token for up to ~5 min; check `docker logs kb-graphiti` — the LLM must hit `OLLAMA_HOST/v1/chat/completions` (not `/v1/responses`, not `api.openai.com`); if it hits `api.openai.com` → `OPENAI_BASE_URL` is wrong; if `/v1/responses` → the bootstrap injection is missing/broken |
-| `add` returns `200`, episode is stored, but no fact ever appears; `docker logs kb-graphiti` shows `Expecting value: line 1 column 1 (char 0)` | `MODEL_NAME` is a **reasoning model** (e.g. `gemma4:12b`): its thinking chain exhausts the token budget, `content` is empty (`finish_reason=length`), and `json.loads('')` fails | set `OLLAMA_MODEL_BASE` to a **non-reasoning** model (`qwen2.5:14b`), `make pull-models && make restart`, re-add. Ollama `/v1/chat/completions` ignores `think=false`, so you cannot suppress reasoning that way |
+| `add` returns `200`, episode is stored, but no fact ever appears; `docker logs kb-graphiti` shows `Expecting value: line 1 column 1 (char 0)` | `OLLAMA_MODEL_BASE` is a **reasoning model** (one with a thinking chain): its thinking exhausts the token budget, `content` is empty (`finish_reason=length`), and `json.loads('')` fails | set `OLLAMA_MODEL_BASE` to a **non-reasoning** model (`qwen2.5:14b`), `make pull-models && make restart`, re-add. Ollama `/v1/chat/completions` ignores `think=false`, so you cannot suppress reasoning that way |
 | `add` returns `200` but no fact; `docker logs kb-graphiti` shows `CypherTypeError ... Property values can only be of primitive types ... Map{summary -> Map{...}}` | the `OpenAIGenericClient` (`json_schema`) injection is not in effect (image bump / bootstrap edit), so the model runs without server-side schema enforcement and echoes the response schema as values; Neo4j rejects the nested MAP | confirm `graphiti/bootstrap.py` is mounted and `command: ["python","/app/bootstrap.py"]`; restart `graphiti`; the worker log should show extraction completing without the Cypher error |
-| extraction is very slow (>5 min/episode); `ssh <ollama-host> nvidia-smi` shows the GPU idle and memory well under the model size | the model loads at the default 32k context (~53 GB for 14B) and spills to CPU; `num_ctx` is not baked into the model (or you are running the stock `qwen2.5:14b`, not the ctx variant) | run `make pull-models` (creates `MODEL_NAME` with `PARAMETER num_ctx` = `OLLAMA_MODEL_CONTEXT`), then `make restart`; `make preflight` verifies `num_ctx` |
+| extraction is very slow (>5 min/episode); `ssh <ollama-host> nvidia-smi` shows the GPU idle and memory well under the model size | the model loads at the default 32k context (~53 GB for 14B) and spills to CPU; `num_ctx` is not baked into the model (or you are running the stock `qwen2.5:14b`, not the ctx variant) | run `make pull-models` (creates `GRAPHITI_MODEL` with `PARAMETER num_ctx` = `OLLAMA_MODEL_CONTEXT`), then `make restart`; `make preflight` verifies `num_ctx` |
 | `forget` / `delete-*` returns `403` | you do not own the target group and are not admin | use an admin `KB_API_KEY`, or operate on your own group |
 | `user-create` returns `409` | the email already exists (deterministic; no second account) | use a different email, or delete the existing user first |
 | Provisioning failed mid-flow and a user seems half-created | rollback ran but its cleanup itself failed (rare) | check gateway stdout for `rollback: ... failed for user <id>` lines; delete the partial user via admin `DELETE /api/v1/users/{id}` |
 | Neo4j restarts / OOM-killed | heap or pagecache too small for the graph | raise `NEO4J_HEAP_MAX` / `NEO4J_PAGECACHE` in `.env`; `make restart` |
 | Need to reach Open WebUI directly (it is behind Caddy; no direct host port) | OWUI is internal-only on `owui_net` | `docker exec kb-openwebui curl -s localhost:8080/...`, or a temporary `docker compose run --rm -p 3001:8080 openwebui` (avoid `:3000` — that is Caddy) |
-| RAG chat is slow; `ollama ps` shows a CPU/GPU split | `MODEL_NAME` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; keep `MODEL_NAME` and `OPENWEBUI_MODEL` in sync |
+| RAG chat is slow; `ollama ps` shows a CPU/GPU split | `OPENWEBUI_MODEL` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; `GRAPHITI_MODEL` (extraction) and `OPENWEBUI_MODEL` (chat) are independent — two different 14B tags cannot both be resident at once on this GPU |
 | `make health` says `degraded` but the UI works | OWUI `/health` returned non-2xx | inspect the `openwebui` logs; the gateway reports degraded whenever the identity dependency is not healthy |
 | gdrive KB `file_count` stays 0; uploads time out; OWUI `unhealthy`; `docker logs kb-openwebui` shows `chromadb ... unable to open database file` | `openwebui` service `ulimits.nofile` lowered or removed → [Chroma][chroma] 1.5.x (rust backend) exhausts the fd limit creating one SQLite db per RAG collection under bulk ingest | restore `ulimits.nofile.soft=65536` (hard 524288) on `openwebui` in `compose.yml`; `docker compose up -d --no-deps --force-recreate openwebui`; re-run `make gdrive-sync` (or `make gdrive-index`) |
 | `make gdrive-status` shows `completed` below `source` with `pending+processing=0` | a file failed to upload or extract; `/status` `failed_files` + the per-file `errors` from the last `POST /index` hold the WHY | re-run `make gdrive-index` (or `make gdrive-sync`) to re-trigger failed; `docker logs kb-openwebui` / `docker logs kb-markitdown-ocr` for the upstream cause |
@@ -462,7 +463,7 @@ dependency is down.
 | `bootstrap` | create `.env`/`.env.local` (generate `WEBUI_SECRET_KEY`, `OCR_SERVICE_TOKEN`, first-user creds) and `./data` dirs |
 | `preflight` | read-only checks: docker, secrets set, Ollama, models, and that the model's `num_ctx` matches `OLLAMA_MODEL_CONTEXT` |
 | `pull` | pull Docker images |
-| `pull-models` | pull `OLLAMA_MODEL_BASE`, create the ctx-baked `MODEL_NAME` (`PARAMETER num_ctx`), pull `nomic-embed-text` |
+| `pull-models` | pull `OLLAMA_MODEL_BASE`, create the ctx-baked `GRAPHITI_MODEL` (`PARAMETER num_ctx`), pull `nomic-embed-text` |
 | `start` | `docker compose up -d` (rejects missing/empty secrets first) |
 | `stop` | `docker compose stop` (keeps containers and data) |
 | `restart` | stop then start |

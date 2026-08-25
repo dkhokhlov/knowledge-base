@@ -9,7 +9,7 @@ require_env OPENWEBUI_FIRST_USER OPENWEBUI_FIRST_PASSWORD || { finish; exit 1; }
 
 # OWUI REST is at the KB_HOST root (/api/* via Caddy catch-all -> openwebui:8080).
 O="$(kb_host)"
-MODEL="${MODEL_NAME:-qwen2.5:14b}"
+MODEL="${OPENWEBUI_MODEL:?OPENWEBUI_MODEL not set in .env (load_env sources it)}"
 
 section "open webui signin (auth + JWT)"
 jwt=$(curl -s -X POST "$O/api/v1/auths/signin" \

@@ -44,7 +44,7 @@ make bootstrap
 ./scripts/e2e-restore-creds.sh "$stash"
 # Pull the OCR vision model before preflight (preflight hard-fails on a missing
 # OCR model when OCR_ENABLED=true). Pull only the OCR model, NOT full
-# `make pull-models` (that `ollama rm`s + recreates MODEL_NAME, disrupting the
+# `make pull-models` (that `ollama rm`s + recreates GRAPHITI_MODEL, disrupting the
 # assumed-present base LLM). Honors a `make test-e2e OCR_ENABLED=false` override.
 if [ "${OCR_ENABLED:-true}" = "true" ]; then
   echo "==> pulling OCR vision model: ${OCR_MODEL:-deepseek-ocr}"
@@ -74,6 +74,7 @@ echo "stack healthy ($H/health)"
 
 make admin-signup
 make api-keys
+make projects-bootstrap
 make rag-config
 make gdrive-index-bootstrap
 make gdrive-sync

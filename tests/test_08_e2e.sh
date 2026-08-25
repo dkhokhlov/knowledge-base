@@ -18,8 +18,11 @@ require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; 
 
 G="$(kb_host)"
 KB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KB="python3 ${KB_ROOT}/skills/claude/scripts/kb_gateway.py --env-file .env --env-file .env.local"
-KBA="${KB} --key ${OPENWEBUI_ADMIN_API_KEY}"
+# The wrapper is a thin client: it reads ONLY KB_HOST + KB_API_KEY from the
+# shell env (no --env-file / --key / --base-url flags). Inline `env` sets both
+# per invocation. KB = agent key; KBA = admin key.
+KB="env KB_API_KEY=${OPENWEBUI_USER_API_KEY} KB_HOST=${G} python3 ${KB_ROOT}/skills/claude/scripts/kb_gateway.py"
+KBA="env KB_API_KEY=${OPENWEBUI_ADMIN_API_KEY} KB_HOST=${G} python3 ${KB_ROOT}/skills/claude/scripts/kb_gateway.py"
 CT="Content-Type: application/json"
 
 # kbrun <cmd...>: print stdout; record a failure (and return 1) if the cmd
@@ -119,7 +122,7 @@ UCOUT=$(kbrun $KBA user-create --email "$NEW_EMAIL" --name "E2E User") || true
 NEW_KEY=$(printf '%s' "$UCOUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("kb_api_key") or "")')
 if [ -n "$NEW_KEY" ]; then
   printf '%s' "$UCOUT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("role")=="user" else 1)' && pass "admin user-create -> ${NEW_EMAIL} (role=user)" || fail "user-create role mismatch"
-  NUWHO=$(python3 "${KB_ROOT}/skills/claude/scripts/kb_gateway.py" --base-url "$G" --key "$NEW_KEY" whoami 2>/dev/null) || true
+  NUWHO=$(env KB_API_KEY="$NEW_KEY" KB_HOST="$G" python3 "${KB_ROOT}/skills/claude/scripts/kb_gateway.py" whoami 2>/dev/null) || true
   printf '%s' "$NUWHO" | grep -q "${NEW_EMAIL}" && pass "issued key whoami -> ${NEW_EMAIL}" || fail "issued key whoami failed"
 else
   fail "admin user-create did not return a kb_api_key"

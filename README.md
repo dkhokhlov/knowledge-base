@@ -49,7 +49,7 @@ Sub-documents:
   ┌───────────┐       ┌────────────────────────┐
   │ User      │       │ Agent  (any host)      │
   │ (browser) │       │ kb_gateway.py / owui.py│
-  │           │       │ holds KB_API_KEY only  │
+  │           │       │ KB_HOST + KB_API_KEY   │
   └──────┬────┘       └────────────┬───────────┘
          └─────────┬───────────────┘
                    ▼ KB_HOST  http://<host>:3000
@@ -85,7 +85,7 @@ Sub-documents:
 ```
 
 - A user with a browser and an agent both reach the stack through **one** URL, **`KB_HOST`** (default `http://localhost:3000`): [Caddy][caddy] fronts [Open WebUI][open-webui] at the root and the **kb-gateway** under `/memory/*`, `POST /admin/users`, and `/health`. One port, one var for agents (mirrors `OLLAMA_HOST`).
-- An agent holds only `KB_API_KEY` + `KB_HOST` (no Graphiti token, no repo files) — it works on any host. Its CLI (`kb_gateway.py` / `owui.py`) hits `KB_HOST`: OWUI REST at `/api/*`, kb-gateway memory at `/memory/*`.
+- An agent holds only `KB_API_KEY` + `KB_HOST` (no Graphiti token, no repo files) — it works on any host. Its CLI (`kb_gateway.py` / `owui.py`) is a thin client that reads ONLY those two env vars (no `.env` files) and hits `KB_HOST`: OWUI REST at `/api/*` (KBs, search, files, projects memory), kb-gateway at `/memory/*` (memory + RAG; the gateway inserts the chat model server-side).
 - **kb-gateway** is the sole bridge to the graph. It resolves the caller's identity + role from `KB_API_KEY` via Open WebUI (tamper-proof), enforces ownership-bounded writes + owner/admin destructive gating, discovers all existing groups live from [Neo4j][neo4j], calls the internal [Graphiti][graphiti] REST server, and provisions new KB users for admins.
 - **Graphiti client injection.** The `ghcr.io/dkhokhlov/graphiti-rest` server defaults to `OpenAIClient` (OpenAI Responses API), which [Ollama][ollama] cannot satisfy — entity/fact extraction silently stores nothing. `graphiti/bootstrap.py` is mounted into the container and run as the command; it overrides the FastAPI dependency to inject the stock `OpenAIGenericClient` (graphiti_core >= 0.29 defaults to **`json_schema` structured outputs**, which Ollama enforces server-side; set at `temperature=0`) + `OpenAIEmbedder` (`nomic-embed-text`, 768-dim), so extraction works with Ollama. There is no config switch for this; the injection is required. See `graphiti/bootstrap.py`.
 - **Network split**: `graph_internal` (neo4j + graphiti + kb-gateway), `edge` (caddy + kb-gateway), `owui_net` (caddy + kb-gateway + openwebui). graphiti and Neo4j are **internal-only** — no host ports, reachable only through the gateway. Open WebUI is internal-only too (fronted by Caddy).
@@ -110,14 +110,14 @@ All endpoints are on one URL, **`KB_HOST`** (`http://<host>:3000` by default). C
 | Endpoint | Auth | Use |
 |---|---|---|
 | `KB_HOST/` | session (web UI) | Open WebUI: document upload, chat, admin, users, knowledge bases |
-| `KB_HOST/api/*` | `Authorization: Bearer <OWUI API key>` | OWUI REST for agents (chat, RAG, files, KBs) |
+| `KB_HOST/api/*` | `Authorization: Bearer <OWUI API key>` | OWUI REST for agents (files, KBs, projects memory); humans/admins also RAG directly here with an explicit `model` |
 | `KB_HOST/docs` | none (read-only) | Swagger UI (OWUI; `ENV=dev`) |
 | `KB_HOST/openapi.json` | none (read-only) | OpenAPI schema (OWUI) |
-| `KB_HOST/memory/*` | `Authorization: Bearer <KB_API_KEY>` | kb-gateway: memory (whoami, groups, add, search, episodes, status, forget, delete-edge, delete-episode) |
+| `KB_HOST/memory/*` | `Authorization: Bearer <KB_API_KEY>` | kb-gateway: memory (whoami, groups, add, search, episodes, status, forget, delete-edge, delete-episode) + RAG chat (`POST /memory/rag`; the gateway inserts the chat model from `OPENWEBUI_MODEL`) |
 | `KB_HOST/admin/users` | `Authorization: Bearer <KB_API_KEY>` (admin, POST) | kb-gateway: create a new KB user (returns temp password + `KB_API_KEY`); GET falls through to the OWUI SPA |
 | `KB_HOST/health` | none (read-only) | health probe (Caddy → kb-gateway → OWUI, aggregated) |
 
-`KB_HOST` is read from `.env` (default `http://localhost:3000`), or synthesized from `KB_HOST_PORT`. [Neo4j][neo4j] (`:7474`, `:7687`) and graphiti (`:8000` internal) are not published — reachable only through the kb-gateway over `graph_internal`.
+`KB_HOST` is set in `.env` (default `http://localhost:3000`); `KB_HOST_PORT` (default `3000`) is the only host-published port. [Neo4j][neo4j] (`:7474`, `:7687`) and graphiti (`:8000` internal) are not published — reachable only through the kb-gateway over `graph_internal`.
 
 ### KB user provisioning (admin)
 
@@ -133,7 +133,7 @@ An admin tells an agent **"create a new KB user alice\@example.com named Alice"*
 
 - A user's uploaded files and knowledge bases are private to that user by default. The KB owner (with `sharing.knowledge`) or an admin grants a KB to user groups: Workspace -> Knowledge.
 - An agent using a user's API key inherits that user's permissions: the user's own files + KBs shared with the user's groups. It cannot see other users' private docs. An admin key bypasses access control — give agents a dedicated low-priv user's key, not an admin key.
-- To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field of `/api/chat/completions` as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds.
+- To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds. The `/kb` skill reaches RAG via `POST /memory/rag` (the kb-gateway inserts the chat model from `OPENWEBUI_MODEL`; send `messages` + `files`, no `model`); humans/admins RAG directly at `POST /api/chat/completions` with an explicit `model`.
 - `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
 
 ### gdrive indexing (manual, via kb-gateway)
@@ -241,7 +241,7 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 | `caddy/Caddyfile` | public edge `KB_HOST`; routes `/memory/*`, `POST /admin/users`, `/health` → kb-gateway:8010, catch-all → openwebui:8080 |
 | `graphiti/bootstrap.py` | mounted into the `graphiti` container and run as the command; injects `OpenAIGenericClient` + `nomic` embedder (768) so Ollama extraction works, runs a robust `/messages` worker, owns the app lifespan |
 | `graphiti/config.yaml` | UNUSED — config for the retired MCP image; kept for reference (not mounted) |
-| `Modelfile_qwen2_5` | reference Modelfile for the custom ctx-baked `MODEL_NAME` (`FROM qwen2.5:14b` + `PARAMETER num_ctx 8192`); see [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant) |
+| `Modelfile_qwen2_5` | reference Modelfile for the custom ctx-baked `GRAPHITI_MODEL` (`FROM qwen2.5:14b` + `PARAMETER num_ctx 8192`); see [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant) |
 | `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `rag-config.sh`, `gdrive-sync`, `gdrive-index-bootstrap.sh` |
 | `skills/` | per-tool `kb` agent skill (`claude/` primary; `codex/`, `opencode/`, `pi/` symlink `scripts/` to it) — see [docs/agents.md](docs/agents.md) |
 | `tests/` | `test_01`..`test_08` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
@@ -256,8 +256,8 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 - Embedding dimensions must be 768 for [`nomic-embed-text`][nomic-embed-text]. Change `EMBEDDER_MODEL` and `EMBEDDER_DIMENSIONS` together if you swap models. The bootstrap reads `EMBEDDER_DIMENSIONS` to set both the embedder and the vector index dim (Graphiti defaults to 1024, which would reject 768-dim writes).
 - [Graphiti][graphiti] extraction uses **`json_schema` structured outputs** over Chat Completions. The image's default client targets the OpenAI Responses API (Ollama cannot satisfy it — extraction silently stores nothing), so `graphiti/bootstrap.py` injects the stock `OpenAIGenericClient` (>= 0.29 defaults to `json_schema`, which Ollama enforces server-side) at `temperature=0`. With plain `json_object` mode a 14B local model echoes the response schema back as values (Neo4j then rejects the nested MAP); `json_schema` prevents that.
 - Extraction is **async**: `POST /memory/add` returns `200` as soon as the episode is queued, but each episode runs several LLM extraction calls before a fact is searchable. With the ctx-baked model (`num_ctx=8192`, ~20 GB, fits the GPU) a fact is searchable in ~9 s warm (~30 s cold, model load); do not treat a bare `200` (or even a stored episode) as proof of extraction — poll `/memory/search` for the probe.
-- `OLLAMA_MODEL_BASE` **must be a non-reasoning model.** Graphiti 0.29.3 calls it with `max_tokens=16384`; a reasoning model (e.g. `gemma4:12b`) spends the budget on its thinking chain and emits no `content` (`finish_reason=length`) → `json.loads('')` → extraction silently stores nothing, even with `json_schema` enforcement. `qwen2.5:14b` is non-reasoning and tested reliable. Ollama's `/v1/chat/completions` does not honor `think=false`, so suppressing reasoning that way is not an option.
-- The `/v1` endpoint ignores `num_ctx` in the request body, so `make pull-models` bakes `OLLAMA_MODEL_CONTEXT` (default `8192`) into `MODEL_NAME` via a `PARAMETER num_ctx` Modelfile (see [`Modelfile_qwen2_5`](Modelfile_qwen2_5) and [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant)). The remote GPU host (~22.5 GB VRAM) cannot hold the stock 14B at the default 32k context (~53 GB) — it spills to CPU and extraction crawls; `num_ctx=8192` loads ~20 GB and fits. `OPENWEBUI_MODEL` must equal `MODEL_NAME` so only one 14B instance loads. `make preflight` verifies the model exists and its `num_ctx` matches.
+- The extraction LLM (`GRAPHITI_MODEL`, built from `OLLAMA_MODEL_BASE`) **must be a non-reasoning model.** Graphiti 0.29.3 calls it with `max_tokens=16384`; a reasoning model (one with a thinking chain) spends the budget on its thinking and emits no `content` (`finish_reason=length`) → `json.loads('')` → extraction silently stores nothing, even with `json_schema` enforcement. `qwen2.5:14b-ctx8192` (the default `GRAPHITI_MODEL`) is non-reasoning and tested reliable. Ollama's `/v1/chat/completions` does not honor `think=false`, so suppressing reasoning that way is not an option.
+- The `/v1` endpoint ignores `num_ctx` in the request body, so `make pull-models` bakes `OLLAMA_MODEL_CONTEXT` (default `8192`) into `GRAPHITI_MODEL` via a `PARAMETER num_ctx` Modelfile (see [`Modelfile_qwen2_5`](Modelfile_qwen2_5) and [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant)). The remote GPU host (~22.5 GB VRAM) cannot hold the stock 14B at the default 32k context (~53 GB) — it spills to CPU and extraction crawls; `num_ctx=8192` loads ~20 GB and fits. `OPENWEBUI_MODEL` (chat) and `GRAPHITI_MODEL` (extraction) are independent; the defaults are equal so one 14B instance loads, but they may differ. `make preflight` verifies the extraction model exists and its `num_ctx` matches.
 - There are no shared write groups. Each account writes to its own personal group (logical `user:<email>`, stored by Graphiti as `user-<sanitized-email>` e.g. `user-agent-local-test`); reads span all groups, so cross-account knowledge is shared read-only.
 - [Open WebUI][open-webui] exposes `/docs` and `/openapi.json` only in `ENV=dev` (also raises log verbosity — acceptable for an internal/LAN deployment).
 - `SEMAPHORE_LIMIT=3` bounds graphiti_core extraction concurrency; conservative for one local [Ollama][ollama]. Raise it if the host Ollama has capacity.

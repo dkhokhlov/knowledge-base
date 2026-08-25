@@ -196,11 +196,21 @@ class OwuiTests(_Assertions):
 
     def test_rag_is_raw_text(self):
         # rag prints the LLM answer verbatim — NOT JSON-wrapped (lossy for an agent).
-        ns = mock.Mock(question="q", kb=[], model=None)
-        out = _run([(owui, "jget", {"choices": [{"message": {"content": "the answer"}}]})],
-                   owui.cmd_rag, ns)
+        # Proxied by the kb-gateway: one POST /memory/rag, no `model` key (the
+        # gateway inserts it). Asserting the route + body means this cannot pass
+        # against the old direct-/api/chat/completions endpoint (codex #5).
+        jget = mock.Mock(return_value={"content": "the answer"})
+        ns = mock.Mock(question="q", kb=[])
+        out = _run([(owui, "jget", jget)], owui.cmd_rag, ns)
         self.assertEqual(out.strip(), "the answer")
         self.assertFalse(out.lstrip().startswith("{"))
+        jget.assert_called_once()
+        args, _ = jget.call_args
+        self.assertEqual(args[:4], (BASE, KEY, "POST", "/memory/rag"))
+        body = args[4]
+        self.assertEqual(body["messages"], [{"role": "user", "content": "q"}])
+        self.assertNotIn("model", body)
+        self.assertNotIn("files", body)  # kb empty -> no files key
 
     def test_file_text_is_raw(self):
         # file bypasses owui.call() -> urllib.request.urlopen directly.

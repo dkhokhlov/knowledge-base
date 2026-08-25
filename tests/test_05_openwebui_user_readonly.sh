@@ -160,7 +160,7 @@ if [ "$awa" = "True" ]; then pass "admin key -> write_access=True (contrast)"; e
 # grounding is broken (e.g. someone reverts to a `knowledge` field), the marker
 # is absent and this fails.
 section "user key: RAG chat grounded on KB (model grant + files:collection)"
-CHAT_MODEL="${OPENWEBUI_MODEL:-${MODEL_NAME:-gemma4:12b}}"
+CHAT_MODEL="${OPENWEBUI_MODEL:?OPENWEBUI_MODEL not set in .env (load_env sources it)}"
 rag_body=$(python3 -c 'import sys,json;print(json.dumps({"model":sys.argv[1],"stream":False,"files":[{"type":"collection","id":sys.argv[2]}],"messages":[{"role":"user","content":"What is the exact regression marker string mentioned in the document? Return only the marker value."}]}))' "$CHAT_MODEL" "$KB_ID")
 rag_code=$(curl -s -o /tmp/kbrouser_rag.out -w '%{http_code}' -X POST "$O/api/chat/completions" "${U[@]}" \
   -H 'Content-Type: application/json' -d "$rag_body")
@@ -174,6 +174,31 @@ if printf '%s' "$rag_content" | grep -qF "$MARKER"; then
   pass "RAG chat grounded -> marker '$MARKER' present in answer"
 else
   fail "RAG chat NOT grounded -> marker absent (http=200, answer: $(printf '%s' "$rag_content" | head -c 120))"
+  finish; exit 1
+fi
+
+# --- 7. /kb skill path: gateway /memory/rag (gateway inserts the model) -------
+# The /kb skill reaches RAG via POST /memory/rag (kb-gateway), NOT direct
+# /api/chat/completions. The gateway inserts the chat model from OPENWEBUI_MODEL
+# and forwards the caller's key, so OWUI enforces KB read access natively. The
+# request sends NO `model` field. Reuses the same KB_ID + MARKER + agent key as
+# §6 (the fixture is still live). Catches a gateway-RAG regression: a missing
+# OPENWEBUI_MODEL -> 503, a broken proxy -> non-200, broken grounding -> marker
+# absent.
+section "gateway /memory/rag: grounded via the /kb skill path (no model in body)"
+grag_body=$(python3 -c 'import sys,json;print(json.dumps({"messages":[{"role":"user","content":"What is the exact regression marker string mentioned in the document? Return only the marker value."}],"files":[{"type":"collection","id":sys.argv[1]}]}))' "$KB_ID")
+grag_code=$(curl -s -o /tmp/kbrouser_grag.out -w '%{http_code}' -X POST "$O/memory/rag" "${U[@]}" \
+  -H 'Content-Type: application/json' -d "$grag_body")
+grag_out=$(cat /tmp/kbrouser_grag.out 2>/dev/null); rm -f /tmp/kbrouser_grag.out
+grag_content=$(printf '%s' "$grag_out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("content") or "").strip())' 2>/dev/null)
+if [ "${grag_code:-0}" -ne 200 ]; then
+  fail "gateway /memory/rag -> http=${grag_code} (expected 200; OPENWEBUI_MODEL unset in gateway env?): $(printf '%s' "$grag_out" | head -c 160)"
+  finish; exit 1
+fi
+if printf '%s' "$grag_content" | grep -qF "$MARKER"; then
+  pass "gateway /memory/rag grounded -> marker '$MARKER' present (model inserted server-side)"
+else
+  fail "gateway /memory/rag NOT grounded -> marker absent (http=200, answer: $(printf '%s' "$grag_content" | head -c 120))"
   finish; exit 1
 fi
 

@@ -33,7 +33,13 @@ import urllib.request
 
 
 class OwuiError(Exception):
-    """Transport failure talking to OWUI (-> 503)."""
+    """Failure talking to OWUI. `code` is the upstream HTTP status when this is
+    an HTTP-level rejection (set by callers that read one), or None for a
+    transport/I-O failure (-> 503). Additive: existing `OwuiError("...")` calls
+    keep working (code defaults None)."""
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 class OwuiConflict(Exception):
@@ -73,6 +79,11 @@ def _req(method, path, token=None, body=None, timeout=None):
         return e.code, (e.read().decode() or "")
     except urllib.error.URLError as e:
         raise OwuiError("OWUI unreachable: %s" % e)
+    except OSError as e:
+        # socket.timeout / TimeoutError are OSError, not URLError; without this
+        # they escape _req and reach the gateway's generic 500. Wrap them so a
+        # slow chat read becomes a 503, not an internal-error stack trace.
+        raise OwuiError("OWUI I/O error: %s" % e)
 
 
 def _j(method, path, token=None, body=None, timeout=None):
@@ -98,6 +109,28 @@ def whoami(api_key):
         return None
     return {"id": data.get("id"), "email": data.get("email"),
             "role": data.get("role")}
+
+
+def rag(api_key, messages, files):
+    """RAG chat grounded on an OWUI KB, proxied with the CALLER's key (so OWUI
+    enforces KB read access natively — no admin-key escalation, no gateway-side
+    authz). The chat model is inserted server-side from OPENWEBUI_MODEL (the
+    backend-configured model; the caller sends no model). Returns
+    {"content": <answer>}. Raises OwuiError(code) on a non-200 chat (the gateway
+    maps code -> 4xx/502/503) and OwuiError (no code, -> 503) on transport/timeout
+    or when OPENWEBUI_MODEL is unset."""
+    model = os.environ.get("OPENWEBUI_MODEL", "").strip()
+    if not model:
+        raise OwuiError("OPENWEBUI_MODEL not set in gateway env")
+    body = {"model": model, "stream": False, "messages": messages}
+    if files:
+        body["files"] = files
+    code, data, txt = _j("POST", "/api/chat/completions", api_key, body,
+                         timeout=_index_timeout())
+    if code != 200 or not isinstance(data, dict):
+        raise OwuiError("rag -> HTTP %s: %s" % (code, (txt or "")[:200]), code=code)
+    content = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+    return {"content": content}
 
 
 def signin(email, password):

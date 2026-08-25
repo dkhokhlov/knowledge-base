@@ -28,9 +28,10 @@ key.
   `OLLAMA_BASE_URL` (OWUI persists that URL on first boot and ignores later `.env`
   changes; a stale value breaks embedding). `make preflight` warns if it drifts;
   re-run `make rag-config` to fix, and after any DB reset/rebuild.
-- `KB_HOST` lives in `.env`; the key (`KB_API_KEY` / `OPENWEBUI_USER_API_KEY`)
-  lives in `.env.local`. Load both with `--env-file` (repeatable), or export the
-  env vars.
+- Set `KB_HOST` and `KB_API_KEY` in your shell env (`export KB_HOST=...`,
+  `export KB_API_KEY=...`). The wrapper is a thin client: it reads ONLY those two
+  env vars and does not read `.env` / `.env.local`. The agent key is
+  `OPENWEBUI_USER_API_KEY` (written to the gitignored `.env.local` by `make api-keys`).
 
 ## Auth
 
@@ -46,15 +47,20 @@ Two ways to query a KB — pick by what you need:
 
 ### Chat (RAG)
 
-`POST /api/chat/completions` — body `{model, files:[{type:collection,id:<kb-id>}], messages, stream:false}` → `{choices:[{message:{content}}]}`.
+The `/kb` skill reaches RAG via the kb-gateway: `POST /memory/rag` — body
+`{messages, files:[{type:collection,id:<kb-id>}]}` (NO `model` field) →
+`{content}`. The gateway inserts the chat model server-side (from
+`OPENWEBUI_MODEL`) and forwards the caller's `KB_API_KEY` to OWUI, so OWUI
+enforces KB read access natively. (Humans/admins still RAG directly at
+`POST /api/chat/completions` with an explicit `model` field — see [Admin surface](#admin-surface).)
 
-- The server vector-searches the `files` collection, injects the chunks into the strict `RAG_TEMPLATE`, and calls the chat LLM (default `gemma4:12b`) for a grounded answer.
+- The server vector-searches the `files` collection, injects the chunks into the strict `RAG_TEMPLATE`, and calls the chat LLM for a grounded answer.
 - **Requires `make rag-config`**: the strict `RAG_TEMPLATE` is set by `make rag-config`, not the image default — without it the model falls back to its own knowledge and confabulates. The embedding URL must also be in sync (`make preflight` checks; `make rag-config` re-syncs). See Prerequisites.
-- **Use when**: a one-shot answer is enough and the local ~12B model is adequate.
+- **Use when**: a one-shot answer is enough and the local model is adequate.
 - **Cost**: fewer of your tokens (only the answer returns); spends Ollama tokens.
 - **Risk**: the local model can confabulate. If the answer must be right, use **Search** below and synthesize yourself.
-- **Grounding**: pass the KB via the top-level `files` field only. Do NOT use a `knowledge` field (silently ignored) or `metadata.knowledge` (request metadata is discarded and replaced server-side). `type:collection` = whole-KB vector search; `type:file` = one file id. `model` defaults to the stack's chat LLM. The caller needs read access to the KB and to the model.
-- Wrapper: `rag "<question>" --kb <kb-id> [--kb <id2>] [--model <m>]`.
+- **Grounding**: pass the KB via the top-level `files` field only. Do NOT use a `knowledge` field (silently ignored) or `metadata.knowledge` (request metadata is discarded and replaced server-side). `type:collection` = whole-KB vector search; `type:file` = one file id. The caller needs read access to the KB; the model is backend-side config (the gateway inserts it).
+- Wrapper: `rag "<question>" --kb <kb-id> [--kb <id2>]`.
 
 ### Search
 
@@ -106,25 +112,24 @@ read-only and matches the agent role; the **projects-memory surface**
 path in your installed copy of this skill.
 
 ```
-KB=~/SOURCE/Deployments/knowledgebase
 S=~/.codex/skills/kb/scripts/owui.py
-E="--env-file $KB/.env --env-file $KB/.env.local"   # KB_HOST in .env, key in .env.local
+export KB_HOST=http://localhost:3000            # or your KB_HOST
+export KB_API_KEY="$OPENWEBUI_USER_API_KEY"     # from .env.local (make api-keys)
 
-python3 "$S" $E whoami                          # verify key + role
-python3 "$S" $E kbs                             # list visible KBs
-python3 "$S" $E search-kbs "main"               # find a KB by name
-python3 "$S" $E rag "What is XSL?" --kb <kb-id>  # chat (RAG) — LLM answer from the KB
-python3 "$S" $E search <kb-id> "XSL streaming"  # search — raw chunks, you synthesize
-python3 "$S" $E file <file-id>                   # file text content
+python3 "$S" whoami                             # verify key + role
+python3 "$S" kbs                                # list visible KBs
+python3 "$S" search-kbs "main"                  # find a KB by name
+python3 "$S" rag "What is XSL?" --kb <kb-id>    # chat (RAG) — LLM answer from the KB (via kb-gateway)
+python3 "$S" search <kb-id> "XSL streaming"     # search — raw chunks, you synthesize
+python3 "$S" file <file-id>                     # file text content
 ```
 
-Config resolution: `--base-url`/`--key` flags > `--env-file` (repeatable; load
-`.env` then `.env.local`; later files override earlier, and explicit files
-override inherited shell env — same precedence as `make api-keys`, which sources
-`.env`/`.env.local`) > inherited `KB_HOST` (or `KB_HOST_PORT`) + `KB_API_KEY`
-(fallback `OPENWEBUI_USER_API_KEY`). RAG model: `--model` or `OPENWEBUI_MODEL` or
-`MODEL_NAME` env, default `gemma4:12b` — resolved from `.env` so the wrapper
-requests the same model `make api-keys` grants `*` read on.
+Config: the wrapper is a thin client. It reads ONLY `KB_HOST` and `KB_API_KEY`
+from the shell environment — no `.env` / `.env.local` files, no other env vars,
+no `--base-url` / `--key` / `--model` flags. Set both in your shell before
+invoking it (`export KB_HOST=...` / `export KB_API_KEY=...`). RAG chat is
+proxied by the kb-gateway (`POST /memory/rag`), which inserts the chat model
+server-side from `OPENWEBUI_MODEL`; the wrapper carries no model.
 
 Typical flow: `kbs` (or `search-kbs`) → grab the KB id → `rag` for a one-shot
 answer, or `search` for raw chunks when the answer must be right (see the
@@ -185,16 +190,15 @@ are deleted so the KB mirror stays exact.
 ## Using the wrapper (`scripts/owui.py`, projects-memory subcommands)
 
 ```
-KB=~/SOURCE/Deployments/knowledgebase
 S=~/.codex/skills/kb/scripts/owui.py
-E="--env-file $KB/.env --env-file $KB/.env.local"   # KB_HOST in .env, key in .env.local
+# (KB_HOST + KB_API_KEY already exported above)
 
-python3 "$S" $E index-projects --dry-run                  # plan only; JSON {projects,total}
-python3 "$S" $E index-projects --project knowledgebase --wait   # index this repo, then wait for drain
-python3 "$S" $E status-projects                           # current repo's drain status (JSON; walks up cwd)
-python3 "$S" $E search-projects "QPU scheduling"          # across ALL your project KBs
-python3 "$S" $E search-projects "memory" --host mini2 --project knowledgebase   # filtered
-python3 "$S" $E search-projects "XSL" --kb-glob 'mini2--*'                 # wildcard KB name
+python3 "$S" index-projects --dry-run              # plan only; JSON {projects,total}
+python3 "$S" index-projects --project knowledgebase --wait   # index this repo, then wait for drain
+python3 "$S" status-projects                       # current repo's drain status (JSON; walks up cwd)
+python3 "$S" search-projects "QPU scheduling"      # across ALL your project KBs
+python3 "$S" search-projects "memory" --host mini2 --project knowledgebase   # filtered
+python3 "$S" search-projects "XSL" --kb-glob 'mini2--*'   # wildcard KB name
 ```
 
 `search-projects` filters: `--host` (name starts with `<host>--`), `--project`
@@ -216,8 +220,8 @@ derives your identity + role from your `KB_API_KEY` via Open WebUI (tamper-proof
 - The stack is up and healthy (`make start && make health`).
 - You have a `KB_API_KEY` (an Open WebUI key). The admin's is
   `OPENWEBUI_ADMIN_API_KEY`; per-account keys are issued by the admin via
-  `user-create` (below). Set `KB_HOST` (in `.env`; default
-  `http://localhost:3000`) and `KB_API_KEY`, or pass `--env-file` (repeatable).
+  `user-create` (below). Set `KB_HOST` (default `http://localhost:3000`) and
+  `KB_API_KEY` in your shell env — the wrapper reads only those two (no `--env-file`).
 - For non-local `KB_HOST`, the URL must be HTTPS or a VPN/tunnel (`KB_API_KEY`
   is a bearer). On a trusted local interface plain HTTP is fine.
 
@@ -245,19 +249,18 @@ wrapper lives in `scripts/` next to this file; set `G` to its path in your
 installed copy of this skill.
 
 ```
-KB=~/SOURCE/Deployments/knowledgebase
 G=~/.codex/skills/kb/scripts/kb_gateway.py
-E="--env-file $KB/.env --env-file $KB/.env.local"   # KB_HOST in .env, KB_API_KEY in .env.local
+# (KB_HOST + KB_API_KEY already exported — see Prerequisites above)
 
-python3 "$G" $E whoami                                # verify identity (from the key, via the gateway)
-python3 "$G" $E groups                                 # list all groups that have data
-python3 "$G" $E add "Project Atlas uses a QPU scheduler" --name atlas
-python3 "$G" $E search "QPU scheduling" --k 5          # facts across ALL groups (read-only)
-python3 "$G" $E episodes --max 20                      # episodes across ALL groups (read-only)
-python3 "$G" $E status                                 # graphiti server + DB status
-python3 "$G" $E forget user:alice@example.com          # clear YOUR group's memory (owner/admin)
-python3 "$G" $E delete-edge <uuid>                     # delete one edge (owner/admin of its group)
-python3 "$G" $E delete-episode <uuid>                  # delete one episode (owner/admin of its group)
+python3 "$G" whoami                              # verify identity (from the key, via the gateway)
+python3 "$G" groups                              # list all groups that have data
+python3 "$G" add "Project Atlas uses a QPU scheduler" --name atlas
+python3 "$G" search "QPU scheduling" --k 5       # facts across ALL groups (read-only)
+python3 "$G" episodes --max 20                   # episodes across ALL groups (read-only)
+python3 "$G" status                              # graphiti server + DB status
+python3 "$G" forget user:alice@example.com       # clear YOUR group's memory (owner/admin)
+python3 "$G" delete-edge <uuid>                  # delete one edge (owner/admin of its group)
+python3 "$G" delete-episode <uuid>               # delete one episode (owner/admin of its group)
 ```
 
 Errors: any non-200 from the gateway exits non-zero with the gateway's message
@@ -273,7 +276,7 @@ the full Open WebUI provisioning flow and returns the new user's email, a
 generated temporary password, and their `KB_API_KEY`.
 
 ```
-python3 "$G" $E user-create --email alice@example.com --name Alice
+python3 "$G" user-create --email alice@example.com --name Alice
 # admin KB_API_KEY only; prints compact JSON: email, temp_password, kb_api_key, role, id
 ```
 

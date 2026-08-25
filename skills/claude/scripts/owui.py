@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CLI wrapper for a self-hosted Open WebUI knowledge base.
 
-Two surfaces, one key (the non-admin agent key, OPENWEBUI_USER_API_KEY):
+Two surfaces, one key (the non-admin agent key, KB_API_KEY):
 
   * KB surface (read-scoped): list/search KBs, semantic-search a KB, RAG chat
     grounded on a KB, read file content. The agent key is read-only here: it
@@ -19,13 +19,14 @@ The stack is fronted by Caddy at KB_HOST: OWUI REST is at the KB_HOST root
 (/api/* via Caddy catch-all -> openwebui:8080). The kb-gateway memory endpoints are
 at /memory/* on the same KB_HOST. One URL, one key.
 
-Zero dependencies (Python 3.10+ stdlib). Config resolution priority:
-    CLI flags  >  environment variables  >  --env-file (a .env-style file)
+Zero dependencies (Python 3.10+ stdlib). Config: the wrapper is a thin client.
+It reads ONLY two env vars from the shell environment — KB_HOST and KB_API_KEY.
+It does not read .env / .env.local files (set both in your shell before invoking
+it). RAG chat is proxied by the kb-gateway (POST /memory/rag), which inserts the
+chat model server-side from OPENWEBUI_MODEL; the wrapper carries no model. The
+projects-memory --wait deadline is 600s (fixed).
 
-Env vars: KB_HOST (or KB_HOST_PORT), KB_API_KEY
-(fallback OPENWEBUI_USER_API_KEY), optional OPENWEBUI_MODEL for RAG chat,
-optional PROJECTS_WAIT (seconds; --wait deadline, default 600) + HOSTNAME
-(host segment of the project KB name) for the projects-memory surface.
+Env vars: KB_HOST, KB_API_KEY.
 """
 import argparse
 import fnmatch
@@ -41,54 +42,18 @@ import urllib.parse
 import urllib.request
 
 
-def load_env_file(path):
-    """Parse KEY=VALUE lines from a .env-style file into os.environ, OVERRIDING
-    any inherited value (so explicit --env-file config wins over the shell env,
-    and a later --env-file wins over an earlier one — matching `make api-keys`,
-    which sources .env then .env.local the same way). For a quoted value, takes
-    the content between the matching quotes (discarding any inline comment after
-    the closing quote). For an unquoted value, drops an inline # comment. No ${}
-    interpolation (values are literal)."""
-    if not path or not os.path.exists(path):
-        return
-    with open(path) as f:
-        for ln in f:
-            s = ln.strip()
-            if not s or s.startswith("#") or "=" not in s:
-                continue
-            k, v = s.split("=", 1)
-            k = k.strip()
-            v = v.strip()
-            if v and v[0] in ("'", '"'):
-                q = v[0]
-                end = v.find(q, 1)
-                v = v[1:end] if end != -1 else v[1:]   # quoted: content up to closing quote
-            elif "#" in v:
-                v = v.split("#", 1)[0].strip()         # unquoted: drop inline comment
-            os.environ[k] = v                       # override: --env-file wins over inherited shell env
-
-
-def base_url(args):
-    if args.base_url:
-        return args.base_url.rstrip("/")
+def base_url():
     if os.environ.get("KB_HOST"):
         return os.environ["KB_HOST"].rstrip("/")
-    if os.environ.get("KB_HOST_PORT"):
-        return "http://localhost:%s" % os.environ["KB_HOST_PORT"]
-    sys.exit("FAIL  no KB_HOST: pass --base-url or set KB_HOST "
-             "(or KB_HOST_PORT, or --env-file)")
+    sys.exit("FAIL  no KB_HOST: set KB_HOST in your shell env "
+             "(e.g. export KB_HOST=http://localhost:3000)")
 
 
-def api_key(args):
-    if args.key:
-        return args.key
-    # KB_API_KEY is the unified key for the stack (an Open WebUI key). Fall back
-    # to OPENWEBUI_USER_API_KEY for backward compatibility with existing .env.local.
+def api_key():
+    # KB_API_KEY is the unified key for the stack (an Open WebUI key).
     if os.environ.get("KB_API_KEY"):
         return os.environ["KB_API_KEY"]
-    if os.environ.get("OPENWEBUI_USER_API_KEY"):
-        return os.environ["OPENWEBUI_USER_API_KEY"]
-    sys.exit("FAIL  no API key: pass --key or set KB_API_KEY (or --env-file)")
+    sys.exit("FAIL  no API key: set KB_API_KEY in your shell env")
 
 
 def call(base, key, method, path, body=None):
@@ -181,22 +146,21 @@ def cmd_search(base, key, a):
 
 
 def cmd_rag(base, key, a):
-    model = a.model or os.environ.get("OPENWEBUI_MODEL") or os.environ.get("MODEL_NAME") or "gemma4:12b"
-    body = {
-        "model": model,
-        "stream": False,
-        "messages": [{"role": "user", "content": a.question}],
-    }
+    # RAG is proxied by the kb-gateway (POST /memory/rag), which inserts the
+    # chat model server-side from OPENWEBUI_MODEL and forwards the caller's key
+    # to OWUI so KB read access is enforced natively. The wrapper carries no
+    # model (the model is backend-side config; everything is tested against it).
+    body = {"messages": [{"role": "user", "content": a.question}]}
     if a.kb:
-        # Ground the chat on KB(s). Open WebUI's /api/chat/completions reads
-        # KBs from the top-level `files` field as collection items — NOT from a
-        # `knowledge` field (ignored) or `metadata.knowledge` (metadata is
-        # discarded and replaced server-side). type:collection -> whole-KB
-        # vector search; type:file would scope to one file id.
+        # Ground the chat on KB(s). OWUI's /api/chat/completions (which the
+        # gateway proxies to) reads KBs from the top-level `files` field as
+        # collection items — NOT from a `knowledge` field (ignored) or
+        # `metadata.knowledge` (metadata is discarded and replaced server-side).
+        # type:collection -> whole-KB vector search; type:file would scope to
+        # one file id.
         body["files"] = [{"type": "collection", "id": kid} for kid in a.kb]
-    d = jget(base, key, "POST", "/api/chat/completions", body)
-    content = (d.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-    print(content or "(empty response)")
+    d = jget(base, key, "POST", "/memory/rag", body)
+    print(d.get("content") or "(empty response)")
 
 
 def _content_ext(ctype):
@@ -255,8 +219,8 @@ def cmd_file(base, key, a):
 # decoding is lossy, so the exact encoded dir is the authoritative project key.
 
 def _short_host():
-    # HOSTNAME is not exported in non-interactive shells; platform.node() is.
-    return (os.environ.get("HOSTNAME") or platform.node() or "unknown").split(".")[0]
+    # platform.node() is available in non-interactive shells (HOSTNAME is not).
+    return (platform.node() or "unknown").split(".")[0]
 
 
 def _whoami(base, key):
@@ -438,7 +402,7 @@ def _parse_repo(desc):
 
 
 def _wait_deadline():
-    return time.time() + int(os.environ.get("PROJECTS_WAIT", "600"))
+    return time.time() + 600
 
 
 def cmd_index_projects(base, key, a):
@@ -669,10 +633,6 @@ def main():
         prog="owui.py",
         description="Read-scoped Open WebUI REST wrapper (non-admin agent key).",
     )
-    p.add_argument("--base-url", help="KB_HOST URL (e.g. http://localhost:3000)")
-    p.add_argument("--key", help="API key (KB_API_KEY)")
-    p.add_argument("--env-file", action="append", default=[],
-                   help=".env-style file to load KB_HOST + key from (repeatable; e.g. .env then .env.local)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("whoami", help="print the key's email + role")
@@ -684,9 +644,8 @@ def main():
     sp.add_argument("kb_id"); sp.add_argument("query")
     sp.add_argument("--k", type=int, default=4); sp.add_argument("--no-hybrid", action="store_true")
 
-    sp = sub.add_parser("rag", help="RAG chat grounded on one or more KBs")
+    sp = sub.add_parser("rag", help="RAG chat grounded on one or more KBs (proxied by kb-gateway /memory/rag)")
     sp.add_argument("question"); sp.add_argument("--kb", action="append", default=[])
-    sp.add_argument("--model", help="chat model (default OPENWEBUI_MODEL or MODEL_NAME or gemma4:12b)")
 
     sp = sub.add_parser("file", help="print a file's text content"); sp.add_argument("id")
 
@@ -696,7 +655,7 @@ def main():
     sp.add_argument("--host", default=None, help="host segment of KB name (default $HOSTNAME short)")
     sp.add_argument("--project", default=None, help="substring filter on the encoded project dir")
     sp.add_argument("--dry-run", action="store_true", help="plan only; no writes")
-    sp.add_argument("--wait", action="store_true", help="poll until the drain completes (deadline PROJECTS_WAIT, default 600s)")
+    sp.add_argument("--wait", action="store_true", help="poll until the drain completes (deadline 600s)")
     sp.add_argument("--no-cleanup", action="store_true", help="do not delete KB files whose source is gone")
 
     sp = sub.add_parser("search-projects",
@@ -717,10 +676,8 @@ def main():
     sp.add_argument("--wait", action="store_true", help="poll until pending+processing == 0")
 
     a = p.parse_args()
-    for ef in a.env_file:
-        load_env_file(ef)
-    base = base_url(a)
-    key = api_key(a)
+    base = base_url()
+    key = api_key()
 
     {
         "whoami": cmd_whoami, "kbs": cmd_kbs, "kb": cmd_kb, "search-kbs": cmd_search_kbs,

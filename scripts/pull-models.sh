@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pull the base chat LLM (OLLAMA_MODEL_BASE), create the ctx-baked variant
-# (MODEL_NAME with num_ctx=OLLAMA_MODEL_CONTEXT), and pull the embedder
+# (GRAPHITI_MODEL with num_ctx=OLLAMA_MODEL_CONTEXT), and pull the embedder
 # (nomic-embed-text). Refuses if OLLAMA_MODEL_CONTEXT is not a positive
 # integer.
 #
@@ -18,7 +18,7 @@ _OCR_ENABLED_OVR="${OCR_ENABLED:-}"
 set -a; . ./.env; set +a
 if [ -n "$_OCR_ENABLED_OVR" ]; then export OCR_ENABLED="$_OCR_ENABLED_OVR"; fi
 : "${OLLAMA_MODEL_BASE:?OLLAMA_MODEL_BASE not set in .env}"
-: "${MODEL_NAME:?MODEL_NAME not set in .env}"
+: "${GRAPHITI_MODEL:?GRAPHITI_MODEL not set in .env}"
 case "${OLLAMA_MODEL_CONTEXT:-}" in ''|*[!0-9]*)
   echo "REFUSING: OLLAMA_MODEL_CONTEXT must be a positive integer (got '${OLLAMA_MODEL_CONTEXT:-<unset>}')" >&2
   exit 1;;
@@ -29,9 +29,9 @@ echo "Pulling base LLM: $OLLAMA_MODEL_BASE"
 ollama pull "$OLLAMA_MODEL_BASE"
 mf=$(mktemp)
 printf 'FROM %s\nPARAMETER num_ctx %s\n' "$OLLAMA_MODEL_BASE" "$OLLAMA_MODEL_CONTEXT" > "$mf"
-echo "Creating ctx variant: $MODEL_NAME (num_ctx=$OLLAMA_MODEL_CONTEXT)"
-ollama rm "$MODEL_NAME" >/dev/null 2>&1 || true
-ollama create "$MODEL_NAME" -f "$mf"
+echo "Creating ctx variant: $GRAPHITI_MODEL (num_ctx=$OLLAMA_MODEL_CONTEXT)"
+ollama rm "$GRAPHITI_MODEL" >/dev/null 2>&1 || true
+ollama create "$GRAPHITI_MODEL" -f "$mf"
 rm -f "$mf"
 echo "Pulling embedder: nomic-embed-text"
 ollama pull nomic-embed-text

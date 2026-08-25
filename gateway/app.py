@@ -214,6 +214,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/memory/delete-episode" and method == "POST":
             identity = self._auth()
             return self._delete_uuid(identity, self._read_body(), "episode")
+        if path == "/memory/rag" and method == "POST":
+            identity = self._auth()
+            return self._rag(identity, self._read_body())
         if path == "/admin/users" and method == "POST":
             identity = self._auth()
             return self._create_user(identity, self._read_body())
@@ -276,6 +279,29 @@ class Handler(BaseHTTPRequestHandler):
         else:
             graphiti.delete_episode(uuid)
         self._ok({"ok": True, "uuid": uuid, "group": target_group})
+
+    # -- RAG: gateway-inserted chat model, OWUI-native KB authz --
+
+    def _rag(self, identity, body):
+        """POST /memory/rag: RAG chat grounded on an OWUI KB. The caller sends
+        {messages, files}; the gateway inserts the chat model from OPENWEBUI_MODEL
+        and proxies POST /api/chat/completions with the CALLER's key, so OWUI
+        enforces KB read access natively (no admin-key escalation, no gateway-side
+        authz replication). ident = _auth(); authz = delegated to OWUI. Errors map
+        OwuiError.code -> 4xx (esp. 403 = KB read denied) / 5xx -> 502; transport
+        (no code) / unset model -> 503."""
+        messages = _req(body, "messages")
+        files = body.get("files") or []
+        key = self.headers.get("Authorization", "")[len("Bearer "):].strip()
+        try:
+            result = owui.rag(key, messages, files)
+        except owui.OwuiError as e:
+            if e.code is None:
+                raise GatewayError(503, "RAG upstream unavailable: %s" % e)
+            if 400 <= e.code < 500:
+                raise GatewayError(e.code, "RAG upstream: %s" % e)
+            raise GatewayError(502, "RAG upstream: %s" % e)
+        self._ok(result)
 
     # -- admin: agent-driven user provisioning --
     def _create_user(self, identity, body):
@@ -885,7 +911,8 @@ OPENAPI_SPEC = {
         "/memory/search": {"post": {"summary": "Search facts", "security": [{"bearerAuth": []}]}},
         "/memory/forget": {"post": {"summary": "Clear a Group", "security": [{"bearerAuth": []}]}},
         "/memory/delete-edge": {"post": {"summary": "Delete an edge", "security": [{"bearerAuth": []}]}},
-        "/memory/delete-episode": {"post": {"summary": "Delete an episode", "security": [{"bearerAuth": []}]}}},
+        "/memory/delete-episode": {"post": {"summary": "Delete an episode", "security": [{"bearerAuth": []}]}},
+        "/memory/rag": {"post": {"summary": "RAG chat grounded on an OWUI KB (gateway inserts the chat model from OPENWEBUI_MODEL; caller's key enforces KB read access)", "security": [{"bearerAuth": []}]}}},
     "components": {"securitySchemes": {"bearerAuth": {
         "type": "http", "scheme": "bearer", "description": "KB_API_KEY (OWUI API key)"}}},
 }
