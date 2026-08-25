@@ -98,6 +98,12 @@ indexable_filter=( -not -path '*/.*' \(
     -iname '*.log'  -o
     -iname '*.tex'
 \) )
+# Same document allowlist as a grep -Ei regex, applied to the rclone remote
+# listing (each line is a path ending in the filename, so "\.ext$" matches the
+# file extension). Yields the PRE-EXCLUSION "allowed" count — Drive files that
+# match the indexable extensions before gdrive-exclude.conf removes any. Mirrors
+# DEFAULT_ALLOW (gateway/app.py:750) and indexable_filter above — keep in sync.
+allowed_re='\.(docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
 
 while (($# > 0)); do
     case "$1" in
@@ -359,22 +365,22 @@ PY
     fi
 }
 
-# Render the per-drive remote/local/indexable/excluded table to stdout. Called
-# inside the report's { } block (output goes to the report file) and again after
-# (to the terminal). Globals: drive_rows (name<TAB>remote<TAB>local<TAB>indexable
-# <TAB>excluded<TAB>dups per completed drive), total_remote, total_local,
-# total_indexable, total_excl.
+# Render the per-drive remote/local/allowed/indexable/excluded table to stdout.
+# Called inside the report's { } block (output goes to the report file) and again
+# after (to the terminal). Globals: drive_rows (name<TAB>remote<TAB>local
+# <TAB>allowed<TAB>indexable<TAB>excluded<TAB>dups per completed drive),
+# total_remote, total_local, total_allowed, total_indexable, total_excl.
 print_drive_table() {
     printf 'Drive table:\n'
-    printf '%-28s %10s %10s %10s %10s %8s\n' "DRIVE" "remote" "local" "indexable" "excluded" "dups"
-    printf '%-28s %10s %10s %10s %10s %8s\n' "-----" "------" "-----" "---------" "--------" "----"
+    printf '%-28s %10s %10s %10s %10s %10s %8s\n' "DRIVE" "remote" "local" "allowed" "indexable" "excluded" "dups"
+    printf '%-28s %10s %10s %10s %10s %10s %8s\n' "-----" "------" "-----" "-------" "---------" "--------" "----"
     if [[ -n "$drive_rows" ]]; then
-        while IFS=$'\t' read -r dname rem loc idx exc dup; do
+        while IFS=$'\t' read -r dname rem loc alw idx exc dup; do
             [[ -n "$dname" ]] || continue
-            printf '%-28s %10s %10s %10s %10s %8s\n' "$dname" "$rem" "$loc" "$idx" "$exc" "$dup"
+            printf '%-28s %10s %10s %10s %10s %10s %8s\n' "$dname" "$rem" "$loc" "$alw" "$idx" "$exc" "$dup"
         done <<<"$drive_rows"
     fi
-    printf '%-28s %10s %10s %10s %10s %8s\n' "TOTAL" "$total_remote" "$total_local" "$total_indexable" "$total_excl" "$total_dups"
+    printf '%-28s %10s %10s %10s %10s %10s %8s\n' "TOTAL" "$total_remote" "$total_local" "$total_allowed" "$total_indexable" "$total_excl" "$total_dups"
 }
 
 # Write the sync report (header + $summary + drive table + "Files changed"
@@ -443,11 +449,12 @@ write_report_and_exit() {
 changes=""
 processed_drives=0
 # Per-drive accumulators for the report's drive table + totals. remote/local/
-# indexable/excluded are summed per drive; drive_rows holds one TSV row per
-# completed drive (name<TAB>remote<TAB>local<TAB>indexable<TAB>excluded<TAB>dups)
+# allowed/indexable/excluded are summed per drive; drive_rows holds one TSV row
+# per completed drive (name<TAB>remote<TAB>local<TAB>allowed<TAB>indexable<TAB>excluded<TAB>dups)
 # rendered as the report table.
 total_remote=0
 total_local=0
+total_allowed=0
 total_indexable=0
 total_bytes=0
 total_excl=0     # init here: print_drive_table() reaches these on the fail-fast /
@@ -485,10 +492,21 @@ while IFS=$'\t' read -r drive_id drive_name; do
     # dir. The account-wide "no drives visible" case is already caught above
     # (drive_count==0); this catches a SINGLE drive coming back empty. Recursive
     # listing is required — depth-1 would miss files in subdirs and false-abort.
-    if ! remote_files=$(rclone lsf -R --files-only "${remote}:" --drive-team-drive "$drive_id" 2>/dev/null | wc -l); then
+    # Keep the full listing (not just wc -l): remote_files counts every Drive
+    # file; remote_allowed counts those matching the indexable allowlist ext
+    # (pre-exclusion, via allowed_re) — the "allowed" column. $() strips the
+    # trailing newline rclone emits, so guard the empty case before wc -l.
+    if ! remote_listing=$(rclone lsf -R --files-only "${remote}:" --drive-team-drive "$drive_id" 2>/dev/null); then
         printf 'FAIL: cannot list remote files for drive %s (rclone lsf error) — aborting (fail-fast).\n' "$drive_name" >&2
         emit "FAIL: cannot list remote files for drive ${drive_name} — aborted (fail-fast)"
         write_report_and_exit 1
+    fi
+    if [[ -z "$remote_listing" ]]; then
+        remote_files=0
+        remote_allowed=0
+    else
+        remote_files=$(wc -l <<<"$remote_listing")
+        remote_allowed=$(grep -cEi "$allowed_re" <<<"$remote_listing" || true)
     fi
     if (( remote_files == 0 )); then
         printf 'FAIL: shared drive %s has 0 remote files — refusing to sync (empty source would mass-delete %s). Investigate Drive access; local copy preserved.\n' "$drive_name" "$target" >&2
@@ -575,15 +593,16 @@ while IFS=$'\t' read -r drive_id drive_name; do
         drive_bytes=$(du -sb -- "$target" | awk '{print $1}')
     fi
     drive_mb=$(awk -v bytes="$drive_bytes" 'BEGIN { printf "%.2f", bytes / 1000000 }')
-    printf 'Drive report: %s -> %s: %s files, %s MB local, %s indexable (%s excluded of %s remote)\n' \
-        "$drive_name" "$safe_name" "$drive_files" "$drive_mb" "$drive_indexable" "$drive_excl_count" "$remote_files"
+    printf 'Drive report: %s -> %s: %s files, %s MB local, %s allowed, %s indexable (%s excluded of %s remote)\n' \
+        "$drive_name" "$safe_name" "$drive_files" "$drive_mb" "$remote_allowed" "$drive_indexable" "$drive_excl_count" "$remote_files"
     total_remote=$((total_remote + remote_files))
     total_local=$((total_local + drive_files))
+    total_allowed=$((total_allowed + remote_allowed))
     total_indexable=$((total_indexable + drive_indexable))
     total_bytes=$((total_bytes + drive_bytes))
     # printf -v (not $(printf...)) preserves the trailing newline — command
     # substitution would strip it and concatenate the rows.
-    printf -v __row '%s\t%s\t%s\t%s\t%s\t%s\n' "$drive_name" "$remote_files" "$drive_files" "$drive_indexable" "$drive_excl_count" "$drive_dup_count"
+    printf -v __row '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$drive_name" "$remote_files" "$drive_files" "$remote_allowed" "$drive_indexable" "$drive_excl_count" "$drive_dup_count"
     drive_rows+="$__row"
 done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$drive_json")
 
@@ -594,7 +613,7 @@ done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$drive_json")
 total_mb=$(awk -v bytes="$total_bytes" 'BEGIN { printf "%.2f", bytes / 1000000 }')
 total_excl=$(awk -F'\t' '$1=="EXCLUDE"' <<<"$changes" | wc -l)
 total_dups=$(awk -F'\t' '$1=="DUP"' <<<"$changes" | wc -l)
-emit "Sync report: ${processed_drives} drives, ${total_remote} remote, ${total_local} local, ${total_indexable} indexable, ${total_excl} excluded, ${total_dups} duplicates, ${total_mb} MB local"
+emit "Sync report: ${processed_drives} drives, ${total_remote} remote, ${total_local} local, ${total_allowed} allowed, ${total_indexable} indexable, ${total_excl} excluded, ${total_dups} duplicates, ${total_mb} MB local"
 
 # Deleted/overwritten files rclone moved into --backup-dir (recovery net). Empty
 # when nothing changed or under --dry-run (sync does not move files then).
