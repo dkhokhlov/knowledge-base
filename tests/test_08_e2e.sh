@@ -33,7 +33,7 @@ kbrun() {
 
 section "agent identity + status"
 WHO=$(kbrun $KB whoami) || { finish; exit 1; }
-AGENT_EMAIL=$(printf '%s' "$WHO" | awk '{print $1}')
+AGENT_EMAIL=$(printf '%s' "$WHO" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("email") or "")')
 AGENT_GROUP="user:${AGENT_EMAIL}"
 [ -n "$AGENT_EMAIL" ] && pass "agent whoami -> ${AGENT_EMAIL}" || fail "agent whoami empty"
 STAT=$(kbrun $KB status) || true
@@ -55,8 +55,8 @@ TS=$(date +%s)
 RID=$(( TS % 900000 + 100000 ))
 PROBE="E2E comprehensive probe: the cryostat on lattice-D holds exactly ${RID} cells at 15 millikelvin for calibration."
 ADDOUT=$(kbrun $KB add "$PROBE" --name "e2e-${TS}") || true
-AGENT_GROUP_ID=$(printf '%s' "$ADDOUT" | sed 's/^added to group //')
-printf '%s' "$ADDOUT" | grep -q "added to group" && pass "agent add -> ${AGENT_GROUP_ID}" || fail "agent add failed"
+AGENT_GROUP_ID=$(printf '%s' "$ADDOUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("group") or "")')
+[ -n "$AGENT_GROUP_ID" ] && pass "agent add -> ${AGENT_GROUP_ID}" || fail "agent add failed"
 
 section "fact extracted (searchable after async extraction)"
 # Budget 420 s @ 10 s. The ctx-baked model (num_ctx=8192, ~20 GB) fits the
@@ -77,11 +77,11 @@ section "delete-edge (fact uuid) + delete-episode"
 # group was emptied above, so this is this add's fact). Gating on fact_found
 # avoids f[0] being an unrelated fact when the probe is absent. The run-id
 # number is NOT used (extraction sometimes drops it).
-FACT_UUID=$(kbrun $KB search "cryostat lattice-D" --k 5 2>/dev/null | python3 -c 'import sys,json; f=json.load(sys.stdin) or []; print(next((x["uuid"] for x in f if "cryostat" in json.dumps(x).lower()), ""))' 2>/dev/null)
-EP_UUID=$(kbrun $KB episodes --max 20 2>/dev/null | python3 -c 'import sys,json; eps=json.load(sys.stdin) or []; print(next((e["uuid"] for e in eps if str(e.get("name","")).startswith("e2e-")), eps[0]["uuid"] if eps else ""))' 2>/dev/null)
+FACT_UUID=$(kbrun $KB search "cryostat lattice-D" --k 5 2>/dev/null | python3 -c 'import sys,json; f=json.load(sys.stdin).get("facts") or []; print(next((x["uuid"] for x in f if "cryostat" in json.dumps(x).lower()), ""))' 2>/dev/null)
+EP_UUID=$(kbrun $KB episodes --max 20 2>/dev/null | python3 -c 'import sys,json; eps=json.load(sys.stdin).get("episodes") or []; print(next((e["uuid"] for e in eps if str(e.get("name","")).startswith("e2e-")), eps[0]["uuid"] if eps else ""))' 2>/dev/null)
 if [ "$fact_found" = 1 ] && [ -n "$FACT_UUID" ]; then
   DELOUT=$(kbrun $KB delete-edge "$FACT_UUID") || true
-  printf '%s' "$DELOUT" | grep -q "deleted edge" && pass "delete-edge ${FACT_UUID}" || fail "delete-edge failed"
+  printf '%s' "$DELOUT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("uuid") else 1)' && pass "delete-edge ${FACT_UUID}" || fail "delete-edge failed"
   # verify the edge is gone from search
   kbrun $KB search "$RID" --k 5 2>/dev/null | grep -q "$FACT_UUID" \
     && fail "delete-edge: ${FACT_UUID} still in search" \
@@ -91,14 +91,14 @@ else
 fi
 if [ -n "$EP_UUID" ]; then
   DELOUT=$(kbrun $KB delete-episode "$EP_UUID") || true
-  printf '%s' "$DELOUT" | grep -q "deleted episode" && pass "delete-episode ${EP_UUID}" || fail "delete-episode failed"
+  printf '%s' "$DELOUT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("uuid") else 1)' && pass "delete-episode ${EP_UUID}" || fail "delete-episode failed"
 else
   fail "no episode uuid to delete-episode"
 fi
 
 section "forget own group -> agent group gone"
 FORGOT=$(kbrun $KB forget "$AGENT_GROUP") || true
-printf '%s' "$FORGOT" | grep -q "forgot group" && pass "agent forget ${AGENT_GROUP}" || fail "agent forget failed"
+printf '%s' "$FORGOT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("group") else 1)' && pass "agent forget ${AGENT_GROUP}" || fail "agent forget failed"
 # Assert the agent's OWN group is gone from the read-all list. Do NOT assert
 # global emptiness: other groups (admin, other tests) may have data. add_episode
 # keeps writing edges briefly after the first fact is searchable, so a residual
@@ -116,9 +116,9 @@ done
 section "admin user-create + issued key + non-admin deny"
 NEW_EMAIL="e2e-${TS}@${KB_DOMAIN:-local.test}"
 UCOUT=$(kbrun $KBA user-create --email "$NEW_EMAIL" --name "E2E User") || true
-NEW_KEY=$(printf '%s' "$UCOUT" | awk '/^kb_api_key:/ {print $2}')
+NEW_KEY=$(printf '%s' "$UCOUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("kb_api_key") or "")')
 if [ -n "$NEW_KEY" ]; then
-  printf '%s' "$UCOUT" | grep -q "role:           user" && pass "admin user-create -> ${NEW_EMAIL} (role=user)" || fail "user-create role mismatch"
+  printf '%s' "$UCOUT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("role")=="user" else 1)' && pass "admin user-create -> ${NEW_EMAIL} (role=user)" || fail "user-create role mismatch"
   NUWHO=$(python3 "${KB_ROOT}/skills/claude/scripts/kb_gateway.py" --base-url "$G" --key "$NEW_KEY" whoami 2>/dev/null) || true
   printf '%s' "$NUWHO" | grep -q "${NEW_EMAIL}" && pass "issued key whoami -> ${NEW_EMAIL}" || fail "issued key whoami failed"
 else

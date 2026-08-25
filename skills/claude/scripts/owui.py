@@ -19,7 +19,7 @@ The stack is fronted by Caddy at KB_HOST: OWUI REST is at the KB_HOST root
 (/api/* via Caddy catch-all -> openwebui:8080). The kb-gateway memory endpoints are
 at /memory/* on the same KB_HOST. One URL, one key.
 
-Zero dependencies (Python 3.8+ stdlib). Config resolution priority:
+Zero dependencies (Python 3.10+ stdlib). Config resolution priority:
     CLI flags  >  environment variables  >  --env-file (a .env-style file)
 
 Env vars: KB_HOST (or KB_HOST_PORT), KB_API_KEY
@@ -140,20 +140,16 @@ def flatten_chroma(d):
 
 def cmd_whoami(base, key, a):
     d = jget(base, key, "GET", "/api/v1/auths/")
-    print("%s role=%s" % (d.get("email", "?"), d.get("role", "?")))
+    print(json.dumps({"email": d.get("email"), "role": d.get("role")}))
 
 
 def cmd_kbs(base, key, a):
     d = jget(base, key, "GET", "/api/v1/knowledge/")
     items = d.get("items", []) if isinstance(d, dict) else d
-    if not items:
-        print("(no knowledge bases visible to this key)")
-        return
-    for k in items:
-        owner = ((k.get("user") or {}).get("email") or "-")
-        print("%-38s  files=%-3s  write=%-5s  %s  owner=%s" % (
-            k.get("id", ""), k.get("file_count", "?"),
-            k.get("write_access"), k.get("name", ""), owner))
+    kbs = [{"id": k.get("id"), "name": k.get("name"),
+            "file_count": k.get("file_count"), "write_access": k.get("write_access"),
+            "owner": ((k.get("user") or {}).get("email") or "-")} for k in items]
+    print(json.dumps({"kbs": kbs}))
 
 
 def cmd_kb(base, key, a):
@@ -167,27 +163,21 @@ def cmd_kb(base, key, a):
             if k.get("id") == a.id:
                 d["user"] = k.get("user")
                 break
-    print(json.dumps(d, indent=2))
+    print(json.dumps(d))
 
 
 def cmd_search_kbs(base, key, a):
     d = jget(base, key, "GET", "/api/v1/knowledge/search?query=%s" % urllib.parse.quote(a.query))
     items = d.get("items", []) if isinstance(d, dict) else d
-    for k in items:
-        print("%-38s  %s" % (k.get("id", ""), k.get("name", "")))
+    kbs = [{"id": k.get("id"), "name": k.get("name")} for k in items]
+    print(json.dumps({"kbs": kbs}))
 
 
 def cmd_search(base, key, a):
     body = {"collection_names": [a.kb_id], "query": a.query, "k": a.k, "hybrid": not a.no_hybrid}
     d = jget(base, key, "POST", "/api/v1/retrieval/query/collection", body)
     hits = flatten_chroma(d)
-    print("hits: %d" % len(hits))
-    for i, h in enumerate(hits):
-        dist = h["distance"]
-        dist_s = ("%.4f" % dist) if isinstance(dist, (int, float)) else "?"
-        snip = (h["text"] or "").replace("\n", " ")[:200]
-        print("[%d] dist=%s file=%s" % (i, dist_s, h["file"] or "?"))
-        print("    %s" % snip)
+    print(json.dumps({"hits": hits}))
 
 
 def cmd_rag(base, key, a):
@@ -466,13 +456,16 @@ def cmd_index_projects(base, key, a):
         if a.project and a.project not in encoded:
             continue
         projects.append((encoded, mem))
+    result = {"projects": [],
+              "total": {"added": 0, "modified": 0, "reused": 0,
+                        "deleted": 0, "failed": 0},
+              "waited": []}
     if not projects:
-        print("(no projects with memory/ found under %s)" % root)
+        print(json.dumps(result))
         return
     d = jget(base, key, "GET", "/api/v1/knowledge/")
     items = d.get("items", []) if isinstance(d, dict) else d
     kb_by_name = {k.get("name", ""): k for k in items}
-    agg = {"added": 0, "modified": 0, "reused": 0, "deleted": 0, "failed": 0}
     touched = []  # (kb_id, kb_name) with uploads, for --wait
     for encoded, mem in projects:
         project_path = _decode_project_path(encoded)
@@ -481,16 +474,24 @@ def cmd_index_projects(base, key, a):
         kb = kb_by_name.get(kb_name)
         kb_id = kb["id"] if kb else None
         created = "exists" if kb else ("would-create" if a.dry_run else "created")
+        pentry = {"kb_name": kb_name, "kb_id": kb_id, "repo": repo,
+                  "created": created, "added": 0, "modified": 0, "reused": 0,
+                  "deleted": 0, "failed": 0, "errors": []}
         if not a.dry_run and not kb:
             desc = ("Claude projects memory | repo=%s | host=%s | project=%s | path=%s"
                     % (repo, host, encoded, project_path))
             code, txt = call(base, key, "POST", "/api/v1/knowledge/create",
                              {"name": kb_name, "description": desc})
             if code != 200:
-                print("✗ %s  create -> HTTP %s: %s" % (kb_name, code, (txt or "")[:200]))
-                agg["failed"] += 1
+                pentry["created"] = "failed"
+                pentry["failed"] = 1
+                pentry["errors"].append("create -> HTTP %s: %s"
+                                        % (code, (txt or "")[:200]))
+                result["projects"].append(pentry)
+                result["total"]["failed"] += 1
                 continue
             kb_id = json.loads(txt).get("id")
+            pentry["kb_id"] = kb_id
         src = {}
         for fn in sorted(os.listdir(mem)):
             p = os.path.join(mem, fn)
@@ -500,18 +501,17 @@ def cmd_index_projects(base, key, a):
         if kb_id:
             for f in _kb_files(base, key, kb_id):
                 existing[f["filename"]] = f
-        pc = {"added": 0, "modified": 0, "reused": 0, "deleted": 0, "failed": 0}
         if a.dry_run:
             for fn, (p, sha) in src.items():
                 ex = existing.get(fn)
                 if not ex:
-                    pc["added"] += 1
+                    pentry["added"] += 1
                 elif ex.get("file_hash") == sha:
-                    pc["reused"] += 1
+                    pentry["reused"] += 1
                 else:
-                    pc["modified"] += 1
+                    pentry["modified"] += 1
             if not a.no_cleanup:
-                pc["deleted"] = sum(1 for fn in existing if fn not in src)
+                pentry["deleted"] = sum(1 for fn in existing if fn not in src)
         else:
             for fn, (p, sha) in src.items():
                 meta = {"host": host, "project": encoded, "project_path": project_path,
@@ -523,55 +523,59 @@ def cmd_index_projects(base, key, a):
                 if ex and ex.get("file_hash") == sha:
                     _, err = _upload_memory_file(base, key, kb_id, sha, fn, data, meta)
                     if err:
-                        pc["failed"] += 1; print("  ✗ %s: %s" % (fn, err))
+                        pentry["failed"] += 1
+                        pentry["errors"].append("%s: %s" % (fn, err))
                     else:
-                        pc["reused"] += 1
+                        pentry["reused"] += 1
                 elif ex:
                     ok, derr = _delete_file(base, key, ex["id"])
                     if not ok:
-                        pc["failed"] += 1; print("  ✗ %s: delete old -> %s" % (fn, derr))
+                        pentry["failed"] += 1
+                        pentry["errors"].append("%s: delete old -> %s" % (fn, derr))
                         continue
                     _, err = _upload_memory_file(base, key, kb_id, sha, fn, data, meta)
                     if err:
-                        pc["failed"] += 1; print("  ✗ %s: %s" % (fn, err))
+                        pentry["failed"] += 1
+                        pentry["errors"].append("%s: %s" % (fn, err))
                     else:
-                        pc["modified"] += 1
+                        pentry["modified"] += 1
                 else:
                     _, err = _upload_memory_file(base, key, kb_id, sha, fn, data, meta)
                     if err:
-                        pc["failed"] += 1; print("  ✗ %s: %s" % (fn, err))
+                        pentry["failed"] += 1
+                        pentry["errors"].append("%s: %s" % (fn, err))
                     else:
-                        pc["added"] += 1
+                        pentry["added"] += 1
             if not a.no_cleanup:
                 for fn, f in existing.items():
                     if fn in src:
                         continue
                     ok, derr = _delete_file(base, key, f["id"])
                     if ok:
-                        pc["deleted"] += 1
+                        pentry["deleted"] += 1
                     else:
-                        pc["failed"] += 1; print("  ✗ %s: cleanup -> %s" % (fn, derr))
-        print("✓ %s  %s  added=%d modified=%d reused=%d deleted=%d failed=%d  repo=%s"
-              % (kb_name, created, pc["added"], pc["modified"], pc["reused"],
-                 pc["deleted"], pc["failed"], repo))
-        for k in agg:
-            agg[k] += pc[k]
-        if a.wait and kb_id and (pc["added"] or pc["modified"]):
+                        pentry["failed"] += 1
+                        pentry["errors"].append("%s: cleanup -> %s" % (fn, derr))
+        for k in result["total"]:
+            result["total"][k] += pentry[k]
+        result["projects"].append(pentry)
+        if a.wait and kb_id and (pentry["added"] or pentry["modified"]):
             touched.append((kb_id, kb_name))
     if a.wait and touched:
         deadline = _wait_deadline()
-        print("○ waiting for drain (deadline %ss)..." % int(os.environ.get("PROJECTS_WAIT", "600")))
         while time.time() < deadline:
-            if all(not (_kb_status(base, key, kid)["pending"] or _kb_status(base, key, kid)["processing"])
+            if all(not (_kb_status(base, key, kid)["pending"]
+                       or _kb_status(base, key, kid)["processing"])
                    for kid, _ in touched):
                 break
             time.sleep(10)
         for kid, kname in touched:
             st = _kb_status(base, key, kid)
-            print("  ○ %s  completed=%d pending=%d processing=%d failed=%d"
-                  % (kname, st["completed"], st["pending"], st["processing"], st["failed"]))
-    print("\nTOTAL  added=%d modified=%d reused=%d deleted=%d failed=%d  (projects=%d)"
-          % (agg["added"], agg["modified"], agg["reused"], agg["deleted"], agg["failed"], len(projects)))
+            result["waited"].append({"kb_name": kname, "completed": st["completed"],
+                                     "pending": st["pending"],
+                                     "processing": st["processing"],
+                                     "failed": st["failed"]})
+    print(json.dumps(result))
 
 
 def cmd_search_projects(base, key, a):
@@ -594,14 +598,12 @@ def cmd_search_projects(base, key, a):
         repo = _parse_repo(k.get("description", "")) or (
             tail.rsplit("-", 1)[-1] if "-" in tail else tail)
         selected.append((k["id"], name, repo))
-    if not selected:
-        print("(no project KBs match the filters for account=%s)" % account)
-        return
     all_hits = []
+    errors = []
     for kb_id, name, repo in selected:
         hits, err = _search_one_kb(base, key, kb_id, a.query, a.k, not a.no_hybrid)
         if err:
-            print("✗ %s: %s" % (name, err))
+            errors.append({"kb_name": name, "error": err})
             continue
         for h in hits:
             h["kb_name"] = name
@@ -609,14 +611,7 @@ def cmd_search_projects(base, key, a):
             all_hits.append(h)
     all_hits.sort(key=lambda h: h["distance"] if isinstance(h.get("distance"), (int, float)) else 1.0)
     all_hits = all_hits[:a.k]
-    print("KBs: %d | hits: %d" % (len(selected), len(all_hits)))
-    for i, h in enumerate(all_hits):
-        dist = h["distance"]
-        dist_s = ("%.4f" % dist) if isinstance(dist, (int, float)) else "?"
-        snip = (h["text"] or "").replace("\n", " ")[:200]
-        print("[%d] dist=%s repo=%s kb=%s file=%s"
-              % (i, dist_s, h["repo"], h["kb_name"], h["file"] or "?"))
-        print("    %s" % snip)
+    print(json.dumps({"kbs": len(selected), "hits": all_hits, "errors": errors}))
 
 
 def cmd_status_projects(base, key, a):
@@ -634,8 +629,8 @@ def cmd_status_projects(base, key, a):
                 target = k
                 break
         if not target:
-            print("✗ no project KB matches --project %r" % a.project)
-            return
+            print(json.dumps({"error": "no project KB matches --project %r" % a.project}))
+            sys.exit(1)
     else:
         cwd = os.path.realpath(os.getcwd())
         root = os.path.expanduser("~/.claude/projects")
@@ -652,8 +647,9 @@ def cmd_status_projects(base, key, a):
                 break
             cur = parent
         if not target:
-            print("✗ not indexed: run `index-projects` (no project KB for cwd=%s)" % cwd)
-            return
+            print(json.dumps({"error": "not indexed: run index-projects "
+                                        "(no project KB for cwd=%s)" % cwd, "cwd": cwd}))
+            sys.exit(1)
     kb_id = target["id"]
     kb_name = target["name"]
     st = _kb_status(base, key, kb_id)
@@ -662,16 +658,10 @@ def cmd_status_projects(base, key, a):
         while (st["pending"] or st["processing"]) and time.time() < deadline:
             time.sleep(10)
             st = _kb_status(base, key, kb_id)
-    if a.json:
-        print(json.dumps({"kb_id": kb_id, "kb_name": kb_name,
-                           "completed": st["completed"], "pending": st["pending"],
-                           "processing": st["processing"], "failed": st["failed"],
-                           "failed_files": st["failed_files"]}, indent=2))
-        return
-    print("✓ %s  completed=%d pending=%d processing=%d failed=%d"
-          % (kb_name, st["completed"], st["pending"], st["processing"], st["failed"]))
-    for f in st["failed_files"]:
-        print("  ✗ %s — %s" % (f["filename"], (f["error"] or "")[:80]))
+    print(json.dumps({"kb_id": kb_id, "kb_name": kb_name,
+                      "completed": st["completed"], "pending": st["pending"],
+                      "processing": st["processing"], "failed": st["failed"],
+                      "failed_files": st["failed_files"]}))
 
 
 def main():
@@ -724,7 +714,6 @@ def main():
                         help="drain status of the current repo's project-memory KB (walks up cwd)")
     sp.add_argument("--project", default=None, help="substring match on a project KB name (overrides cwd walk-up)")
     sp.add_argument("--host", default=None, help="host segment (default $HOSTNAME short)")
-    sp.add_argument("--json", action="store_true", help="print the status dict as JSON")
     sp.add_argument("--wait", action="store_true", help="poll until pending+processing == 0")
 
     a = p.parse_args()

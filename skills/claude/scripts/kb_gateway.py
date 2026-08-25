@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Thin REST client for the kb-gateway (Graphiti memory + admin user provisioning).
 
-Zero dependencies (Python 3.8+ stdlib). The agent holds only KB_API_KEY (an
+Zero dependencies (Python 3.10+ stdlib). The agent holds only KB_API_KEY (an
 Open WebUI key) + KB_HOST — nothing else. All authorization is done server-side
 by the kb-gateway (identity + role are derived from the key by the gateway; the
 CLI cannot influence them). Works on any host that can reach KB_HOST.
@@ -106,17 +106,13 @@ def jget(base, key, method, path, body=None, query=None):
 
 def cmd_whoami(base, key, a):
     d = jget(base, key, "GET", "/memory/whoami")
-    print("%s role=%s id=%s" % (d.get("email", "?"), d.get("role", "?"), d.get("id", "?")))
+    print(json.dumps({"email": d.get("email"), "role": d.get("role"),
+                      "id": d.get("id")}))
 
 
 def cmd_groups(base, key, a):
     d = jget(base, key, "GET", "/memory/groups")
-    groups = d.get("groups", [])
-    if not groups:
-        print("(no groups with data yet)")
-        return
-    for g in groups:
-        print(g)
+    print(json.dumps({"groups": d.get("groups", [])}))
 
 
 def cmd_add(base, key, a):
@@ -126,57 +122,49 @@ def cmd_add(base, key, a):
     if a.source_description:
         body["source_description"] = a.source_description
     d = jget(base, key, "POST", "/memory/add", body)
-    print("added to group %s" % d.get("group", "?"))
+    print(json.dumps(d))
 
 
 def cmd_search(base, key, a):
     d = jget(base, key, "POST", "/memory/search", {"query": a.query, "k": a.k})
-    print(json.dumps(d.get("facts"), indent=2))
+    print(json.dumps({"facts": d.get("facts", [])}))
 
 
 def cmd_episodes(base, key, a):
     d = jget(base, key, "GET", "/memory/episodes", query={"max": a.max})
-    print(json.dumps(d.get("episodes"), indent=2))
+    print(json.dumps({"episodes": d.get("episodes", [])}))
 
 
 def cmd_status(base, key, a):
     d = jget(base, key, "GET", "/memory/status")
-    print(json.dumps(d.get("status"), indent=2))
+    print(json.dumps({"status": d.get("status")}))
 
 
 def cmd_forget(base, key, a):
     d = jget(base, key, "POST", "/memory/forget", {"group": a.group})
-    print("forgot group %s" % d.get("group", "?"))
+    print(json.dumps(d))
 
 
 def cmd_delete_edge(base, key, a):
     d = jget(base, key, "POST", "/memory/delete-edge", {"uuid": a.uuid})
-    print("deleted edge %s (group %s)" % (d.get("uuid", "?"), d.get("group", "?")))
+    print(json.dumps(d))
 
 
 def cmd_delete_episode(base, key, a):
     d = jget(base, key, "POST", "/memory/delete-episode", {"uuid": a.uuid})
-    print("deleted episode %s (group %s)" % (d.get("uuid", "?"), d.get("group", "?")))
+    print(json.dumps(d))
 
 
 def cmd_user_create(base, key, a):
     """Admin: create a new KB user. The gateway returns the new user's email,
     a generated temp password, and their KB_API_KEY. Relay these to the
-    requesting human administrator ONLY — do not persist them."""
+    requesting human administrator ONLY — do not persist them. Output is the
+    raw gateway response (compact JSON)."""
     body = {"email": a.email, "name": a.name}
     if a.role:
         body["role"] = a.role
     d = jget(base, key, "POST", "/admin/users", body)
-    if a.json:
-        print(json.dumps(d, indent=2))
-        return
-    print("email:         %s" % d.get("email", "?"))
-    print("temp_password: %s" % d.get("temp_password", "?"))
-    print("kb_api_key:     %s" % d.get("kb_api_key", "?"))
-    print("role:           %s" % d.get("role", "?"))
-    print("id:             %s" % d.get("id", "?"))
-    print("\nRelay the temp_password + kb_api_key to the administrator ONLY. "
-          "Do not persist them.")
+    print(json.dumps(d))
 
 
 def main():
@@ -218,8 +206,6 @@ def main():
     sp = sub.add_parser("user-create", help="ADMIN: create a new KB user + issue its KB_API_KEY")
     sp.add_argument("--email", required=True); sp.add_argument("--name", required=True)
     sp.add_argument("--role", default="user", help="role (default user; admin only may call)")
-    sp.add_argument("--json", action="store_true",
-                   help="emit the raw JSON response (scriptable) instead of human-readable fields")
 
     a = p.parse_args()
     for ef in a.env_file:

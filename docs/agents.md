@@ -35,7 +35,7 @@ The repo ships the `kb` skill in `skills/<tool>/` (one per agent tool):
 `skills/claude/` is the primary copy (real `SKILL.md` + real `scripts/`);
 `skills/codex/`, `skills/opencode/`, `skills/pi/` each hold a per-tool `SKILL.md`
 with `scripts/` symlinked to `../claude/scripts`. The wrappers are zero-dependency
-Python 3.8+ stdlib:
+Python 3.10+ stdlib:
 
 - `scripts/owui.py` — Open WebUI REST: KB surface (read-scoped) `whoami`, `kbs`,
   `search`, `rag`, `file`; **projects memory** (user-key writes to owned KBs)
@@ -144,7 +144,8 @@ KBs. `index-projects` fails with a clear message until this is run.
 KB name = `<host>--<encoded-dir-without-leading-dash>` (host = short hostname).
 Per-file metadata: `host`, `project`, `project_path`, `repo` (git repo name),
 `account`, `source_relpath` — `repo` rides in the KB `description` too, so hits
-are easy to reason about (`search-projects` prints `repo=<repo>` per hit).
+are easy to reason about (`search-projects` returns compact JSON
+`{"kbs":N,"hits":[{"repo","kb_name","file","text"}],"errors":[...]}`).
 
 ```
 python3 "$S/owui.py" $E index-projects --dry-run                  # plan only

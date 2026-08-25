@@ -8,7 +8,7 @@ COMPOSE  := docker compose
 DATA_DIR := ./data
 
 .PHONY: help provision bootstrap preflight pull pull-models start stop restart logs ps config \
-        health test test-e2e api-keys admin-signup rag-config \
+        health test test-output test-e2e api-keys admin-signup rag-config \
         ocr-config \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
         projects-bootstrap \
@@ -72,12 +72,17 @@ health: ## Probe the stack /health (Caddy -> kb-gateway aggregated, reflects OWU
 	curl -sf "$$H/health" >/dev/null \
 	  && echo "stack healthy ($$H/health)" || { echo "stack DOWN ($$H/health)"; exit 1; }
 
-test: ## Run system integration tests against the running stack (run: make start)
-	@status=0; for t in tests/test_*.sh; do [ -e "$$t" ] || continue; \
+test: ## Run unit tests (no stack) then system integration tests against the running stack (run: make start)
+	@status=0; echo "=== unit: test_output_json ==="; \
+	  python3 tests/test_output_json.py -v || status=1; \
+	  for t in tests/test_*.sh; do [ -e "$$t" ] || continue; \
 	  case "$$t" in *test_09_gdrive_index.sh) \
 	    echo "==> skip $$t (full real-gdrive drain; run via: make test-e2e)"; continue;; esac; \
 	  echo; echo "=== $$t ==="; bash "$$t" || status=1; \
 	done; exit $$status
+
+test-output: ## Unit-test CLI JSON output schemas (no stack needed)
+	@python3 tests/test_output_json.py -v
 
 test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch (incl. OCR engine + gdrive index) + full test suite + e2e
 	@./scripts/test-e2e.sh
@@ -133,15 +138,16 @@ gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant agent read + writ
 	  || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (the read-scoped agent key; run: make api-keys)"; exit 1; }
 	@./scripts/gdrive-index-bootstrap.sh
 
-gdrive-status: ## Show gdrive index status via kb-gateway GET /status (completed/pending/processing/failed). Set SCOPE_PATH=<relpath> to scope source_count to a subpath (file counts are KB-wide; accurate when the KB's whole scope is that path).
+gdrive-status: ## Show gdrive index status via kb-gateway GET /status (completed/pending/processing/failed), pretty JSON. Set SCOPE_PATH=<relpath> to scope source_count to a subpath (file counts are KB-wide; accurate when the KB's whole scope is that path).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
 	  [ -n "$${GDRIVE_KB_ID:-}" ] || { echo "MISSING GDRIVE_KB_ID in .env.local (run: make gdrive-index-bootstrap)"; exit 1; }; \
 	  [ -n "$${OPENWEBUI_USER_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
 	  q="source=gdrive&kb_id=$$GDRIVE_KB_ID"; [ -n "$${SCOPE_PATH:-}" ] && q="$$q&path=$$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$$SCOPE_PATH")"; \
-	  curl -sS "$$H/status?$$q" \
-	    -H "Authorization: Bearer $$OPENWEBUI_USER_API_KEY"; echo
+	  curl -sS "$$H/status?$$q&json=1" \
+	    -H "Authorization: Bearer $$OPENWEBUI_USER_API_KEY" \
+	    | python3 -m json.tool --indent 2
 
 projects-bootstrap: ## One-time admin enable of workspace.knowledge so the user key can create + own project-memory KBs (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }

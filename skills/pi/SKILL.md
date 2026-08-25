@@ -99,7 +99,7 @@ keep it private; do not hand it to agents.
 
 ## Using the wrapper (`scripts/owui.py`)
 
-Zero-dependency (Python 3.8+ stdlib). The KB surface (kbs/search/rag/file) is
+Zero-dependency (Python 3.10+ stdlib). The KB surface (kbs/search/rag/file) is
 read-only and matches the agent role; the **projects-memory surface**
 (index-projects/search-projects/status-projects) writes to KBs the caller owns
 (see [Projects memory](#projects-memory-claude-project-memory--owui-kbs-host-side-user-key) below). The wrapper lives in `scripts/` next to this file; set `S` to its
@@ -189,10 +189,9 @@ KB=~/SOURCE/Deployments/knowledgebase
 S=~/.pi/agent/skills/kb/scripts/owui.py
 E="--env-file $KB/.env --env-file $KB/.env.local"   # KB_HOST in .env, key in .env.local
 
-python3 "$S" $E index-projects --dry-run                  # plan only; show KB names + counts
+python3 "$S" $E index-projects --dry-run                  # plan only; JSON {projects,total}
 python3 "$S" $E index-projects --project knowledgebase --wait   # index this repo, then wait for drain
-python3 "$S" $E status-projects                           # current repo's drain status (walks up cwd)
-python3 "$S" $E status-projects --json                    # machine-readable status dict
+python3 "$S" $E status-projects                           # current repo's drain status (JSON; walks up cwd)
 python3 "$S" $E search-projects "QPU scheduling"          # across ALL your project KBs
 python3 "$S" $E search-projects "memory" --host mini2 --project knowledgebase   # filtered
 python3 "$S" $E search-projects "XSL" --kb-glob 'mini2--*'                 # wildcard KB name
@@ -202,8 +201,8 @@ python3 "$S" $E search-projects "XSL" --kb-glob 'mini2--*'                 # wil
 (substring in the project part), `--account` (KB owner email; default = caller,
 aka `--mine`), `--kb-glob` (fnmatch on the KB name). No filters = all KBs you
 own. It makes one retrieval call per KB (hit metadata carries no `knowledge_id`,
-so one-call-per-KB is the reliable attribution) and prints
-`repo=<repo> kb=<name> file=<file>` per hit.
+so one-call-per-KB is the reliable attribution) and prints compact JSON
+`{"kbs":N,"hits":[{"repo","kb_name","file","text",...}],"errors":[...]}`.
 
 # Facts memory (Graphiti, agent / kb-gateway)
 
@@ -241,7 +240,7 @@ derives your identity + role from your `KB_API_KEY` via Open WebUI (tamper-proof
 
 ## Using the wrapper (`scripts/kb_gateway.py`)
 
-Zero-dependency (Python 3.8+ stdlib). One client for memory + admin ops. The
+Zero-dependency (Python 3.10+ stdlib). One client for memory + admin ops. The
 wrapper lives in `scripts/` next to this file; set `G` to its path in your
 installed copy of this skill.
 
@@ -275,13 +274,14 @@ generated temporary password, and their `KB_API_KEY`.
 
 ```
 python3 "$G" $E user-create --email alice@example.com --name Alice
-# admin KB_API_KEY only; prints: email, temp_password, kb_api_key, role, id
+# admin KB_API_KEY only; prints compact JSON: email, temp_password, kb_api_key, role, id
 ```
 
 Rules:
 - **Admin-only.** `KB_API_KEY` must resolve to an Open WebUI `admin`. Non-admin
   → `403`. Unsupported image (missing provisioning endpoints) → `501`.
-- **What is returned:** `email`, `temp_password`, `kb_api_key`, `role`, `id`.
+- **What is returned:** `email`, `temp_password`, `kb_api_key`, `role`, `id` as
+  compact JSON (parse stdout with `json.load` to extract `kb_api_key`).
 - **Relay to the requesting administrator ONLY.** Do NOT persist the
   returned `temp_password` or `kb_api_key` anywhere (the gateway never persists
   them; they exist only in this one response). The admin hands them to the new

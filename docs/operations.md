@@ -308,9 +308,10 @@ per-file progress from OWUI `file.data.status`, paged via
 | `failed` | files with `data.status=failed`; `failed_files` lists `{filename, error}` |
 
 The drain is terminal when `pending+processing=0` AND `completed+failed`
-covers `source_count`. The human output uses glyphs (✓/✗/○), no ETA — there is
-no daemon. `?json=1` returns the same fields as machine JSON; `?file=<relpath>`
-filters the per-file list.
+covers `source_count`. `make gdrive-status` emits **pretty JSON (indent=2)** with
+these fields (it passes `?json=1`; the bare `/status` text/glyph form still
+exists for direct curl). No ETA — there is no daemon. `?file=<relpath>` filters
+the per-file list.
 
 `indexed_count` counts files whose text is extracted AND embedded AND linked
 (not just linked): a file linked but still extracting reads `pending`, not
@@ -401,12 +402,12 @@ processing == 0` (deadline `PROJECTS_WAIT`, default 600s).
 ### Status + search
 
 `status-projects` reports the current repo's drain (it walks up `realpath(cwd)`
-to match `~/.claude/projects/<encoded>`; `--project <substr>` overrides; `--json`
-prints a dict; `--wait` polls). `search-projects` searches across the caller's
+to match `~/.claude/projects/<encoded>`; `--project <substr>` overrides; output is
+compact JSON; `--wait` polls). `search-projects` searches across the caller's
 project KBs (filters: `--host`, `--project`, `--account` default caller,
 `--kb-glob`). It makes one retrieval call per KB (hit metadata carries no
 `knowledge_id`, so one-call-per-KB is the reliable attribution) and prints
-`repo=<repo> kb=<name> file=<file>` per hit.
+compact JSON `{"kbs":N,"hits":[{"repo","kb_name","file","text"}],"errors":[...]}`.
 
 ## markitdown-OCR external extraction service
 
@@ -475,7 +476,7 @@ dependency is down.
 | `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./gdrive-exclude.conf` (`[<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections; then POSTs `/index` to reconcile the tree into the KB (`--index-all` for a full re-index; `--retry-pending` to re-trigger stalled pending; fail-fast on `ok=false`) |
 | `gdrive-index` | POST `/index` alone (no rclone): reconcile `./gdrive` into the KB via kb-gateway (admin; incremental). `INDEX_ALL=1` for a full re-index. `SCOPE_PATH=<relpath>` indexes only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path — see "Subpath reconcile" above) |
 | `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, write `GDRIVE_KB_ID` to `.env.local` (run after `make api-keys`; idempotent; no sidecar) |
-| `gdrive-status` | GET `/status` (kb-gateway): `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`, `✓ COMPLETE` / `○ in-flight=N` (no ETA — no daemon). Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
+| `gdrive-status` | GET `/status` (kb-gateway), pretty JSON (indent=2): `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`, `failed_files`. Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
 | `clean-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + delete `.env.local` (preserves `.env`, incl. `OCR_ENABLED`) |

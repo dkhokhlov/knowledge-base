@@ -16,7 +16,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
   the stack running. Replaces the manual 7-step sequence; re-run after
   `make clean-all`, use `make start` for everyday restarts.
 
+- **`make test-output` + `tests/test_output_json.py`** — a stdlib `unittest`
+  (no stack) that monkeypatches the scripts' HTTP layer and asserts every
+  subcommand emits valid JSON with the expected schema (and, for the scripts,
+  that it is compact). `make test` runs it first (with `|| status=1`), before
+  the `tests/test_*.sh` integration suite.
+
 ### Changed
+
+- **Agentic-first JSON output.** The `/kb` skill scripts
+  (`skills/claude/scripts/{owui.py,kb_gateway.py}`) and `make gdrive-status` now
+  emit structured JSON, not human prose/glyphs — the consumer is an agent (an
+  LLM), not a human. The scripts print **compact JSON** (single line; whitespace
+  costs the agent tokens): every `cmd_*` success path returns a JSON object
+  with a stable schema (`whoami`, `kbs`, `search`, `index-projects`,
+  `search-projects`, `status-projects`, `groups`, `add`, `search` → `facts`,
+  `episodes`, `status`, `forget`, `delete-edge`/`delete-episode`,
+  `user-create`). `rag` and `file` stay raw text (LLM answer / file content —
+  wrapping is lossy); error/`sys.exit("FAIL ...")` paths stay prose on stderr.
+  `make gdrive-status` emits **pretty JSON (indent=2)** (passes `?json=1`,
+  pipes through `json.tool --indent 2`). The `--json` flags on `user-create`
+  and `status-projects` are removed (output is JSON regardless).
+  `index-projects` now returns `{projects:[{...,errors:[]}], total:{...},
+  waited:[...]}`: per-file failures are collected into `errors` (not printed,
+  which would break JSON), and a failed KB create is recorded as a project
+  entry (`created:"failed"`) instead of dropped.
 
 - **Config templates renamed + `KB_HOST` now shell-sourced.** `.env.example`
   → `.env.template` and `.env.local.example` → `.env.local.template` (the
