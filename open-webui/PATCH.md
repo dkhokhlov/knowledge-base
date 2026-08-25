@@ -1,8 +1,9 @@
-# Open WebUI custom image — path-aware dedup hash + upload idempotency
+# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime
 
-This directory builds a thin-overlay custom Open WebUI image that applies two
-build-time patches to the backend. Both target the **2b churn**: the
-gdrive-indexer (oikb) re-uploading files every sync cycle.
+This directory builds a thin-overlay custom Open WebUI image that applies three
+build-time patches to the backend. Patches 1–2 target the **2b churn**: the
+gdrive-indexer (oikb) re-uploading files every sync cycle. Patch 3 propagates
+the source file mtime into chunk metadata so a retrieve hit can report it.
 
 - **Patch 1 — path-aware dedup hash** (`retrieval.py`): OWUI rejected same-content
   files at different paths as `DUPLICATE_CONTENT`; oikb re-uploaded them every cycle.
@@ -100,8 +101,15 @@ against the exact source it was written for:
 ghcr.io/open-webui/open-webui:main@sha256:6a773e5c3a246b65cbe74ce942b294292c0e5f81c138f703d111bc162f7d7c3d
 ```
 
-= Open WebUI 0.11.0. The digest is the `OPENWEBUI_BASE_DIGEST` build-arg
-default in `Dockerfile`.
+= Open WebUI 0.11.0 (frontend `package.json` version at pin time). The digest
+is the `OPENWEBUI_BASE_DIGEST` build-arg default in `Dockerfile`. The `:main`
+tag is provenance only — the `@sha256:` digest binds the build, not the tag.
+
+The `:0.11.0` release tag is a **separate build artifact** (manifest-list
+digest `sha256:72c0ba64…`), same 0.11.0 content. This pin keeps the `:main`
+build the three patches were validated against; switching to the `:0.11.0`
+release digest would change the base artifact and require re-validating all
+three apply scripts against its source (see Rebase procedure).
 
 ## Rebase procedure (when bumping the base image)
 
@@ -109,13 +117,14 @@ default in `Dockerfile`.
    `docker image inspect ghcr.io/open-webui/open-webui:<tag> --format '{{index .RepoDigests 0}}'`
 2. Extract both patched router files:
    `docker create --name x <new-ref> && docker cp x:/app/backend/open_webui/routers/retrieval.py /tmp/r.py && docker cp x:/app/backend/open_webui/routers/files.py /tmp/f.py && docker rm x`
-3. Test both apply scripts against the extracted files:
+3. Test all three apply scripts against the extracted files:
    `OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_path_hash.py`
    `OWUI_FILES_PY=/tmp/f.py python3 open-webui/apply_upload_idempotency.py`
-   - If both print `OK ...` and `python3 -m py_compile /tmp/r.py /tmp/f.py`
+   `OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_mtime_to_chunks.py`
+   - If all print `OK ...` and `python3 -m py_compile /tmp/r.py /tmp/f.py`
      passes → the anchors still match; bump `OPENWEBUI_BASE_DIGEST` in
      `Dockerfile`, rebuild.
-   - If either fails (`expected exactly 1 occurrence ...`) → that anchor
+   - If any fails (`expected exactly 1 occurrence ...`) → that anchor
      drifted. Re-derive the new anchor text from the extracted file, update the
      `*_OLD`/`*_NEW` (or `ANCHOR_OLD`/`ANCHOR_NEW`) strings in the failed script
      (and the `NEW` strings if the surrounding code changed), re-test until
@@ -275,3 +284,74 @@ Like patch 1, no destructive step. Existing members are never re-uploaded
 churn orphans (each failed file's extra copies are deleted as oikb re-uploads
 it and the idempotency path keeps one). Deploy + observe; revert the image tag
 to `0.11.0-pathdedup` (dedup only) or `main` (stock) to undo.
+
+---
+
+# Patch 3 — source-mtime in chunk metadata (`retrieval.py`)
+
+## Problem (patch 3)
+
+The kb-gateway indexes gdrive files (rclone-preserved mtime) and stores each
+file's mtime in `File.meta.data.mtime` at upload. OWUI does **not** propagate
+custom `File.meta.data` into Chroma chunk metadata by default — the per-branch
+doc-metadata dicts spread `**file.meta` (whose `data` is a nested dict that
+Chroma's `filter_metadata` drops) or `**filter_metadata(doc.metadata)` (the
+per-unit `{page}`), neither of which carries `mtime`. So a retrieve hit could
+not tell when the source file was last modified.
+
+## Fix (patch 3)
+
+Inject `mtime` (read from `file.meta['data']['mtime']`) into the `metadata=`
+dict that `process_file` passes to `save_docs_to_vector_db`. That function
+merges the caller's `metadata` into every chunk
+(`{**doc.metadata, **metadata, 'embedding_config': ...}`), so this **single
+site covers all `process_file` paths**:
+
+- Phase 1 (no `collection_name`): extract via the external loader → embed into
+  `file-{file.id}`.
+- Phase 2 (`collection_name=knowledge_id`): copy `file-{file.id}` vectors into
+  the KB collection (normal path), **or** rebuild from `file.data['content']`
+  (the no-results fallback, which otherwise loses `page` and `mtime`).
+
+All three funnel through this one `save_docs_to_vector_db` call, so `mtime`
+lands in every chunk the KB collection holds — including the fallback path
+that a Phase-1-only patch would miss.
+
+## What patch 3 changes (1 site in `retrieval.py`)
+
+`apply_mtime_to_chunks.py` does one replacement, asserting the anchor occurs
+exactly once (fail loud on drift).
+
+```python
+# before (the metadata= dict passed to save_docs_to_vector_db, ~line 2008)
+                        metadata={
+                            'file_id': file.id,
+                            'name': file.filename,
+                            'hash': hash,
+                        },
+# after
+                        metadata={
+                            'file_id': file.id,
+                            'name': file.filename,
+                            'hash': hash,
+                            'mtime': ((file.meta or {}).get('data') or {}).get('mtime'),
+                        },
+```
+
+The access pattern `((file.meta or {}).get('data') or {}).get('mtime')` mirrors
+the existing dedup patch's `directory_id` read, and is `None`-safe for non-KB
+uploads (no `mtime` in `meta.data`) — Chroma's `process_metadata` drops
+`None`, so non-KB chunks are unaffected. `file` is in scope here
+(`process_file`), and `file.meta` is not mutated before this point (`file.data`
+is overwritten with `{'content': ...}`, not `file.meta`).
+
+The anchor `'hash': hash,` is globally unique (count==1): the per-branch
+doc-metadata dicts use `'source': file.filename,`, not `'hash': hash,`.
+
+## No KB reset on cutover (patch 3)
+
+Unlike patches 1–2, `mtime` only reaches **new** chunks. Existing chunks were
+embedded without `mtime` and keep their old metadata until re-indexed. A full
+re-OCR (`make gdrive-index INDEX_ALL=1`) repopulates every chunk with `mtime`
+so the field is present on all hits. Without it, hits on pre-patch chunks have
+`mtime == None` (the wrapper surfaces `None`, not a missing key).

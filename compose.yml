@@ -215,7 +215,7 @@ services:
     # open-webui/; see open-webui/PATCH.md. The GHCR ref is a local tag (not
     # pushed), so pull_policy: never — `make pull` skips this service;
     # `docker compose build openwebui` (or `make start` on first run) builds it.
-    image: ghcr.io/dkhokhlov/open-webui:${OPENWEBUI_IMAGE_TAG:-0.11.0-pathdedup-idem}
+    image: ghcr.io/dkhokhlov/open-webui:${OPENWEBUI_IMAGE_TAG:-0.11.0-pathdedup-idem-mtime}
     build:
       context: open-webui
     pull_policy: never
@@ -302,7 +302,7 @@ services:
     # documents. OWUI routes EVERY ingest to it when
     # CONTENT_EXTRACTION_ENGINE=external + URL + a non-empty API key are set in
     # the OWUI DB (`make ocr-config`). See markitdown/oursvc.py + the plan.
-    image: ghcr.io/dkhokhlov/markitdown-ocr:${MARKITDOWN_OCR_IMAGE_TAG:-0.1.0-ollama-native}
+    image: ghcr.io/dkhokhlov/markitdown-ocr:${MARKITDOWN_OCR_IMAGE_TAG:-0.1.1-ollama-native}
     build:
       context: ./markitdown
     pull_policy: never

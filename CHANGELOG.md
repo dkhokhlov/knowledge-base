@@ -8,6 +8,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Source file `mtime` in `retrieve` hits.** The kb-gateway captures each
+  gdrive file's mtime (rclone-preserved filesystem mtime) as ISO-8601 UTC at
+  upload and stores it in `File.meta.data.mtime`. A new Open WebUI custom-image
+  patch (`open-webui/apply_mtime_to_chunks.py`; see `open-webui/PATCH.md`
+  patch 3) injects `mtime` into the `metadata=` dict `process_file` passes to
+  `save_docs_to_vector_db`, so it lands in every chunk (all three `process_file`
+  paths, incl. the no-results fallback). `owui.py` `flatten_chroma` surfaces it
+  in each hit. Requires the OWUI image rebuild + a re-OCR to populate existing
+  chunks (new chunks get it on upload). Published as
+  `ghcr.io/dkhokhlov/open-webui:0.11.0-pathdedup-idem-mtime`.
+  `tests/test_gateway_unit.py` covers the gateway capture + upload multipart;
+  `tests/test_output_json.py` covers the wrapper surfacing.
 - **`retrieve-projects --account` wildcard globs** — the `--account` filter now
   accepts an fnmatch glob (e.g. `*@corp.com` / `*` for all visible KBs) in
   addition to an exact owner email. Backward-compatible: an exact email has no
@@ -32,6 +44,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
   OCR'd image regions) from the extracted markdown at extraction time. They
   were retrieval noise (the inner OCR text is preserved). Requires the
   `markitdown-ocr` image rebuild + a re-OCR to clean the existing chunks.
+  Published as `ghcr.io/dkhokhlov/markitdown-ocr:0.1.1-ollama-native`.
 
 ## [v1.4.0] — 2026-08-24
 

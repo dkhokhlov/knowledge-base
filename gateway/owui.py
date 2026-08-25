@@ -280,15 +280,19 @@ def _cd_filename(name):
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def upload_file(admin_key, kb_id, file_hash, directory_id, filename, data_bytes):
+def upload_file(admin_key, kb_id, file_hash, directory_id, filename, data_bytes, mtime=None):
     """POST /api/v1/files/ multipart: field 'file' (filename, raw bytes) + field
-    'metadata' (JSON {knowledge_id, file_hash, directory_id}). The idempotency
+    'metadata' (JSON {knowledge_id, file_hash, directory_id, [mtime]}). `mtime`
+    (optional, ISO-8601 UTC source mtime) is stored into File.meta.data so the
+    OWUI chunk-metadata patch can propagate it into Chroma. The idempotency
     patch matches on (knowledge_id, directory_id, filename, file_hash) and
     returns the existing file_id without re-extracting when unchanged. Returns
     the FileModel dict {id, hash, filename, meta, ...}. Raises OwuiError on
     transport failure or non-200."""
     import uuid
     metadata = {"knowledge_id": kb_id, "file_hash": file_hash, "directory_id": directory_id}
+    if mtime is not None:
+        metadata["mtime"] = mtime
     boundary = uuid.uuid4().hex
     body = bytearray()
     body += ("--%s\r\n" % boundary).encode()

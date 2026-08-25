@@ -238,6 +238,15 @@ read grant lets the read-scoped agent key search / RAG the KB
 
 ### Populating the source
 
+**Prerequisite — rclone `gdrive` remote (Google Drive login).** `make
+gdrive-sync` reads the source through rclone's `gdrive` remote (default name;
+override with `--remote NAME`). Configure + authenticate it once before the
+first sync: `rclone config` → new remote `gdrive` → Google Drive storage →
+complete the OAuth login in a browser. The remote must list the shared drives
+you index; `make gdrive-sync` fail-fasts if no drives are visible. Re-login
+only if the OAuth token expires or Drive access is revoked. Full one-time setup
+(headless auth, verify, re-auth): see [docs/gdrive.md](gdrive.md).
+
 `make gdrive-sync` runs `rclone sync --backup-dir --delete-after` of the shared
 drive into `./gdrive`, then POSTs `/index` to reconcile the tree into the KB
 (manual; `gdrive/` is gitignored except a `.gitkeep` marker). `sync` is delta:

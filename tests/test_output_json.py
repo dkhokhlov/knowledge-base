@@ -176,23 +176,27 @@ class OwuiTests(_Assertions):
         chroma = {"documents": [["t1", "t2"]],
                   "distances": [[0.1, 0.2]],
                   "metadatas": [[{"file_name": "f1", "file_id": "fid1", "page": 3,
-                                  "start_index": 0, "source": "upload"},
+                                  "start_index": 0, "source": "upload",
+                                  "mtime": "2025-10-30T16:50:57Z"},
                                  {"file_name": "f2"}]],
                   "ids": [["id1", "id2"]]}
         ns = mock.Mock(kb_id="k1", query="q", k=4, no_hybrid=False)
         out = _run([(owui, "jget", chroma)], owui.cmd_retrieve, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(len(d["hits"]), 2)
-        # file_id/page/start_index/source propagate from Chroma metadata so the
-        # agent can round-trip a hit to the original page (file <file_id> +
-        # pdftotext/pdftoppm -f <page>); absent metadata defaults to None / "".
+        # file_id/page/start_index/source/mtime propagate from Chroma metadata
+        # so the agent can round-trip a hit to the original page (file <file_id>
+        # + pdftotext/pdftoppm -f <page>) and see the source mtime; absent
+        # metadata defaults to None / "".
         self.assertEqual(set(d["hits"][0]),
                          {"id", "distance", "file", "file_id", "page",
-                          "start_index", "source", "text"})
+                          "start_index", "source", "mtime", "text"})
         self.assertEqual(d["hits"][0]["file"], "f1")
         self.assertEqual(d["hits"][0]["file_id"], "fid1")
         self.assertEqual(d["hits"][0]["page"], 3)
+        self.assertEqual(d["hits"][0]["mtime"], "2025-10-30T16:50:57Z")
         self.assertIsNone(d["hits"][1]["page"])
+        self.assertIsNone(d["hits"][1]["mtime"])
         self.assertEqual(d["hits"][1]["file_id"], "")
 
     def test_rag_is_raw_text(self):
@@ -243,6 +247,63 @@ class OwuiTests(_Assertions):
         stack.enter_context(mock.patch.object(owui.urllib.request, "urlopen", new=urlopen))
         with stack, contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
             owui.cmd_file(BASE, KEY, ns)
+
+    def test_file_hits_content_url_with_bearer(self):
+        # The raw-download endpoint: GET /api/v1/files/{id}/content with the
+        # Bearer key. Proves the skill targets the right URL + auth (the core
+        # "download a raw file" capability), not just the decode branch.
+        class _Resp:
+            def __init__(self, body, ctype):
+                self._b = body
+                self.headers = {"Content-Type": ctype}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return self._b
+        captured = {}
+        def _urlopen(req, timeout=None):
+            captured["req"] = req
+            return _Resp(b"plain text body", "text/plain")
+        urlopen = mock.Mock(side_effect=_urlopen)
+        ns = mock.Mock(id="f1")
+        out = _run([(owui.urllib.request, "urlopen", urlopen)], owui.cmd_file, ns)
+        self.assertEqual(out, "plain text body")  # raw text, not JSON
+        req = captured["req"]
+        self.assertEqual(req.get_method(), "GET")
+        self.assertEqual(req.full_url, BASE + "/api/v1/files/f1/content")
+        # Bearer auth (case-insensitive on the header name — urllib's casing
+        # varies by Python version).
+        hdrs = {k.lower(): v for k, v in req.header_items()}
+        self.assertEqual(hdrs.get("authorization"), "Bearer " + KEY)
+
+    def test_file_binary_saves_raw_bytes_and_notes_path(self):
+        # Binary body -> the exact raw bytes are written to a temp file AND the
+        # NOTE names that path + the content-type + size (a real download, not
+        # just an exit). Cleans up the temp file it created.
+        raw = b"\x89PNG\r\n\x1a\n\x00\x01\x02\xff"  # 12 bytes, not utf-8 decodable
+        class _Resp:
+            def __init__(self, body, ctype):
+                self._b = body
+                self.headers = {"Content-Type": ctype}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return self._b
+        def _urlopen(req, timeout=None):
+            return _Resp(raw, "image/png")
+        urlopen = mock.Mock(side_effect=_urlopen)
+        ns = mock.Mock(id="f9")
+        buf = io.StringIO()
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(owui.urllib.request, "urlopen", new=urlopen))
+        with stack, contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as cm:
+            owui.cmd_file(BASE, KEY, ns)
+        note = cm.exception.code
+        self.assertIn("image/png", note)
+        self.assertIn("%d bytes" % len(raw), note)
+        path = note.split("Saved to: ", 1)[1].split()[0]
+        self.assertTrue(os.path.isfile(path))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), raw)  # exact raw bytes saved
+        os.unlink(path)
 
     # --- projects-memory surface (owui._whoami / _kb_files / _kb_status / ...) ---
 

@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.9
 #
-# Thin overlay on the pinned official Open WebUI image that applies two build-time
-# patches to the backend: the path-aware dedup-hash patch (retrieval.py) and the
-# upload-idempotency patch (files.py). See open-webui/PATCH.md for the why, the
-# anchors, and the rebase steps.
+# Thin overlay on the pinned official Open WebUI image that applies three build-time
+# patches to the backend: the path-aware dedup-hash patch (retrieval.py), the
+# upload-idempotency patch (files.py), and the source-mtime chunk-metadata patch
+# (retrieval.py). See open-webui/PATCH.md for the why, the anchors, and the rebase steps.
 #
 # No frontend rebuild: the patches touch two backend router files in place.
 # Build seconds, not minutes. Each apply script fails loud (exit 1) if its anchor
@@ -14,9 +14,15 @@
 #         --build-arg), rebuild. If an anchor drifted, the build fails and
 #         PATCH.md's rebase steps apply.
 
+# Pinned by digest (immutable); the :main tag is provenance only — the digest
+# binds the build, not the tag. = Open WebUI 0.11.0 (frontend package.json at pin
+# time). The :0.11.0 release tag is a separate build artifact (manifest digest
+# sha256:72c0ba64…), same 0.11.0 content; this pin keeps the :main build the
+# three patches were validated against. See PATCH.md "Base image".
 ARG OPENWEBUI_BASE_DIGEST=sha256:6a773e5c3a246b65cbe74ce942b294292c0e5f81c138f703d111bc162f7d7c3d
 FROM ghcr.io/open-webui/open-webui:main@${OPENWEBUI_BASE_DIGEST}
 
 COPY apply_path_hash.py /tmp/apply_path_hash.py
 COPY apply_upload_idempotency.py /tmp/apply_upload_idempotency.py
-RUN python3 /tmp/apply_path_hash.py && python3 /tmp/apply_upload_idempotency.py && rm /tmp/apply_path_hash.py /tmp/apply_upload_idempotency.py
+COPY apply_mtime_to_chunks.py /tmp/apply_mtime_to_chunks.py
+RUN python3 /tmp/apply_path_hash.py && python3 /tmp/apply_upload_idempotency.py && python3 /tmp/apply_mtime_to_chunks.py && rm /tmp/apply_path_hash.py /tmp/apply_upload_idempotency.py /tmp/apply_mtime_to_chunks.py

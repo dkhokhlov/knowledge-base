@@ -509,7 +509,7 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             try:
                 fm = owui.upload_file(admin_key, kb_id, info["checksum"],
-                                      dir_id, fn, data_bytes)
+                                      dir_id, fn, data_bytes, info.get("mtime"))
             except (owui.OwuiError, OSError) as e:
                 # socket.timeout (OSError) is not always wrapped as OwuiError.
                 # One slow/timed-out upload is a per-file error, not a run abort.
@@ -583,7 +583,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     data_bytes = open(src["abspath"], "rb").read()
                     owui.upload_file(admin_key, kb_id, src["checksum"],
-                                     dir_id, src["filename"], data_bytes)
+                                     dir_id, src["filename"], data_bytes, src.get("mtime"))
                 except (owui.OwuiError, OSError) as e:
                     errors.append({"filename": fn, "status": "error",
                                    "error": "re-trigger re-upload failed: %s" % e})
@@ -726,6 +726,7 @@ def _entry_for(abspath, root, allow, max_size):
         if os.path.islink(abspath) or not os.path.isfile(abspath):
             return None
         size = os.path.getsize(abspath)
+        mtime = os.path.getmtime(abspath)
     except OSError as e:
         raise GatewayError(500, "stat failed for %s: %s" % (abspath, e))
     if size > max_size:
@@ -741,15 +742,17 @@ def _entry_for(abspath, root, allow, max_size):
     rel = os.path.relpath(abspath, root)
     d_rel = os.path.dirname(rel).replace(os.sep, "/")
     return {"filename": fn, "path": d_rel, "checksum": checksum,
-            "size": size, "abspath": abspath}
+            "size": size, "abspath": abspath,
+            "mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime))}
 
 
 def walk_source(root, allow, max_size, path=""):
     """Walk `root` (or the `path` subpath under it) and return one entry per
-    allowlisted, in-size file: [{filename, path, checksum, size, abspath}].
+    allowlisted, in-size file: [{filename, path, checksum, size, abspath, mtime}].
     `filename` is the basename; `path` is the directory relpath from `root`
     (POSIX, "" at root) — the shape OWUI sync/diff expects, and the key a full
-    walk produces. `checksum` is the raw-file sha256. Skip symlinks and dot-names
+    walk produces. `checksum` is the raw-file sha256. `mtime` is the source file
+    mtime (rclone-preserved gdrive modifiedTime) as ISO-8601 UTC. Skip symlinks and dot-names
     (hidden dirs and files). `path` opts into a dot-subtree: the walk starts at
     the subpath, so the requested dot-dir is entered even though the default
     walk prunes dot-names, while deeper dot-children stay pruned. Return an empty

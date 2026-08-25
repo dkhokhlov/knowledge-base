@@ -100,6 +100,7 @@ def flatten_chroma(d):
                 "page": m.get("page"),
                 "start_index": m.get("start_index"),
                 "source": m.get("source") or "",
+                "mtime": m.get("mtime"),
                 "text": t,
             })
     return out
