@@ -8,6 +8,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Nothing yet.
+
+### Changed
+
+- Nothing yet.
+
+### Fixed
+
+- Nothing yet.
+
+## [v1.5.0] — 2026-08-25
+
+### Added
+
 - **Source file `mtime` in `retrieve` hits.** The kb-gateway captures each
   gdrive file's mtime (rclone-preserved filesystem mtime) as ISO-8601 UTC at
   upload and stores it in `File.meta.data.mtime`. A new Open WebUI custom-image
@@ -24,6 +38,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
   accepts an fnmatch glob (e.g. `*@corp.com` / `*` for all visible KBs) in
   addition to an exact owner email. Backward-compatible: an exact email has no
   glob chars and matches literally. Doc updated in `SKILL.md` + `docs/operations.md`.
+- **`RETRY_PENDING` flag for `make gdrive-index`.** The gateway `/index`
+  self-heal re-triggers FAILED files (delete + re-upload) by default;
+  `RETRY_PENDING=1` adds `retry_pending=1` to the query so stalled PENDING files
+  are also re-triggered. Use to drain files stuck in extraction after an Ollama
+  queue overflow or an OCR stall, without a full `INDEX_ALL=1` re-index. Docs
+  updated in `README.md` + `docs/operations.md`.
 
 ### Changed
 
@@ -35,6 +55,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
   its neighbors. Absent metadata defaults to `None` / `""`. Wrapper-side
   only; no re-index needed (the metadata was already in Chroma, just not
   surfaced). `tests/test_output_json.py` enriched to assert the new keys.
+- **`/status` payload reshaped.** The per-file list is now `indexed_files`
+  (was `files`); a new `pending_files` list (filename + error for each
+  `pending` file) is added after `failed_files`; and the `summary` object
+  orders the per-file lists first, then single-field counts (`source`,
+  `kb_id`, `source_count`, `indexed_count`, `pending`, `processing`,
+  `failed`). Insertion order via plain dict (Python 3.12, `json.dumps` with
+  no `sort_keys`); no `OrderedDict` needed. `tests/test_09_gdrive_index.sh`
+  + `README.md` + `docs/operations.md` updated.
+- **`.env.template` image tags aligned with the published images.**
+  `OPENWEBUI_IMAGE_TAG` -> `0.11.0-pathdedup-idem-mtime` and
+  `MARKITDOWN_OCR_IMAGE_TAG` -> `0.1.1-ollama-native`, matching the
+  `compose.yml` defaults and the published GHCR tags. The running stack
+  already used these images by digest; only the tag strings were stale.
+  Kept `.env` == `.env.template`.
 
 ### Fixed
 
@@ -710,6 +744,8 @@ clean-state e2e harness.
 Initial tagged release. MCP-based Graphiti memory stack (memory extraction
 non-functional with Ollama — fixed in v1.1.0).
 
+[Unreleased]: https://github.com/dkhokhlov/knowledgebase/compare/v1.5.0...HEAD
+[v1.5.0]: https://github.com/dkhokhlov/knowledgebase/releases/tag/v1.5.0
 [v1.4.0]: https://github.com/dkhokhlov/knowledgebase/releases/tag/v1.4.0
 [v1.1.0]: https://github.com/dkhokhlov/knowledgebase/releases/tag/v1.1.0
 [v1.0.0]: https://github.com/dkhokhlov/knowledgebase/releases/tag/v1.0.0
