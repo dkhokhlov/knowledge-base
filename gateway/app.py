@@ -642,17 +642,19 @@ class Handler(BaseHTTPRequestHandler):
         failed = [s for s in file_status if s.get("status") == "failed"]
         in_flight = pending + processing
         per_file = [{"filename": s.get("filename"), "status": s.get("status"),
-                     "error": s.get("error")} for s in file_status]
+                     "error": s.get("error")}
+                    for s in file_status
+                    if s.get("status") == "completed"]
         if relpath:
             per_file = [p for p in per_file
                         if p.get("filename") == os.path.basename(relpath)]
         summary = {"indexed_files": per_file,
-                   "failed_files": [{"filename": f.get("filename"),
-                                     "error": f.get("error")} for f in failed],
                    "pending_files": [{"filename": s.get("filename"),
                                       "error": s.get("error")}
                                      for s in file_status
                                      if s.get("status") == "pending"],
+                   "failed_files": [{"filename": f.get("filename"),
+                                     "error": f.get("error")} for f in failed],
                    "source": source, "kb_id": kb_id,
                    "source_count": source_count,
                    "indexed_count": completed,

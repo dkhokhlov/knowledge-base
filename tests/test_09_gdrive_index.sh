@@ -136,6 +136,38 @@ else
   exit 1
 fi
 
+# --- payload invariants: each list length == its count; lists sum == counts sum
+section "status payload invariants (lists vs counts)"
+inv_out=$(printf '%s' "$status_json" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+idx = d.get("indexed_files") or []
+pend = d.get("pending_files") or []
+fl = d.get("failed_files") or []
+ic = d.get("indexed_count", 0); p = d.get("pending", 0)
+pc = d.get("processing", 0); fc = d.get("failed", 0)
+errs = []
+if len(idx) != ic: errs.append("len(indexed_files)=%d != indexed_count=%d" % (len(idx), ic))
+if len(pend) != p: errs.append("len(pending_files)=%d != pending=%d" % (len(pend), p))
+if len(fl) != fc: errs.append("len(failed_files)=%d != failed=%d" % (len(fl), fc))
+if len(idx) + len(pend) + len(fl) + pc != ic + p + fc + pc:
+    errs.append("list sum + processing=%d != count sum=%d" % (len(idx)+len(pend)+len(fl)+pc, ic+p+fc+pc))
+print("OK" if not errs else "FAIL")
+print("%d %d %d" % (len(idx), len(pend), len(fl)))
+print("\n".join(errs))
+' 2>/dev/null || echo "FAIL"$'\n''0 0 0'$'\n''parse error')
+inv_verdict=$(printf '%s' "$inv_out" | sed -n 1p)
+read -r inv_idx inv_pend inv_fail < <(printf '%s' "$inv_out" | sed -n 2p)
+inv_errs=$(printf '%s' "$inv_out" | sed -n '3,$p')
+if [ "$inv_verdict" = "OK" ]; then
+  pass "indexed_files=${inv_idx} pending_files=${inv_pend} failed_files=${inv_fail} == indexed_count=${completed} pending=${pending} failed=${failed}"
+else
+  fail "payload invariants violated:"
+  printf '%s\n' "$inv_errs"
+  finish
+  exit 1
+fi
+
 # --- failure audit: "Failed to link" = double-link race (must be 0) -----------
 section "failure audit"
 link_fails=$(printf '%s' "$status_json" | python3 -c '
