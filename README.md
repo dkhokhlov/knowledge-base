@@ -29,8 +29,8 @@ Documents provide grounded answers from a curated reference corpus. Fact memory 
 README:
 
 - [Architecture](#architecture)
-- [Operating model](#operating-model)
 - [Quick start](#quick-start)
+- [Operating model](#operating-model)
 - [Performance](#performance)
 - [Security](#security)
 - [Repository layout](#repository-layout)
@@ -92,6 +92,48 @@ Sub-documents:
 - Only `KB_HOST_PORT` (default `3000`) → Caddy `:3000` binds to the host. Caddy's `depends_on` uses `service_started` (not `service_healthy`) so the OWUI root stays reachable even if the gateway is broken.
 - [Ollama][ollama] is external on the Docker host (reached via host-gateway); not published by this stack. [Open WebUI][open-webui] (RAG + chat) and graphiti (extraction LLM + embedder) both reach it.
 - **TLS**: the Caddyfile is plain HTTP on the port. For a non-local `KB_HOST` you MUST either front Caddy with an upstream TLS reverse proxy, or switch the `:3000` site block to a hostname block so Caddy auto-terminates TLS and publishes `:443`. For the local MVP (`http://localhost:3000`) no TLS is needed.
+
+## Quick start
+
+Full prerequisites, configuration, and env vars are in [docs/operations.md](docs/operations.md). Core sequence:
+
+**Minimum env vars to set** (in your shell env — both are commented out in `.env.template` so the shell value is not clobbered; everything else has a working default or is auto-generated):
+
+- `OLLAMA_HOST`: the only hard blocker. `make start` fails fast if `OLLAMA_HOST` is unset — compose uses `${OLLAMA_HOST:?…}` (no `host.docker.internal` fallback; `make preflight` checks it too). `export OLLAMA_HOST=http://<ollama-host>:11434` (`http://host.docker.internal:11434` if Ollama runs on the Docker host). Do NOT use `localhost`/`127.0.0.1` — the value is used inside the containers, where localhost is the container's own loopback (no Ollama there).
+- `KB_HOST`: the single public URL agents/clients point at. `export KB_HOST=http://<host>:3000` (defaults to `http://localhost:3000` when unset). `KB_HOST_PORT` (default `3000`) is the only host-published port. Use `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
+
+**One-shot provision** — from a fresh checkout, run:
+
+```
+export OLLAMA_HOST=http://<ollama-host>:11434
+export KB_HOST=http://<host>:3000
+make provision
+```
+
+`make provision` chains the full first-time setup and leaves the stack running: `bootstrap` (creates `.env`/`.env.local` + the JWT key, `OCR_SERVICE_TOKEN`, first-user password, `./data` dirs) → `pull-models` (BLOCKING: pulls the base LLM + ctx variant + embedder + `deepseek-ocr` from Ollama) → `start` (preflight + `docker compose up -d`, `--profile ocr` when `OCR_ENABLED=true`) → `admin-signup` (creates `admin@<KB_DOMAIN>`) → `api-keys` (admin + read-scoped agent keys; auto-configures OWUI → `markitdown-ocr` when `OCR_ENABLED=true`) → `rag-config` (strict-grounding RAG template + `rag.ollama.base_url` sync) → `gdrive-index-bootstrap` (creates the gdrive KB + grants agent read + writes `GDRIVE_KB_ID`). The JWT key, API keys, and Neo4j auth are generated locally; `OCR_ENABLED` defaults to `true` (set `false` BEFORE `make provision` to skip OCR). Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
+
+> **PROMPT for Agent**
+>
+> Paste this prompt into an agent (Claude Code, etc.); it runs the `make` targets for you (provision creates the 1st user `admin@<domain>`, this adds you as the 2nd). Edit the domain, your name, and email:
+>
+> ```
+> Do make clean-all then provision from scratch with domain: <your.domain>;
+> 2nd user (me) - <your-name>, <you>@<your.domain>;
+> update my KB_API_KEY in ~/.bashrc.
+> ```
+
+**Populate the gdrive KB** (one-time) — after `make provision`:
+
+```
+make gdrive-sync   # rclone pull into ./gdrive + POST /index (reconcile into the KB)
+make gdrive-status # pretty JSON: completed/pending/processing/failed vs source (no ETA — no daemon)
+```
+
+See [gdrive indexing (manual, via kb-gateway)](#gdrive-indexing-manual-via-kb-gateway). `make gdrive-sync` chains rclone → POST `/index`; indexing is manual/on-demand (no sidecar).
+
+**Everyday restart** (provision is done once): `make start`. Re-assert after a DB reset: `make rag-config` (+ `make ocr-config`). Rotate keys: `make api-keys FORCE=1`.
+
+(Optional) Close signup after the admin + agent accounts exist: set `ENABLE_SIGNUP=false` in `.env` and `make restart`.
 
 ## Operating model
 
@@ -174,46 +216,6 @@ The `gdrive` knowledge base is indexed by **kb-gateway** (stateless, no sidecar)
 The `markitdown-ocr` sidecar is an **external extraction engine** that OCRs image-bearing documents (PDF/DOCX/PPTX/XLSX) and standalone images via `deepseek-ocr` on Ollama's native `/api/chat`, so image-only PDFs and embedded figures/diagrams become searchable instead of orphaning. Gated by `OCR_ENABLED` in `.env` (default `true`; set `false` BEFORE `make bootstrap` to disable — no runtime toggle); profile-gated (`--profile ocr`); no per-type fallback (global + all-or-nothing). When enabled it is provisioned by the standard chain (`bootstrap` generates the token, `pull-models` pulls `deepseek-ocr`, `start` builds + starts the sidecar, `api-keys` sets the OWUI routing) — no separate step. To disable, set `OCR_ENABLED=false` in `.env` and run `make clean-all && make bootstrap` (existing OCR'd members keep their content until re-ingested). A hit carries `file_id` + `page` → the exact original page/slide/sheet. Full design, scope, and service guards: [docs/ocr.md](docs/ocr.md).
 
 For per-tool agent integration (skill install, CLI examples), see [docs/agents.md](docs/agents.md).
-
-## Quick start
-
-Full prerequisites, configuration, and env vars are in [docs/operations.md](docs/operations.md). Core sequence:
-
-**Minimum env vars to set** (in your shell env — both are commented out in `.env.template` so the shell value is not clobbered; everything else has a working default or is auto-generated):
-
-- `OLLAMA_HOST`: the only hard blocker. `make start` fails fast if `OLLAMA_HOST` is unset — compose uses `${OLLAMA_HOST:?…}` (no `host.docker.internal` fallback; `make preflight` checks it too). `export OLLAMA_HOST=http://<ollama-host>:11434` (`http://host.docker.internal:11434` if Ollama runs on the Docker host). Do NOT use `localhost`/`127.0.0.1` — the value is used inside the containers, where localhost is the container's own loopback (no Ollama there).
-- `KB_HOST`: the single public URL agents/clients point at. `export KB_HOST=http://<host>:3000` (defaults to `http://localhost:3000` when unset). `KB_HOST_PORT` (default `3000`) is the only host-published port. Use `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
-
-**One-shot provision** — from a fresh checkout, run:
-
-```
-export OLLAMA_HOST=http://<ollama-host>:11434
-export KB_HOST=http://<host>:3000
-make provision
-```
-
-`make provision` chains the full first-time setup and leaves the stack running: `bootstrap` (creates `.env`/`.env.local` + the JWT key, `OCR_SERVICE_TOKEN`, first-user password, `./data` dirs) → `pull-models` (BLOCKING: pulls the base LLM + ctx variant + embedder + `deepseek-ocr` from Ollama) → `start` (preflight + `docker compose up -d`, `--profile ocr` when `OCR_ENABLED=true`) → `admin-signup` (creates `admin@<KB_DOMAIN>`) → `api-keys` (admin + read-scoped agent keys; auto-configures OWUI → `markitdown-ocr` when `OCR_ENABLED=true`) → `rag-config` (strict-grounding RAG template + `rag.ollama.base_url` sync) → `gdrive-index-bootstrap` (creates the gdrive KB + grants agent read + writes `GDRIVE_KB_ID`). The JWT key, API keys, and Neo4j auth are generated locally; `OCR_ENABLED` defaults to `true` (set `false` BEFORE `make provision` to skip OCR). Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
-
-> **Note — from-scratch provision via an agent.** Paste this prompt into an agent (Claude Code, etc.); it runs the `make` targets for you (provision creates the 1st user `admin@<domain>`, this adds you as the 2nd). Edit the domain, your name, and email:
->
-> ```
-> Do make clean-all then provision from scratch with domain: <your.domain>;
-> 2nd user (me) - <your-name>, <you>@<your.domain>;
-> update my KB_API_KEY in ~/.api_keys. start gdrive-sync.
-> ```
-
-**Populate the gdrive KB** (one-time) — after `make provision`:
-
-```
-make gdrive-sync   # rclone pull into ./gdrive + POST /index (reconcile into the KB)
-make gdrive-status # pretty JSON: completed/pending/processing/failed vs source (no ETA — no daemon)
-```
-
-See [gdrive indexing (manual, via kb-gateway)](#gdrive-indexing-manual-via-kb-gateway). `make gdrive-sync` chains rclone → POST `/index`; indexing is manual/on-demand (no sidecar).
-
-**Everyday restart** (provision is done once): `make start`. Re-assert after a DB reset: `make rag-config` (+ `make ocr-config`). Rotate keys: `make api-keys FORCE=1`.
-
-(Optional) Close signup after the admin + agent accounts exist: set `ENABLE_SIGNUP=false` in `.env` and `make restart`.
 
 ## Performance
 
