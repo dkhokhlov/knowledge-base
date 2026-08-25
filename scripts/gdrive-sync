@@ -78,6 +78,27 @@ index_all=0
 retry_pending=0
 path=""
 
+# KB-indexable document filter — MUST match DEFAULT_ALLOW in gateway/app.py
+# (the gdrive index documents-only set: docx,pdf,pptx,xlsx,txt,md,html,json,log,
+# tex). Used to count local files the KB will index (the 157), distinct from the
+# raw local count (all extensions). Case-insensitive (-iname) matches the
+# gateway's ext.lower(); -not -path '*/.*' prunes dot-names like walk_source
+# (gateway/app.py:806). KB_ALLOW env override is NOT honored here (the host sync
+# runs without the gateway container env) — if you override KB_ALLOW, update
+# this list too.
+indexable_filter=( -not -path '*/.*' \(
+    -iname '*.docx' -o
+    -iname '*.pdf'  -o
+    -iname '*.pptx' -o
+    -iname '*.xlsx' -o
+    -iname '*.txt'  -o
+    -iname '*.md'   -o
+    -iname '*.html' -o
+    -iname '*.json' -o
+    -iname '*.log'  -o
+    -iname '*.tex'
+\) )
+
 while (($# > 0)); do
     case "$1" in
         -r|--remote)
@@ -338,21 +359,22 @@ PY
     fi
 }
 
-# Render the per-drive remote/local/excluded table to stdout. Called inside the
-# report's { } block (output goes to the report file) and again after (to the
-# terminal). Globals: drive_rows (name<TAB>remote<TAB>local<TAB>excluded per
-# completed drive), total_remote, total_local, total_excl.
+# Render the per-drive remote/local/indexable/excluded table to stdout. Called
+# inside the report's { } block (output goes to the report file) and again after
+# (to the terminal). Globals: drive_rows (name<TAB>remote<TAB>local<TAB>indexable
+# <TAB>excluded<TAB>dups per completed drive), total_remote, total_local,
+# total_indexable, total_excl.
 print_drive_table() {
     printf 'Drive table:\n'
-    printf '%-28s %10s %10s %10s %8s\n' "DRIVE" "remote" "local" "excluded" "dups"
-    printf '%-28s %10s %10s %10s %8s\n' "-----" "------" "-----" "--------" "----"
+    printf '%-28s %10s %10s %10s %10s %8s\n' "DRIVE" "remote" "local" "indexable" "excluded" "dups"
+    printf '%-28s %10s %10s %10s %10s %8s\n' "-----" "------" "-----" "---------" "--------" "----"
     if [[ -n "$drive_rows" ]]; then
-        while IFS=$'\t' read -r dname rem loc exc dup; do
+        while IFS=$'\t' read -r dname rem loc idx exc dup; do
             [[ -n "$dname" ]] || continue
-            printf '%-28s %10s %10s %10s %8s\n' "$dname" "$rem" "$loc" "$exc" "$dup"
+            printf '%-28s %10s %10s %10s %10s %8s\n' "$dname" "$rem" "$loc" "$idx" "$exc" "$dup"
         done <<<"$drive_rows"
     fi
-    printf '%-28s %10s %10s %10s %8s\n' "TOTAL" "$total_remote" "$total_local" "$total_excl" "$total_dups"
+    printf '%-28s %10s %10s %10s %10s %8s\n' "TOTAL" "$total_remote" "$total_local" "$total_indexable" "$total_excl" "$total_dups"
 }
 
 # Write the sync report (header + $summary + drive table + "Files changed"
@@ -421,10 +443,12 @@ write_report_and_exit() {
 changes=""
 processed_drives=0
 # Per-drive accumulators for the report's drive table + totals. remote/local/
-# excluded are summed per drive; drive_rows holds one TSV row per completed drive
-# (name<TAB>remote<TAB>local<TAB>excluded) rendered as the report table.
+# indexable/excluded are summed per drive; drive_rows holds one TSV row per
+# completed drive (name<TAB>remote<TAB>local<TAB>indexable<TAB>excluded<TAB>dups)
+# rendered as the report table.
 total_remote=0
 total_local=0
+total_indexable=0
 total_bytes=0
 total_excl=0     # init here: print_drive_table() reaches these on the fail-fast /
 total_dups=0     # empty-source paths INSIDE the loop, before the post-loop compute
@@ -543,20 +567,23 @@ while IFS=$'\t' read -r drive_id drive_name; do
     parse_drive_log
 
     drive_files=0
+    drive_indexable=0
     drive_bytes=0
     if [[ -d "$target" ]]; then
         drive_files=$(find "$target" -type f -printf '.' | wc -c)
+        drive_indexable=$(find "$target" -type f "${indexable_filter[@]}" -printf '.' | wc -c)
         drive_bytes=$(du -sb -- "$target" | awk '{print $1}')
     fi
     drive_mb=$(awk -v bytes="$drive_bytes" 'BEGIN { printf "%.2f", bytes / 1000000 }')
-    printf 'Drive report: %s -> %s: %s files, %s MB local (%s excluded of %s remote)\n' \
-        "$drive_name" "$safe_name" "$drive_files" "$drive_mb" "$drive_excl_count" "$remote_files"
+    printf 'Drive report: %s -> %s: %s files, %s MB local, %s indexable (%s excluded of %s remote)\n' \
+        "$drive_name" "$safe_name" "$drive_files" "$drive_mb" "$drive_indexable" "$drive_excl_count" "$remote_files"
     total_remote=$((total_remote + remote_files))
     total_local=$((total_local + drive_files))
+    total_indexable=$((total_indexable + drive_indexable))
     total_bytes=$((total_bytes + drive_bytes))
     # printf -v (not $(printf...)) preserves the trailing newline — command
     # substitution would strip it and concatenate the rows.
-    printf -v __row '%s\t%s\t%s\t%s\t%s\n' "$drive_name" "$remote_files" "$drive_files" "$drive_excl_count" "$drive_dup_count"
+    printf -v __row '%s\t%s\t%s\t%s\t%s\t%s\n' "$drive_name" "$remote_files" "$drive_files" "$drive_indexable" "$drive_excl_count" "$drive_dup_count"
     drive_rows+="$__row"
 done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$drive_json")
 
@@ -567,7 +594,7 @@ done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$drive_json")
 total_mb=$(awk -v bytes="$total_bytes" 'BEGIN { printf "%.2f", bytes / 1000000 }')
 total_excl=$(awk -F'\t' '$1=="EXCLUDE"' <<<"$changes" | wc -l)
 total_dups=$(awk -F'\t' '$1=="DUP"' <<<"$changes" | wc -l)
-emit "Sync report: ${processed_drives} drives, ${total_remote} remote, ${total_local} local, ${total_excl} excluded, ${total_dups} duplicates, ${total_mb} MB local"
+emit "Sync report: ${processed_drives} drives, ${total_remote} remote, ${total_local} local, ${total_indexable} indexable, ${total_excl} excluded, ${total_dups} duplicates, ${total_mb} MB local"
 
 # Deleted/overwritten files rclone moved into --backup-dir (recovery net). Empty
 # when nothing changed or under --dry-run (sync does not move files then).
