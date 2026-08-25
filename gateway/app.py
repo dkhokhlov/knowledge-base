@@ -573,21 +573,25 @@ class Handler(BaseHTTPRequestHandler):
                            "error": "list_file_status failed: %s" % e})
         if file_status is not None:
             for st in file_status:
-                if st.get("status") not in retry_statuses:
-                    continue
+                status = st.get("status")
                 fn = st.get("filename") or st.get("file_id") or "?"
                 src = by_hash.get(st.get("file_hash"))
-                if not src:
-                    # No source for this hash. Only safe to delete as an orphan
-                    # when BOTH hold: (a) the reconcile is full-KB (scope_path
-                    # empty -> by_hash covers the whole KB; list_file_status is
-                    # KB-wide, so a subpath scope would misclassify an
-                    # out-of-scope file as an orphan), and (b) the file carries
-                    # a gateway file_hash (a gateway-managed file; a non-gateway
-                    # file with no file_hash is indistinguishable and must not
-                    # be deleted). sync_diff did not catch it: a failed file is
-                    # not linked, so it is absent from sync_diff's linked-file
-                    # set.
+                if not src and status != "completed":
+                    # No-source orphan: the source is gone (deleted from Drive,
+                    # rclone-excluded, or moved). Delete it on a full reconcile
+                    # (scope_path empty -> by_hash covers the whole KB;
+                    # list_file_status is KB-wide, so a subpath scope would
+                    # misclassify an out-of-scope file) when the file carries a
+                    # gateway file_hash (a non-gateway file with no file_hash is
+                    # indistinguishable and must not be deleted). This fires for
+                    # failed AND pending/processing, independent of retry_pending:
+                    # a no-source pending file has nothing to re-extract (its
+                    # source is gone), so deleting it does NOT interrupt legit
+                    # in-flight OCR the way retry_pending=1 would (which
+                    # re-triggers ALL pending, including those with a live
+                    # source). sync_diff did not catch it: failed/pending files
+                    # are not linked. A no-source completed file is sync_diff's
+                    # job (it is linked).
                     if scope_path or not st.get("file_hash"):
                         errors.append({"filename": fn, "status": "error",
                                        "error": "re-trigger: no source for hash "
@@ -601,13 +605,15 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         owui.delete_file(admin_key, fid)
                         orphans_removed += 1
-                        log.info("/index orphan-delete kb=%s file=%s file_id=%s",
-                                 kb_id, fn, fid)
+                        log.info("/index orphan-delete kb=%s file=%s file_id=%s status=%s",
+                                 kb_id, fn, fid, status)
                     except (owui.OwuiError, OSError) as e:
                         log.warning("/index orphan-delete failed kb=%s file=%s: %s",
                                     kb_id, fn, e)
                         errors.append({"filename": fn, "status": "error",
                                        "error": "re-trigger orphan delete failed: %s" % e})
+                    continue
+                if status not in retry_statuses:
                     continue
                 log.info("/index retry kb=%s file=%s file_id=%s status=%s",
                          kb_id, fn, st.get("file_id"), st.get("status"))
