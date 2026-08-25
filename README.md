@@ -194,6 +194,14 @@ make provision
 
 `make provision` chains the full first-time setup and leaves the stack running: `bootstrap` (creates `.env`/`.env.local` + the JWT key, `OCR_SERVICE_TOKEN`, first-user password, `./data` dirs) → `pull-models` (BLOCKING: pulls the base LLM + ctx variant + embedder + `deepseek-ocr` from Ollama) → `start` (preflight + `docker compose up -d`, `--profile ocr` when `OCR_ENABLED=true`) → `admin-signup` (creates `admin@<KB_DOMAIN>`) → `api-keys` (admin + read-scoped agent keys; auto-configures OWUI → `markitdown-ocr` when `OCR_ENABLED=true`) → `rag-config` (strict-grounding RAG template + `rag.ollama.base_url` sync) → `gdrive-index-bootstrap` (creates the gdrive KB + grants agent read + writes `GDRIVE_KB_ID`). The JWT key, API keys, and Neo4j auth are generated locally; `OCR_ENABLED` defaults to `true` (set `false` BEFORE `make provision` to skip OCR). Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
 
+> **Note — from-scratch provision via an agent.** Paste this prompt into an agent (Claude Code, etc.); it runs the `make` targets for you (provision creates the 1st user `admin@<domain>`, this adds you as the 2nd). Edit the domain, your name, and email:
+>
+> ```
+> Do make clean-all then provision from scratch with domain: <your.domain>;
+> 2nd user (me) - <your-name>, <you>@<your.domain>;
+> update my KB_API_KEY in ~/.api_keys. start gdrive-sync.
+> ```
+
 **Populate the gdrive KB** (one-time) — after `make provision`:
 
 ```

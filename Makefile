@@ -24,7 +24,10 @@ provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + adm
 	  echo "==> 2/8 pull-models (BLOCKING: pulls base LLM + ctx variant + embedder + deepseek-ocr from Ollama)"; make pull-models; \
 	  echo "==> 3/8 start (preflight + docker compose up -d, + --profile ocr when OCR_ENABLED=true)"; make start; \
 	  echo "==> waiting for stack /health (OWUI has a 40s start period)..."; \
+	  _KB_DOMAIN_OVR=$${KB_DOMAIN:-}; _OCR_ENABLED_OVR=$${OCR_ENABLED:-}; \
 	  set -a; . ./.env; set +a; \
+	  [ -n "$$_KB_DOMAIN_OVR" ] && export KB_DOMAIN="$$_KB_DOMAIN_OVR"; \
+	  [ -n "$$_OCR_ENABLED_OVR" ] && export OCR_ENABLED="$$_OCR_ENABLED_OVR"; \
 	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
 	  i=0; until curl -sf "$$H/health" >/dev/null 2>&1; do i=$$((i+1)); [ $$i -lt 60 ] \
 	    || { echo "stack did not become healthy in 120s ($$H/health)" >&2; exit 1; }; sleep 2; done; \
@@ -193,16 +196,22 @@ shell-caddy: ## Shell into the Caddy gateway container
 clean: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.local.
 	@$(COMPOSE) down --remove-orphans
 
-clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + remove .env.local. Keeps .env config (incl. OCR_ENABLED) and configs.
+clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + backup-and-remove .env + .env.local. Keeps graphiti/config.yaml, caddy/Caddyfile, and the ./gdrive mirror.
 	@$(COMPOSE) down --remove-orphans --volumes
 	@# Remove ./data as root via a throwaway container: OWUI (root) and Neo4j
 	@# (neo4j uid) write bind-mount files the host user cannot delete, so a host
-	@# `rm -rf` fails midway and never reaches `rm -f .env.local`.
+	@# `rm -rf` fails midway and never reaches the config backup/wipe below.
 	@docker run --rm -v "$(CURDIR)/$(DATA_DIR):/data" alpine sh -c "rm -rf /data/*"
-	@rm -f .env.local
+	@# Backup .env + .env.local to a dated recovery dir, then remove them, so a
+	@# bare `make provision` reprovisions from the .env.template default (pass
+	@# `KB_DOMAIN=<d>` for a custom domain). `make clean-backup` clears the tree.
+	@TS=$$(date -u +%Y%m%dT%H%M%SZ); mkdir -p ".config-backup/$$TS"; \
+	  cp -p .env ".config-backup/$$TS/.env" 2>/dev/null || true; \
+	  cp -p .env.local ".config-backup/$$TS/.env.local" 2>/dev/null || true; \
+	  rm -f .env .env.local
 	@rm -rf ./.gdrive-backup
-	@echo "Wiped containers, ./data, ./.gdrive-backup, and .env.local. .env (incl. OCR_ENABLED), graphiti/config.yaml, caddy/Caddyfile are preserved."
+	@echo "Wiped containers, ./data, ./.gdrive-backup, .env, .env.local (backed up to ./.config-backup/<TS>). graphiti/config.yaml, caddy/Caddyfile, ./gdrive preserved."
 
-clean-backup: ## Remove the rclone --backup-dir retention tree (./.gdrive-backup). Non-destructive: does not touch the stack, ./data, or .env.local.
-	@rm -rf ./.gdrive-backup
-	@echo "Removed ./.gdrive-backup (rclone sync backup retention)."
+clean-backup: ## Remove the retention trees (./.gdrive-backup + ./.config-backup). Non-destructive: does not touch the stack, ./data, .env, or .env.local.
+	@rm -rf ./.gdrive-backup ./.config-backup
+	@echo "Removed ./.gdrive-backup + ./.config-backup (retention)."

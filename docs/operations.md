@@ -514,13 +514,13 @@ dependency is down.
 | `gdrive-status` | GET `/status` (kb-gateway), pretty JSON (indent=2): `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`, `failed_files`, `pending_files`, and the per-file `indexed_files` list. Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
-| `clean-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + delete `.env.local` (preserves `.env`, incl. `OCR_ENABLED`) |
-| `clean-backup` | remove the `./.gdrive-backup/` rclone sync retention tree (non-destructive: does not touch the stack, `./data`, or `.env.local`) |
+| `clean-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + backup-and-delete `.env` + `.env.local` (dated backup under `./.config-backup/<TS>/`; preserves `graphiti/config.yaml`, `caddy/Caddyfile`, and the `./gdrive` mirror) |
+| `clean-backup` | remove the retention trees `./.gdrive-backup/` + `./.config-backup/` (non-destructive: does not touch the stack, `./data`, `.env`, or `.env.local`) |
 
 - `clean` preserves all state (clean recreate).
-- `clean-all` wipes data, the generated secret, and the gdrive backup retention.
-- `clean-all` keeps `.env` config (incl. `OCR_ENABLED`), `graphiti/config.yaml`, and `caddy/Caddyfile`.
-- `clean-backup` removes only `./.gdrive-backup/` (rclone sync retention); it does not tear down the stack.
+- `clean-all` wipes data, the generated secret, the gdrive backup retention, and the live config (`.env` + `.env.local`, backed up first); a following bare `make provision` reprovisions from the `.env.template` default — pass `KB_DOMAIN=<d>` for a custom domain.
+- `clean-all` keeps `graphiti/config.yaml`, `caddy/Caddyfile`, and the `./gdrive` mirror.
+- `clean-backup` removes `./.gdrive-backup/` + `./.config-backup/` (retention); it does not tear down the stack.
 
 ## Hardening reference
 
