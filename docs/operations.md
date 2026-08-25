@@ -188,11 +188,21 @@ the link). After the upload + cleanup, `/index` re-triggers any `failed` file
 patch returns an existing same-hash file WITHOUT re-queueing, so the delete
 first is required). With `?retry_pending=1` it also re-triggers files still
 `pending` (stalled in OCR) — operator-initiated, not the default, since it
-interrupts in-flight OCR. It **fails closed on an empty source** (0 files + not
+interrupts in-flight OCR. A `failed`/`pending` retry target whose source is
+gone from the corpus (deleted from Drive, rclone-excluded, or moved) has no
+source to re-upload: `/index` deletes it as an orphan so the KB mirror stays
+exact — a failed file is not linked, so `sync/diff` never sees it as deleted
+and would otherwise leave it permanently (the `/status` "failed: N forever"
+symptom). This orphan-delete fires only on a **full** reconcile (`path`
+empty) and only for a file carrying a gateway `file_hash` (a gateway-managed
+file); a subpath reconcile or a non-gateway file is skipped, not deleted.
+It **fails closed on an empty source** (0 files + not
 `?force=1` → 422, no `cleanup`, so a bad/empty mount cannot mass-delete the KB).
 Per-file transparency: the response carries `{added, modified, deleted,
-unmodified, retried, errors, ok}` where `errors` lists `{filename, status,
-error}` per failed upload/dir-create/re-trigger — the diagnosis surface (no
+unmodified, retried, orphans_removed, errors, ok}` where `errors` lists
+`{filename, status, error}` per failed upload/dir-create/re-trigger and
+`orphans_removed` counts no-source failed/pending files deleted this run —
+the diagnosis surface (no
 opaque daemon aggregate). `ok=false` means a real upload/extract error (the
 upload-idempotency + path-aware-dedup patches make duplicate-content 400s not
 occur). kb-gateway references a pre-existing KB by id — it does not create KBs.

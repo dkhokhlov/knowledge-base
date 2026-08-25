@@ -409,6 +409,7 @@ class Handler(BaseHTTPRequestHandler):
         reindex_all = _qs_bool(qs, "reindex_all", False)
         retry_pending = _qs_bool(qs, "retry_pending", False)
         path = _normalize_path(_qs(qs, "path", ""))
+        scope_path = path  # the upload loop reassigns `path`; preserve the query scope
         root = os.environ.get("GDRIVE_ROOT", "/gdrive")
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
@@ -556,6 +557,7 @@ class Handler(BaseHTTPRequestHandler):
         if retry_pending:
             retry_statuses.add("pending")
         retried = 0
+        orphans_removed = 0
         by_hash = {f["checksum"]: f for f in files}
         try:
             file_status = owui.list_file_status(admin_key, kb_id)
@@ -570,8 +572,36 @@ class Handler(BaseHTTPRequestHandler):
                 fn = st.get("filename") or st.get("file_id") or "?"
                 src = by_hash.get(st.get("file_hash"))
                 if not src:
-                    errors.append({"filename": fn, "status": "error",
-                                   "error": "re-trigger: no source for hash"})
+                    # No source for this hash. Only safe to delete as an orphan
+                    # when BOTH hold: (a) the reconcile is full-KB (scope_path
+                    # empty -> by_hash covers the whole KB; list_file_status is
+                    # KB-wide, so a subpath scope would misclassify an
+                    # out-of-scope file as an orphan), and (b) the file carries
+                    # a gateway file_hash (a gateway-managed file; a non-gateway
+                    # file with no file_hash is indistinguishable and must not
+                    # be deleted). sync_diff did not catch it: a failed file is
+                    # not linked, so it is absent from sync_diff's linked-file
+                    # set.
+                    if scope_path or not st.get("file_hash"):
+                        errors.append({"filename": fn, "status": "error",
+                                       "error": "re-trigger: no source for hash "
+                                                "(subpath-scoped or no file_hash; not deleted)"})
+                        continue
+                    fid = st.get("file_id")
+                    if not fid:
+                        errors.append({"filename": fn, "status": "error",
+                                       "error": "re-trigger orphan: no file_id"})
+                        continue
+                    try:
+                        owui.delete_file(admin_key, fid)
+                        orphans_removed += 1
+                        log.info("/index orphan-delete kb=%s file=%s file_id=%s",
+                                 kb_id, fn, fid)
+                    except (owui.OwuiError, OSError) as e:
+                        log.warning("/index orphan-delete failed kb=%s file=%s: %s",
+                                    kb_id, fn, e)
+                        errors.append({"filename": fn, "status": "error",
+                                       "error": "re-trigger orphan delete failed: %s" % e})
                     continue
                 try:
                     owui.delete_file(admin_key, st["file_id"])
@@ -592,10 +622,13 @@ class Handler(BaseHTTPRequestHandler):
         if retried:
             log.info("/index kb=%s retried=%d (retry_pending=%s)",
                      kb_id, retried, retry_pending)
+        if orphans_removed:
+            log.info("/index kb=%s orphans_removed=%d", kb_id, orphans_removed)
 
         self._ok({"added": len(added), "modified": len(modified),
                   "deleted": len(deleted), "unmodified": unmodified,
-                  "retried": retried, "errors": errors, "ok": len(errors) == 0})
+                  "retried": retried, "orphans_removed": orphans_removed,
+                  "errors": errors, "ok": len(errors) == 0})
 
     def _status(self, identity, qs):
         """GET /status?source=gdrive&kb_id=<id>[&path=<relpath>][&file=<relpath>][&json=1].
