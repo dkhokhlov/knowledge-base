@@ -22,7 +22,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
   that it is compact). `make test` runs it first (with `|| status=1`), before
   the `tests/test_*.sh` integration suite.
 
+- **`make users-create` / `users-list` / `users-search`** — operator make targets
+  for Open WebUI KB user management (admin-only), via `scripts/users.sh`. `create`
+  calls the kb-gateway `POST /admin/users` robust flow (create + signin + genkey +
+  verify + rollback) and prints `{email, temp_password, kb_api_key, role, id}` as
+  pretty JSON (indent 2); `list` (`GET /api/v1/users/all`) and `search`
+  (`GET /api/v1/users/?query=<q>&page=1`, substring on name/email) print `{users,
+  total}` as pretty JSON. Args via env: `EMAIL`/`NAME`/`ROLE` (create), `QUERY`
+  (search). Replaces the in-skill admin command (see Changed).
+
 ### Changed
+
+- **Admin user provisioning moved out of the `/kb` skill to operator make
+  targets.** The `kb_gateway.py user-create` subcommand (and its argparse entry,
+  dispatch, the `test_user_create` unit test, and the test_08 e2e block) is
+  removed — admin functions are done by the operator via `make users-create`
+  (more transparent + controlled), matching the gdrive `/index` operator-only
+  pattern. The gateway `POST /admin/users` endpoint is unchanged (still the
+  provisioning backend; covered by `test_07`). The four `SKILL.md` copies drop
+  the "KB user provisioning (admin)" section, the `create user` trigger, and the
+  `user-create` reference; per-account key issuance now points to
+  `make users-create`. **`KB_API_KEY` in `~/.api_keys` switched from the admin
+  key (`OPENWEBUI_ADMIN_API_KEY`) to the read-scoped agent key
+  (`OPENWEBUI_USER_API_KEY`)** — the skill is agent-scoped; the dropped
+  `user-create` would 403 under the agent key anyway. Owner-scoped destructive
+  ops (`forget`/`delete-edge`/`delete-episode`) stay allowed for the agent key.
 
 - **Agentic-first JSON output.** The `/kb` skill scripts
   (`skills/claude/scripts/{owui.py,kb_gateway.py}`) and `make gdrive-status` now

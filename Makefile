@@ -9,6 +9,7 @@ DATA_DIR := ./data
 
 .PHONY: help provision bootstrap preflight pull pull-models start stop restart logs ps config \
         health test test-output test-e2e api-keys admin-signup rag-config \
+        users-create users-list users-search \
         ocr-config \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
         projects-bootstrap \
@@ -99,6 +100,24 @@ admin-signup: ## Create the OWUI admin account (OPENWEBUI_FIRST_USER/PASSWORD) v
 	@grep -qE '^OPENWEBUI_FIRST_USER=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_FIRST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
 	@./scripts/admin-signup.sh
+
+users-create: ## Create a new OWUI KB user (admin) via kb-gateway POST /admin/users. Set EMAIL=, NAME=, [ROLE=user]. Prints {email, temp_password, kb_api_key, role, id} as pretty JSON; relay temp_password + kb_api_key out-of-band.
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
+	@./scripts/users.sh create
+
+users-list: ## List all OWUI users (admin) as pretty JSON (indent 2).
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
+	@./scripts/users.sh list
+
+users-search: ## Search OWUI users by name/email substring (admin). Set QUERY=. Pretty JSON (indent 2).
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
+	@./scripts/users.sh search
 
 rag-config: ## Set the strict-grounding RAG template in Open WebUI (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }

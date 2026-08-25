@@ -119,13 +119,33 @@ All endpoints are on one URL, **`KB_HOST`** (`http://<host>:3000` by default). C
 
 `KB_HOST` is set in `.env` (default `http://localhost:3000`); `KB_HOST_PORT` (default `3000`) is the only host-published port. [Neo4j][neo4j] (`:7474`, `:7687`) and graphiti (`:8000` internal) are not published — reachable only through the kb-gateway over `graph_internal`.
 
+### Environment variable precedence
+
+Two sourcing models:
+
+- **Operator scripts** (`scripts/*.sh`, run via `make <target>`): source `.env`
+  then `.env.local` (`set -a; . ./.env; . ./.env.local; set +a`). Precedence is
+  `.env.local` > `.env` > shell env — the file wins (location-specific to the
+  repo root). `KB_HOST` is computed from `KB_HOST_PORT`
+  (`http://localhost:${KB_HOST_PORT}`) unless the shell sets `KB_HOST`.
+- **The `/kb` skill** (`kb_gateway.py` / `owui.py`): a thin client that reads
+  ONLY `KB_HOST` + `KB_API_KEY` from the shell env (no `.env` / `.env.local`
+  sourcing) so it runs on any host.
+- **Make-time tunables** (`make <target> VAR=val`) override the file: the script
+  captures the shell value before sourcing and restores it after
+  (see `scripts/api-keys.sh` for `KB_DOMAIN` / `OCR_ENABLED`). A target's own
+  args (e.g. `EMAIL` / `NAME` / `QUERY` for `make users-*`) are not in `.env`,
+  so they pass through unclobbered.
+
+Full detail: [docs/operations.md](docs/operations.md) → Variable precedence.
+
 ### KB user provisioning (admin)
 
-An admin tells an agent **"create a new KB user alice\@example.com named Alice"**; the agent runs `kb_gateway.py ... user-create --email alice@example.com --name Alice`.
+An admin runs **`make users-create EMAIL=alice@example.com NAME=Alice`** (an operator make target; the former in-skill `user-create` command is removed — admin functions are operator-only now). The make target calls the kb-gateway `POST /admin/users` flow below.
 
 - The gateway enforces `role=admin` **server-side** before any write. A non-admin key → `403` (not merely a CLI check). OWUI down → `503`.
 - Flow (all inside the gateway, one stateless request): generate a strong temp password → create the OWUI user (`POST /api/v1/auths/add`, admin key) → sign in as the new user → generate that user's `KB_API_KEY` with the new user's own JWT (`POST /api/v1/auths/api_key`) → verify the key via `GET /api/v1/auths/` resolves to the expected email + `role=user`.
-- Returns to the admin **only**: `email`, `temp_password`, `kb_api_key`, `role`, `id`. The gateway is stateless — it **never persists** the password or key; they exist only in the one response. The agent must relay them to the requesting administrator and not store them.
+- Returns to the admin **only**: `email`, `temp_password`, `kb_api_key`, `role`, `id`. The gateway is stateless — it **never persists** the password or key; they exist only in the one response. The operator must relay them to the new account out-of-band and not store them.
 - **Rollback**: if any step after user creation fails, the gateway deletes the partial user (admin `DELETE /api/v1/users/{id}`) and returns a clear error. It never reports success on partial provisioning. A duplicate email → deterministic `409` (no second account).
 - Prerequisite: the deployed Open Web UI image must expose the provisioning endpoints. The gateway probes `/openapi.json` at startup and returns `501` from `/admin/users` if the image lacks them.
 

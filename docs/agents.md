@@ -10,7 +10,7 @@ under `/memory/*`, `POST /admin/users`, and `/health`. An agent holds only
 
 | Surface | Path | Auth | Use |
 |---|---|---|---|
-| Open WebUI REST | `KB_HOST/api/*` | `Bearer <KB_API_KEY>` | files, knowledge bases, projects memory (humans/admins also RAG directly here with an explicit `model`) |
+| Open WebUI REST | `KB_HOST/api/*` | `Bearer <KB_API_KEY>` | files, knowledge bases, projects memory (Claude Code skill only; humans/admins also RAG directly here with an explicit `model`) |
 | kb-gateway memory | `KB_HOST/memory/*` | `Bearer <KB_API_KEY>` | Graphiti facts (whoami, groups, add, search, episodes, status, forget, delete-edge, delete-episode) + RAG chat (`POST /memory/rag`; the gateway inserts the chat model from `OPENWEBUI_MODEL`) |
 | kb-gateway admin | `KB_HOST/admin/users` (POST) | `Bearer <KB_API_KEY>` (admin) | create a new KB user (returns temp password + `KB_API_KEY`) |
 | health | `KB_HOST/health` | none | read-only stack probe |
@@ -18,7 +18,7 @@ under `/memory/*`, `POST /admin/users`, and `/health`. An agent holds only
 `KB_API_KEY` is an Open WebUI per-account API key. The admin key
 (`OPENWEBUI_ADMIN_API_KEY`) grants admin role + override; the agent key
 (`OPENWEBUI_USER_API_KEY`) is read-scoped for KBs. Per-account keys are issued by
-the admin via `user-create`. `KB_API_KEY` is a bearer — `KB_HOST` MUST be HTTPS or
+the admin via `make users-create`. `KB_API_KEY` is a bearer — `KB_HOST` MUST be HTTPS or
 VPN/tunnel for any non-local agent.
 
 ## Prerequisites
@@ -27,7 +27,7 @@ VPN/tunnel for any non-local agent.
 - `KB_HOST` is set in `.env` (default `http://localhost:3000`). Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs on the Docker host.
 - You have a `KB_API_KEY`. For the bootstrap admin + read-scoped agent keys, run
   `make api-keys` (writes `OPENWEBUI_ADMIN_API_KEY` / `OPENWEBUI_USER_API_KEY` into
-  gitignored `.env.local`). For additional accounts, an admin runs `user-create`.
+  gitignored `.env.local`). For additional accounts, an admin runs `make users-create`.
 
 ## The `kb` skill
 
@@ -39,10 +39,11 @@ Python 3.10+ stdlib:
 
 - `scripts/owui.py` — Open WebUI REST: KB surface (read-scoped) `whoami`, `kbs`,
   `search`, `rag`, `file`; **projects memory** (user-key writes to owned KBs)
-  `index-projects`, `search-projects`, `status-projects`.
+  `index-projects`, `search-projects`, `status-projects` — **Claude Code skill copy
+  only**; the shared `owui.py` keeps the subcommands, but the codex/opencode/pi
+  `SKILL.md` copies do not document them.
 - `scripts/kb_gateway.py` — kb-gateway: facts memory (`whoami`, `groups`, `add`,
-  `search`, `episodes`, `status`, `forget`, `delete-edge`, `delete-episode`) and
-  admin (`user-create`).
+  `search`, `episodes`, `status`, `forget`, `delete-edge`, `delete-episode`).
 
 Both read ONLY `KB_HOST` + `KB_API_KEY` from the shell environment — no
 `.env` / `.env.local` files, no `--env-file`, no other env vars. Set both in
@@ -58,9 +59,9 @@ chat model server-side; the wrappers carry no model.
 | Natural — search | "search the KB for X" / "search the knowledge base for X" | by description match |
 | Natural — RAG chat | "ask the KB: \<question\>" / "ask the knowledge base: \<question\>" | by description match |
 | Natural — list | "list my KBs" / "list my knowledge bases" | by description match |
-| Natural — index projects memory | "index projects memory" / "index my Claude project memory" | by description match |
-| Natural — projects status | "projects memory index status" / "is my repo indexed" | by description match |
-| Natural — search projects memory | "search projects memory for X" / "search across my project KBs for X" | by description match |
+| Natural — index projects memory | "index projects memory" / "index my Claude project memory" | by description match (Claude Code only) |
+| Natural — projects status | "projects memory index status" / "is my repo indexed" | by description match (Claude Code only) |
+| Natural — search projects memory | "search projects memory for X" / "search across my project KBs for X" | by description match (Claude Code only) |
 
 The slash command is the most reliable; natural phrasing triggers automatically
 when it matches the skill description. Both "KB" and "knowledge base" phrasings
@@ -132,7 +133,11 @@ is ignored. The `/kb` skill reaches RAG via `POST /memory/rag` (the kb-gateway
 inserts the chat model from `OPENWEBUI_MODEL`; send no `model` field); humans/admins
 RAG directly at `POST /api/chat/completions` with an explicit `model`.
 
-### Projects memory (owui.py, user key)
+### Projects memory (owui.py, user key) — Claude Code skill only
+
+Available only in the Claude Code skill copy (`skills/claude/SKILL.md`); the
+codex/opencode/pi copies do not expose projects memory. The shared `owui.py`
+keeps the subcommands.
 
 **Projects memory** = Claude's per-project auto-memory
 (`~/.claude/projects/<encoded-dir>/memory/*.md`), indexed into OWUI KBs — one KB
@@ -187,15 +192,20 @@ owning the target group or admin.
 
 ### Create a new KB user (admin only)
 
+User provisioning is an operator make target (not an in-skill command):
+
 ```
-python3 "$S/kb_gateway.py" user-create --email alice@example.com --name Alice
-# prints: email, temp_password, kb_api_key, role, id  — relay to the admin ONLY; do not persist
+make users-create EMAIL=alice@example.com NAME=Alice
+# prints pretty JSON: email, temp_password, kb_api_key, role, id  — relay to the
+# new account out-of-band ONLY; do not persist
 ```
 
-The gateway enforces `role=admin` server-side (non-admin → `403`) and rolls back
-a partial user if key generation fails. The returned `temp_password` + `kb_api_key`
-exist only in the one response — relay them to the requesting administrator
-out-of-band and do not store them.
+`make users-list` and `make users-search QUERY=<q>` list/search users (pretty
+JSON). The make target calls the kb-gateway `POST /admin/users` flow: the gateway
+enforces `role=admin` server-side (non-admin → `403`) and rolls back a partial
+user if key generation fails. The returned `temp_password` + `kb_api_key` exist
+only in the one response — relay them to the new account out-of-band and do not
+store them.
 
 ## Errors
 

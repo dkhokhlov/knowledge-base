@@ -128,16 +128,6 @@ class KbGatewayTests(_Assertions):
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["uuid"], "e1")
 
-    def test_user_create(self):
-        ns = mock.Mock(email="x@y", name="X", role="user")
-        resp = {"email": "x@y", "temp_password": "p", "kb_api_key": "k",
-                "role": "user", "id": "i"}
-        out = _run([(kb_gateway, "jget", resp)], kb_gateway.cmd_user_create, ns)
-        d = self.assert_json(out); self.assert_compact(out)
-        self.assertEqual(d, resp)
-        # The prose --json form is gone; output is the raw response object.
-        self.assertNotIn("kb_api_key:     ", out)
-
 
 class OwuiTests(_Assertions):
     def test_whoami(self):

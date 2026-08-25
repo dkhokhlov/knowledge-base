@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Thin REST client for the kb-gateway (Graphiti memory + admin user provisioning).
+"""Thin REST client for the kb-gateway (Graphiti memory).
 
 Zero dependencies (Python 3.10+ stdlib). The agent holds only KB_API_KEY (an
 Open WebUI key) + KB_HOST — nothing else. All authorization is done server-side
 by the kb-gateway (identity + role are derived from the key by the gateway; the
 CLI cannot influence them). Works on any host that can reach KB_HOST.
 
-The gateway is fronted by Caddy at KB_HOST: memory/facts under /memory/*, admin
-provisioning at POST /admin/users, aggregated health at /health. OWUI REST is at
-the same KB_HOST root (/api/*). One URL, one key.
+The gateway is fronted by Caddy at KB_HOST: memory/facts under /memory/*,
+aggregated health at /health. OWUI REST is at the same KB_HOST root (/api/*).
+One URL, one key.
 
 Config: the wrapper is a thin client. It reads ONLY two env vars from the
 shell environment — KB_HOST and KB_API_KEY. It does not read .env / .env.local
@@ -124,23 +124,11 @@ def cmd_delete_episode(base, key, a):
     print(json.dumps(d))
 
 
-def cmd_user_create(base, key, a):
-    """Admin: create a new KB user. The gateway returns the new user's email,
-    a generated temp password, and their KB_API_KEY. Relay these to the
-    requesting human administrator ONLY — do not persist them. Output is the
-    raw gateway response (compact JSON)."""
-    body = {"email": a.email, "name": a.name}
-    if a.role:
-        body["role"] = a.role
-    d = jget(base, key, "POST", "/admin/users", body)
-    print(json.dumps(d))
-
-
 def main():
     p = argparse.ArgumentParser(
         prog="kb_gateway.py",
-        description="Thin REST client for the kb-gateway (Graphiti memory + "
-                    "admin user provisioning). Authorized server-side via KB_API_KEY.",
+        description="Thin REST client for the kb-gateway (Graphiti memory). "
+                    "Authorized server-side via KB_API_KEY.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -168,10 +156,6 @@ def main():
     sp = sub.add_parser("delete-episode", help="delete one episode by uuid (owner/admin)")
     sp.add_argument("uuid")
 
-    sp = sub.add_parser("user-create", help="ADMIN: create a new KB user + issue its KB_API_KEY")
-    sp.add_argument("--email", required=True); sp.add_argument("--name", required=True)
-    sp.add_argument("--role", default="user", help="role (default user; admin only may call)")
-
     a = p.parse_args()
     base = base_url()
     key = api_key()
@@ -180,7 +164,6 @@ def main():
         "whoami": cmd_whoami, "groups": cmd_groups, "add": cmd_add, "search": cmd_search,
         "episodes": cmd_episodes, "status": cmd_status, "forget": cmd_forget,
         "delete-edge": cmd_delete_edge, "delete-episode": cmd_delete_episode,
-        "user-create": cmd_user_create,
     }[a.cmd](base, key, a)
 
 

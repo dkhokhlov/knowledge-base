@@ -1,6 +1,6 @@
 ---
 name: kb
-description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, to index/search Claude projects memory (~/.claude/projects/*/memory), to remember/search Graphiti facts memory, or (as an admin) to create a new KB user. Triggers on "KB"/"knowledge base", "index projects memory", "search projects memory", "projects/repo index status", "remember …", "what do we know about …", "forget …", and "create a new KB user …". Covers list/search KBs, semantic-search a KB, RAG chat grounded on a KB, projects memory (index-projects/search-projects/status-projects via owui.py — user key creates + owns one KB per project), Graphiti facts memory (add/search/episodes/forget via the kb-gateway), and admin user provisioning. One URL (KB_HOST) fronts OWUI REST (root /api/*) and kb-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the kb-gateway for facts memory). Includes zero-dependency Python CLI wrappers (scripts/owui.py for OWUI KBs + projects memory, scripts/kb_gateway.py for Graphiti facts memory + admin).
+description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, or to remember/search Graphiti facts memory. Triggers on "KB"/"knowledge base", "remember …", "what do we know about …", and "forget …". Covers list/search KBs, semantic-search a KB, RAG chat grounded on a KB, and Graphiti facts memory (add/search/episodes/forget via the kb-gateway). One URL (KB_HOST) fronts OWUI REST (root /api/*) and kb-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the kb-gateway for facts memory). Includes zero-dependency Python CLI wrappers (scripts/owui.py for OWUI KBs, scripts/kb_gateway.py for Graphiti facts memory).
 ---
 
 # Open WebUI REST (agent / read-scoped)
@@ -106,9 +106,7 @@ keep it private; do not hand it to agents.
 ## Using the wrapper (`scripts/owui.py`)
 
 Zero-dependency (Python 3.10+ stdlib). The KB surface (kbs/search/rag/file) is
-read-only and matches the agent role; the **projects-memory surface**
-(index-projects/search-projects/status-projects) writes to KBs the caller owns
-(see [Projects memory](#projects-memory-claude-project-memory--owui-kbs-host-side-user-key) below). The wrapper lives in `scripts/` next to this file; set `S` to its
+read-only and matches the agent role. The wrapper lives in `scripts/` next to this file; set `S` to its
 path in your installed copy of this skill.
 
 ```
@@ -135,79 +133,6 @@ Typical flow: `kbs` (or `search-kbs`) → grab the KB id → `rag` for a one-sho
 answer, or `search` for raw chunks when the answer must be right (see the
 Chat (RAG) vs Search groups above).
 
-# Projects memory (Claude project memory → OWUI KBs, host-side, user key)
-
-**Projects memory** = Claude's per-project auto-memory
-(`~/.claude/projects/<encoded-dir>/memory/*.md`), indexed into OWUI KBs — one KB
-per project — so an agent can recall knowledge accumulated across Claude Code
-projects and sessions. (Distinct from [facts memory](#facts-memory-graphiti-agent--kb-gateway)
-below, which is the Graphiti knowledge graph.) The skill-side wrapper walks the
-host filesystem and calls OWUI REST **directly with the caller's user key**: the
-caller creates + owns each project KB (`KB.user.email == caller`), so search
-filters KBs by owner. The kb-gateway is not involved (it has no user-key OWUI-KB
-write path; its `/index` uses the admin key).
-
-## One-time setup
-
-OWUI gates KB creation on the `workspace.knowledge` permission, which is off by
-default in this deployment. Enable it once (admin), then never again:
-
-```
-make projects-bootstrap   # admin: enable workspace.knowledge + verify with a user-key probe KB
-```
-
-`index-projects` fails with a clear message if this has not been run.
-
-## KB naming + metadata
-
-- KB name = `<host>--<encoded-dir-without-leading-dash>`. Host = short hostname
-  (`platform.node()`, or `--host`). Example: project
-  `/home/owner/SOURCE/Deployments/knowledgebase` → encoded
-  `-home-owner-SOURCE-Deployments-knowledgebase` → KB
-  `mini2--home-owner-SOURCE-Deployments-knowledgebase`.
-- Per-file metadata (flat in `File.meta.data`): `host`, `project` (exact encoded
-  dir), `project_path` (decode; authoritative when the path exists on disk, else
-  lossy), `repo` (git repo name = path basename), `account` (caller email),
-  `source_relpath` (`memory/<file>`). `repo` is the human-friendly identifier for
-  reasoning about hits; it also rides in the KB `description` so `kbs`/`kb` show it.
-
-## Workflow
-
-- **At session start**, run `index-projects` so this session's accumulated
-  projects memory is in the KB and searchable across sessions/repos (same
-  "refresh at session start" convention as open-codebase-index).
-- **On an explicit user prompt** ("index projects memory"), re-run
-  `index-projects` to refresh the KB for another repo's session.
-- After indexing, run `status-projects` to confirm the current repo's drain is
-  done before relying on search.
-
-`index-projects` is a full snapshot every run: it always re-uploads
-`memory/*.md` (OWUI idempotency reuses unchanged files, no re-extract); a
-**modified** file is delete-then-uploaded (router `DELETE` cleans the old
-vectors — the upload's own reclaim does not); and orphans (source file gone)
-are deleted so the KB mirror stays exact.
-
-## Using the wrapper (`scripts/owui.py`, projects-memory subcommands)
-
-```
-S=~/.pi/agent/skills/kb/scripts/owui.py
-# (KB_HOST + KB_API_KEY already exported above)
-
-python3 "$S" index-projects --dry-run              # plan only; JSON {projects,total}
-python3 "$S" index-projects --project knowledgebase --wait   # index this repo, then wait for drain
-python3 "$S" status-projects                       # current repo's drain status (JSON; walks up cwd)
-python3 "$S" search-projects "QPU scheduling"      # across ALL your project KBs
-python3 "$S" search-projects "memory" --host mini2 --project knowledgebase   # filtered
-python3 "$S" search-projects "XSL" --kb-glob 'mini2--*'   # wildcard KB name
-```
-
-`search-projects` filters: `--host` (name starts with `<host>--`), `--project`
-(substring in the project part), `--account` (KB owner email; default = caller,
-aka `--mine`), `--kb-glob` (fnmatch on the KB name). No filters = all KBs you
-own. It makes one retrieval call per KB (hit metadata carries no `knowledge_id`,
-so one-call-per-KB is the reliable attribution) and prints compact JSON
-`{"kbs":N,"hits":[{"repo","kb_name","file","text",...}],"errors":[...]}`.
-
 # Facts memory (Graphiti, agent / kb-gateway)
 
 Fact memory lives in Graphiti (Neo4j). Agents reach it **only** through the
@@ -220,8 +145,9 @@ derives your identity + role from your `KB_API_KEY` via Open WebUI (tamper-proof
 - The stack is up and healthy (`make start && make health`).
 - You have a `KB_API_KEY` (an Open WebUI key). The admin's is
   `OPENWEBUI_ADMIN_API_KEY`; per-account keys are issued by the admin via
-  `user-create` (below). Set `KB_HOST` (default `http://localhost:3000`) and
-  `KB_API_KEY` in your shell env — the wrapper reads only those two (no `--env-file`).
+  `make users-create` (an operator make target, not the skill). Set `KB_HOST`
+  (default `http://localhost:3000`) and `KB_API_KEY` in your shell env — the
+  wrapper reads only those two (no `--env-file`).
 - For non-local `KB_HOST`, the URL must be HTTPS or a VPN/tunnel (`KB_API_KEY`
   is a bearer). On a trusted local interface plain HTTP is fine.
 
@@ -263,36 +189,17 @@ python3 "$G" delete-edge <uuid>                  # delete one edge (owner/admin 
 python3 "$G" delete-episode <uuid>               # delete one episode (owner/admin of its group)
 ```
 
+**`add` is asynchronous:** Graphiti extracts entity edges in a background
+Ollama pass after `add` returns, so an immediate `search` for the just-added
+fact can return `[]`. Wait, or retry, before treating a 0-hit search as "not
+remembered" — observed latency on this deployment (mini2 → mini4 Ollama,
+`qwen2.5:14b`): ~10-15s warm, and a cold start (model not loaded) can exceed
+90s. Varies by host/model.
+
 Errors: any non-200 from the gateway exits non-zero with the gateway's message
 (401 = bad/missing key; 403 = not authorized for that op/group; 503 = identity
 service down; 502 = graphiti/neo4j down; 501 = admin op unsupported by this
 Open WebUI image).
-
-# KB user provisioning (admin)
-
-An admin can ask an agent to create a new KB user. The gateway enforces
-`role=admin` **server-side** (a non-admin `KB_API_KEY` gets `403`), then runs
-the full Open WebUI provisioning flow and returns the new user's email, a
-generated temporary password, and their `KB_API_KEY`.
-
-```
-python3 "$G" user-create --email alice@example.com --name Alice
-# admin KB_API_KEY only; prints compact JSON: email, temp_password, kb_api_key, role, id
-```
-
-Rules:
-- **Admin-only.** `KB_API_KEY` must resolve to an Open WebUI `admin`. Non-admin
-  → `403`. Unsupported image (missing provisioning endpoints) → `501`.
-- **What is returned:** `email`, `temp_password`, `kb_api_key`, `role`, `id` as
-  compact JSON (parse stdout with `json.load` to extract `kb_api_key`).
-- **Relay to the requesting administrator ONLY.** Do NOT persist the
-  returned `temp_password` or `kb_api_key` anywhere (the gateway never persists
-  them; they exist only in this one response). The admin hands them to the new
-  account out-of-band.
-- **Rollback guarantee:** if the user is created but key generation or
-  verification fails, the gateway deletes the partial user and returns a clear
-  error — it never reports success for a half-provisioned account.
-- **Duplicate email** returns a deterministic error (no second account).
 
 ## Triggering this skill
 
@@ -307,11 +214,7 @@ deterministically loads this skill. Pi also auto-discovers skills by their
 | Natural — search | "search the KB for X" / "search the knowledge base for X" | by description match |
 | Natural — RAG chat | "ask the KB: \<question\>" / "ask the knowledge base: \<question\>" | by description match |
 | Natural — list | "list my KBs" / "list my knowledge bases" | by description match |
-| Natural — index projects memory | "index projects memory" / "index my Claude project memory" / "index project memory into KBs" | by description match |
-| Natural — projects status | "projects memory index status" / "is my repo indexed" / "index status for this repo" | by description match |
-| Natural — search projects memory | "search projects memory for X" / "search across my project KBs for X" | by description match |
 | Natural — remember | "remember that …" / "what do we know about …" / "forget …" | by description match |
-| Natural — create user | "create a new KB user \<email\> named …" (admin only) | by description match |
 
 ## Install location
 

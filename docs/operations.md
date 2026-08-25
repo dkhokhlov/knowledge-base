@@ -108,6 +108,28 @@ Notes:
 - The kb-gateway never persists `KB_API_KEY` server-side — it is stateless. The key arrives as `Authorization: Bearer` on each request and is used only to resolve `(id, email, role)` via Open Web UI; the server stores no key material.
 - kb-gateway internal env: `OWUI_URL`, `GRAPHITI_URL`, `NEO4J_URL`, `KB_GATEWAY_PORT` are hardcoded in `compose.yml`; `KB_MAX_CONCURRENCY` (default 16) is interpolated from `.env`; `OWUI_TIMEOUT`, `GRAPHITI_TIMEOUT`, `NEO4J_TIMEOUT`, `KB_MAX_BODY` are code defaults (overridable via env). None are in `.env.template`.
 
+### Variable precedence
+
+Two sourcing models apply to different callers:
+
+- **Operator scripts** (`scripts/*.sh`, invoked via `make <target>`): source
+  `.env` then `.env.local` (`set -a; . ./.env; . ./.env.local; set +a`).
+  Precedence: `.env.local` > `.env` > shell env — the file wins, and the
+  resolution is location-specific (relative to the repo root where the script
+  runs). `KB_HOST` is computed from `KB_HOST_PORT`
+  (`http://localhost:${KB_HOST_PORT}`, default `:3000`) unless the shell
+  already sets `KB_HOST`.
+- **The `/kb` skill** (`skills/claude/scripts/{kb_gateway,owui}.py`): a thin
+  client that reads ONLY `KB_HOST` + `KB_API_KEY` from the shell env. It does
+  NOT source `.env` / `.env.local`, so it runs on any host that can reach
+  `KB_HOST`. Set both in the shell before invoking it.
+- **Make-time tunables** (`make <target> VAR=val`) override the file: the
+  script captures the shell value before sourcing and restores it after
+  (`scripts/api-keys.sh` does this for `KB_DOMAIN` / `OCR_ENABLED`). A target's
+  own arguments that are not defined in `.env` (e.g. `EMAIL` / `NAME` / `ROLE`
+  / `QUERY` for `make users-*`) pass through unclobbered — no capture-restore
+  is needed for them.
+
 ## Ollama host service
 
 Ollama runs on the Docker host as a systemd unit
@@ -444,8 +466,8 @@ dependency is down.
 | `add` returns `200` but no fact; `docker logs kb-graphiti` shows `CypherTypeError ... Property values can only be of primitive types ... Map{summary -> Map{...}}` | the `OpenAIGenericClient` (`json_schema`) injection is not in effect (image bump / bootstrap edit), so the model runs without server-side schema enforcement and echoes the response schema as values; Neo4j rejects the nested MAP | confirm `graphiti/bootstrap.py` is mounted and `command: ["python","/app/bootstrap.py"]`; restart `graphiti`; the worker log should show extraction completing without the Cypher error |
 | extraction is very slow (>5 min/episode); `ssh <ollama-host> nvidia-smi` shows the GPU idle and memory well under the model size | the model loads at the default 32k context (~53 GB for 14B) and spills to CPU; `num_ctx` is not baked into the model (or you are running the stock `qwen2.5:14b`, not the ctx variant) | run `make pull-models` (creates `GRAPHITI_MODEL` with `PARAMETER num_ctx` = `OLLAMA_MODEL_CONTEXT`), then `make restart`; `make preflight` verifies `num_ctx` |
 | `forget` / `delete-*` returns `403` | you do not own the target group and are not admin | use an admin `KB_API_KEY`, or operate on your own group |
-| `user-create` returns `409` | the email already exists (deterministic; no second account) | use a different email, or delete the existing user first |
-| Provisioning failed mid-flow and a user seems half-created | rollback ran but its cleanup itself failed (rare) | check gateway stdout for `rollback: ... failed for user <id>` lines; delete the partial user via admin `DELETE /api/v1/users/{id}` |
+| `make users-create` returns `409` | the email already exists (deterministic; no second account) | use a different email, or delete the existing user first |
+| `make users-create` failed mid-flow and a user seems half-created | rollback ran but its cleanup itself failed (rare) | check gateway stdout for `rollback: ... failed for user <id>` lines; delete the partial user via admin `DELETE /api/v1/users/{id}` |
 | Neo4j restarts / OOM-killed | heap or pagecache too small for the graph | raise `NEO4J_HEAP_MAX` / `NEO4J_PAGECACHE` in `.env`; `make restart` |
 | Need to reach Open WebUI directly (it is behind Caddy; no direct host port) | OWUI is internal-only on `owui_net` | `docker exec kb-openwebui curl -s localhost:8080/...`, or a temporary `docker compose run --rm -p 3001:8080 openwebui` (avoid `:3000` — that is Caddy) |
 | RAG chat is slow; `ollama ps` shows a CPU/GPU split | `OPENWEBUI_MODEL` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; `GRAPHITI_MODEL` (extraction) and `OPENWEBUI_MODEL` (chat) are independent — two different 14B tags cannot both be resident at once on this GPU |

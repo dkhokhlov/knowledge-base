@@ -1,29 +1,25 @@
 #!/usr/bin/env bash
 # System integration test: comprehensive kb-gateway end-to-end surface.
 # Drives skills/claude/scripts/kb_gateway.py through every gateway endpoint
-# the agent + admin surfaces expose:
-#   agent:  whoami, status, groups, add, search, episodes, delete-edge,
-#           delete-episode, forget
-#   admin:  user-create (+ the issued key resolves to the new user)
-#   deny:   non-admin POST /admin/users -> 403
+# the agent surface exposes:
+#   whoami, status, groups, add, search, episodes, delete-edge,
+#   delete-episode, forget
 # Exercises delete-edge (via a fact uuid, since /memory/episodes does not
 # serialize entity_edges) and delete-episode, which test_06 does not cover.
-# Non-destructive: operates only on the agent's own group + a throwaway created
-# user; forgets the agent group at the end.
+# Non-destructive: operates only on the agent's own group; forgets the agent
+# group at the end.
 set -u
 . "$(dirname "$0")/lib.sh"
 load_env
 require_stack_up
-require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; }
+require_env OPENWEBUI_USER_API_KEY || { finish; exit 1; }
 
 G="$(kb_host)"
 KB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The wrapper is a thin client: it reads ONLY KB_HOST + KB_API_KEY from the
 # shell env (no --env-file / --key / --base-url flags). Inline `env` sets both
-# per invocation. KB = agent key; KBA = admin key.
+# per invocation. KB = agent key.
 KB="env KB_API_KEY=${OPENWEBUI_USER_API_KEY} KB_HOST=${G} python3 ${KB_ROOT}/skills/claude/scripts/kb_gateway.py"
-KBA="env KB_API_KEY=${OPENWEBUI_ADMIN_API_KEY} KB_HOST=${G} python3 ${KB_ROOT}/skills/claude/scripts/kb_gateway.py"
-CT="Content-Type: application/json"
 
 # kbrun <cmd...>: print stdout; record a failure (and return 1) if the cmd
 # exits non-zero. Does not exit the script (lib.sh uses pass/fail/finish).
@@ -116,20 +112,4 @@ done
 [ "$gone" = 1 ] && pass "agent group ${AGENT_GROUP_ID} gone from /memory/groups" \
                 || fail "agent group ${AGENT_GROUP_ID} still in /memory/groups after 60s"
 
-section "admin user-create + issued key + non-admin deny"
-NEW_EMAIL="e2e-${TS}@${KB_DOMAIN:-local.test}"
-UCOUT=$(kbrun $KBA user-create --email "$NEW_EMAIL" --name "E2E User") || true
-NEW_KEY=$(printf '%s' "$UCOUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("kb_api_key") or "")')
-if [ -n "$NEW_KEY" ]; then
-  printf '%s' "$UCOUT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("role")=="user" else 1)' && pass "admin user-create -> ${NEW_EMAIL} (role=user)" || fail "user-create role mismatch"
-  NUWHO=$(env KB_API_KEY="$NEW_KEY" KB_HOST="$G" python3 "${KB_ROOT}/skills/claude/scripts/kb_gateway.py" whoami 2>/dev/null) || true
-  printf '%s' "$NUWHO" | grep -q "${NEW_EMAIL}" && pass "issued key whoami -> ${NEW_EMAIL}" || fail "issued key whoami failed"
-else
-  fail "admin user-create did not return a kb_api_key"
-fi
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$G/admin/users" -H "Authorization: Bearer ${OPENWEBUI_USER_API_KEY}" -H "$CT" -d "{\"email\":\"blocked-${TS}@${KB_DOMAIN:-local.test}\",\"name\":\"x\"}")
-[ "$code" = 403 ] && pass "non-admin user-create -> 403" || fail "non-admin user-create -> ${code} (want 403)"
-
-# Cleanup: the created user has no memory; nothing to forget. Leave the account
-# (deterministic; like test_07).
 finish

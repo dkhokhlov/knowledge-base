@@ -1,6 +1,6 @@
 ---
 name: kb
-description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, to index/search Claude projects memory (~/.claude/projects/*/memory), to remember/search Graphiti facts memory, or (as an admin) to create a new KB user. Triggers on "KB"/"knowledge base", "index projects memory", "search projects memory", "projects/repo index status", "remember …", "what do we know about …", "forget …", and "create a new KB user …". Covers list/search KBs, semantic-search a KB, RAG chat grounded on a KB, projects memory (index-projects/search-projects/status-projects via owui.py — user key creates + owns one KB per project), Graphiti facts memory (add/search/episodes/forget via the kb-gateway), and admin user provisioning. One URL (KB_HOST) fronts OWUI REST (root /api/*) and kb-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the kb-gateway for facts memory). Includes zero-dependency Python CLI wrappers (scripts/owui.py for OWUI KBs + projects memory, scripts/kb_gateway.py for Graphiti facts memory + admin).
+description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, to index/search Claude projects memory (~/.claude/projects/*/memory), or to remember/search Graphiti facts memory. Triggers on "KB"/"knowledge base", "index projects memory", "search projects memory", "projects/repo index status", "remember …", "what do we know about …", and "forget …". Covers list/search KBs, semantic-search a KB, RAG chat grounded on a KB, projects memory (index-projects/search-projects/status-projects via owui.py — user key creates + owns one KB per project), and Graphiti facts memory (add/search/episodes/forget via the kb-gateway). One URL (KB_HOST) fronts OWUI REST (root /api/*) and kb-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the kb-gateway for facts memory). Includes zero-dependency Python CLI wrappers (scripts/owui.py for OWUI KBs + projects memory, scripts/kb_gateway.py for Graphiti facts memory).
 ---
 
 # Open WebUI REST (agent / read-scoped)
@@ -220,8 +220,9 @@ derives your identity + role from your `KB_API_KEY` via Open WebUI (tamper-proof
 - The stack is up and healthy (`make start && make health`).
 - You have a `KB_API_KEY` (an Open WebUI key). The admin's is
   `OPENWEBUI_ADMIN_API_KEY`; per-account keys are issued by the admin via
-  `user-create` (below). Set `KB_HOST` (default `http://localhost:3000`) and
-  `KB_API_KEY` in your shell env — the wrapper reads only those two (no `--env-file`).
+  `make users-create` (an operator make target, not the skill). Set `KB_HOST`
+  (default `http://localhost:3000`) and `KB_API_KEY` in your shell env — the
+  wrapper reads only those two (no `--env-file`).
 - For non-local `KB_HOST`, the URL must be HTTPS or a VPN/tunnel (`KB_API_KEY`
   is a bearer). On a trusted local interface plain HTTP is fine.
 
@@ -275,34 +276,6 @@ Errors: any non-200 from the gateway exits non-zero with the gateway's message
 service down; 502 = graphiti/neo4j down; 501 = admin op unsupported by this
 Open WebUI image).
 
-# KB user provisioning (admin)
-
-An admin can ask an agent to create a new KB user. The gateway enforces
-`role=admin` **server-side** (a non-admin `KB_API_KEY` gets `403`), then runs
-the full Open WebUI provisioning flow and returns the new user's email, a
-generated temporary password, and their `KB_API_KEY`.
-
-```
-python3 "$G" user-create --email alice@example.com --name Alice
-# admin KB_API_KEY only; --email + --name are required; prints the raw JSON
-# response (compact JSON): email, temp_password, kb_api_key, role, id.
-# Parse with json.load to extract kb_api_key / temp_password.
-```
-
-Rules:
-- **Admin-only.** `KB_API_KEY` must resolve to an Open WebUI `admin`. Non-admin
-  → `403`. Unsupported image (missing provisioning endpoints) → `501`.
-- **What is returned:** `email`, `temp_password`, `kb_api_key`, `role`, `id` as
-  compact JSON (parse stdout with `json.load` to extract `kb_api_key`).
-- **Relay to the requesting administrator ONLY.** Do NOT persist the
-  returned `temp_password` or `kb_api_key` anywhere (the gateway never persists
-  them; they exist only in this one response). The admin hands them to the new
-  account out-of-band.
-- **Rollback guarantee:** if the user is created but key generation or
-  verification fails, the gateway deletes the partial user and returns a clear
-  error — it never reports success for a half-provisioned account.
-- **Duplicate email** returns a deterministic error (no second account).
-
 ## Triggering this skill
 
 In Claude Code, the most reliable trigger is the slash command. Natural
@@ -319,7 +292,6 @@ phrasing also triggers it when it matches the skill description. Both "KB" and
 | Natural — projects status | "projects memory index status" / "is my repo indexed" / "index status for this repo" | by description match |
 | Natural — search projects memory | "search projects memory for X" / "search across my project KBs for X" | by description match |
 | Natural — remember | "remember that …" / "what do we know about …" / "forget …" | by description match |
-| Natural — create user | "create a new KB user \<email\> named …" (admin only) | by description match |
 
 ## Install location
 
