@@ -56,20 +56,21 @@ pull-models: ## Pull base LLM, create the ctx-baked variant (GRAPHITI_MODEL), pu
 start: ## Start the stack detached (run `make bootstrap` first)
 	@./scripts/start.sh
 
-stop: ## Stop the stack (keeps containers + data)
-	@$(COMPOSE) stop
+stop: ## Stop the stack (keeps containers + data; stops the --profile ocr sidecar too)
+	@$(COMPOSE) $$(./scripts/compose-profiles.sh) stop
 
 restart: stop start ## Restart (stop then start)
 
-logs: ## Tail all service logs (Ctrl-C to detach)
-	@$(COMPOSE) logs -f
+logs: ## Tail all service logs incl. the --profile ocr sidecar (Ctrl-C to detach)
+	@$(COMPOSE) $$(./scripts/compose-profiles.sh) logs -f
 
 ps: ## Show container status (with health)
 	@$(COMPOSE) ps
 
-config: ## Render effective compose config (secrets redacted)
-	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
-	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_FIRST_PASSWORD): .*/\1: <redacted>/'
+config: ## Render effective compose config incl. the --profile ocr sidecar (secrets redacted)
+	@_OVR="$${OCR_ENABLED:-}"; set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
+	  [ -n "$$_OVR" ] && export OCR_ENABLED="$$_OVR"; \
+	  $(COMPOSE) $$(./scripts/compose-profiles.sh) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_FIRST_PASSWORD): .*/\1: <redacted>/'
 
 health: ## Probe the stack /health (Caddy -> kb-gateway aggregated, reflects OWUI)
 	@set -a; . ./.env; set +a; \

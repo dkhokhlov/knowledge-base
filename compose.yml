@@ -338,18 +338,21 @@ services:
     # No env_file: only the interpolated vars below enter the container env, so
     # the rest of .env.local's secrets are NOT loaded into this sidecar.
     # OLLAMA_BASE_URL uses :? (OLLAMA_HOST is always required + always set).
-    # OCR_SERVICE_TOKEN is bare ${VAR} (NOT :?): compose interpolates ALL
+    # OCR_SERVICE_TOKEN uses ${VAR:-} (NOT :?): compose interpolates ALL
     # services at parse time, even non-active profiles, and when OCR_ENABLED=false
     # no token is ever generated (bootstrap skips it) — :? would block `make
-    # start` on a disabled-OCR stack. A stale recreate that bypasses .env.local
-    # (empty token -> no /process auth) is caught at RUNTIME by
-    # tests/test_10_ocr_auth.sh, which asserts the live container holds a
-    # non-empty token + /process 401/200 (it runs only when OCR_ENABLED=true).
+    # start` on a disabled-OCR stack. The :- default (not bare ${VAR}) keeps the
+    # interpolation silent when unset, so `make stop`/`logs` (which do not source
+    # .env.local) do not emit a spurious "variable is not set" warning; a stale
+    # recreate that bypasses .env.local (empty token -> no /process auth) is
+    # caught at RUNTIME by tests/test_10_ocr_auth.sh, which asserts the live
+    # container holds a non-empty token + /process 401/200 (runs only when
+    # OCR_ENABLED=true).
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_HOST:?OLLAMA_HOST is required (shell env or uncomment in .env)}
       - OCR_MODEL=${OCR_MODEL:-deepseek-ocr}
       - OCR_PROMPT=${OCR_PROMPT}
-      - OCR_SERVICE_TOKEN=${OCR_SERVICE_TOKEN}
+      - OCR_SERVICE_TOKEN=${OCR_SERVICE_TOKEN:-}
       - OCR_MIN_DIM=${OCR_MIN_DIM:-64}
       - OCR_TIMEOUT=${OCR_TIMEOUT:-120}
       - OCR_KEEP_ALIVE=${OCR_KEEP_ALIVE:-5m}
