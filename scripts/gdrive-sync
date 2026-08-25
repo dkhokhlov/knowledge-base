@@ -357,30 +357,63 @@ PY
 )
     if [[ -n "$parsed" ]]; then
         changes+="$parsed"$'\n'
-        drive_excl_count=$(awk -F'\t' '$1=="EXCLUDE"' <<<"$parsed" | wc -l)
-        drive_dup_count=$(awk -F'\t' '$1=="DUP"' <<<"$parsed" | wc -l)
+        # drive_excl_count / drive_dup_count are the ALLOWED-TYPED subsets, so the
+        # table arithmetic holds: allowed - excluded - dups = indexable. Excludes
+        # are further restricted to files truly removed (NOT leftovers on disk):
+        # rclone does not delete excluded files, so a file excluded by
+        # gdrive-exclude.conf but still on local is indexed anyway and must NOT be
+        # subtracted. Dups are always subtracted (remote lists both copies; local
+        # keeps one). Non-allowed-typed excludes/dups (.py/.csv/.sv/...) do not
+        # touch the indexable count and are NOT in these columns (see the body's
+        # "Files excluded" section for the full rclone exclude list).
+        drive_excl_count=0
+        drive_dup_count=0
+        while IFS=$'\t' read -r tag fpath; do
+            [[ -n "$tag" ]] || continue
+            case "$tag" in
+                EXCLUDE)
+                    printf '%s' "$fpath" | grep -qiE "$allowed_re" || continue
+                    [[ -e "$destination/$fpath" ]] && continue   # leftover on disk -> indexed
+                    drive_excl_count=$((drive_excl_count + 1)) ;;
+                DUP)
+                    printf '%s' "$fpath" | grep -qiE "$allowed_re" || continue
+                    drive_dup_count=$((drive_dup_count + 1)) ;;
+            esac
+        done <<<"$parsed"
     else
         drive_excl_count=0
         drive_dup_count=0
     fi
 }
 
-# Render the per-drive remote/local/allowed/indexable/excluded table to stdout.
+# Render the per-drive remote/local/dups/allowed/excluded/indexable table to stdout.
 # Called inside the report's { } block (output goes to the report file) and again
 # after (to the terminal). Globals: drive_rows (name<TAB>remote<TAB>local
-# <TAB>allowed<TAB>indexable<TAB>excluded<TAB>dups per completed drive),
-# total_remote, total_local, total_allowed, total_indexable, total_excl.
+# <TAB>dups<TAB>allowed<TAB>excluded<TAB>indexable per completed drive),
+# total_remote, total_local, total_dups, total_allowed, total_excl,
+# total_indexable.
+#
+# Column order follows the pipeline: rclone applies the dup filter on the source
+# BEFORE the documents-only allowlist is applied, so `dups` precedes `allowed`.
+# `indexable` is the FINAL rightmost number (the KB count). The arithmetic is
+# exact per row and for TOTAL:
+#     allowed - excluded - dups = indexable
+# `excluded` and `dups` count ONLY allowed-typed files (excluded: truly removed,
+# not leftovers on disk); non-allowed-typed rclone excludes (.py/.csv/.sv/...)
+# do not affect the indexable count and appear only in the report body's
+# "Files excluded" section.
 print_drive_table() {
     printf 'Drive table:\n'
-    printf '%-28s %10s %10s %10s %10s %10s %8s\n' "DRIVE" "remote" "local" "allowed" "indexable" "excluded" "dups"
-    printf '%-28s %10s %10s %10s %10s %10s %8s\n' "-----" "------" "-----" "-------" "---------" "--------" "----"
+    printf '%-28s %10s %10s %8s %10s %10s %10s\n' "DRIVE" "remote" "local" "dups" "allowed" "excluded" "indexable"
+    printf '%-28s %10s %10s %8s %10s %10s %10s\n' "-----" "------" "-----" "----" "-------" "--------" "---------"
     if [[ -n "$drive_rows" ]]; then
-        while IFS=$'\t' read -r dname rem loc alw idx exc dup; do
+        while IFS=$'\t' read -r dname rem loc dup alw exc idx; do
             [[ -n "$dname" ]] || continue
-            printf '%-28s %10s %10s %10s %10s %10s %8s\n' "$dname" "$rem" "$loc" "$alw" "$idx" "$exc" "$dup"
+            printf '%-28s %10s %10s %8s %10s %10s %10s\n' "$dname" "$rem" "$loc" "$dup" "$alw" "$exc" "$idx"
         done <<<"$drive_rows"
     fi
-    printf '%-28s %10s %10s %10s %10s %10s %8s\n' "TOTAL" "$total_remote" "$total_local" "$total_allowed" "$total_indexable" "$total_excl" "$total_dups"
+    printf '%-28s %10s %10s %8s %10s %10s %10s\n' "TOTAL" "$total_remote" "$total_local" "$total_dups" "$total_allowed" "$total_excl" "$total_indexable"
+    printf 'allowed - excluded - dups = indexable  (excluded/dups: allowed-typed, truly-removed only; full rclone excludes in body)\n'
 }
 
 # Write the sync report (header + $summary + drive table + "Files changed"
@@ -420,7 +453,7 @@ write_report_and_exit() {
             printf 'DELETE (%d):\n' "$delete_n"
             awk -F'\t' '$1=="DELETE"{print "  DELETE  "$2}' <<<"$changes"
         fi
-        printf '\nFiles excluded: %d\n' "$exclude_n"
+        printf '\nFiles excluded: %d  (ALL rclone excludes, every type; only the allowed-typed, truly-removed subset feeds the table `excluded` column)\n' "$exclude_n"
         if (( exclude_n > 0 )); then
             awk -F'\t' '$1=="EXCLUDE"{print "  "$2}' <<<"$changes"
         else
@@ -593,27 +626,33 @@ while IFS=$'\t' read -r drive_id drive_name; do
         drive_bytes=$(du -sb -- "$target" | awk '{print $1}')
     fi
     drive_mb=$(awk -v bytes="$drive_bytes" 'BEGIN { printf "%.2f", bytes / 1000000 }')
-    printf 'Drive report: %s -> %s: %s files, %s MB local, %s allowed, %s indexable (%s excluded of %s remote)\n' \
-        "$drive_name" "$safe_name" "$drive_files" "$drive_mb" "$remote_allowed" "$drive_indexable" "$drive_excl_count" "$remote_files"
+    printf 'Drive report: %s -> %s: %s remote, %s local, %s dups, %s allowed, %s excluded, %s indexable (%s MB local)\n' \
+        "$drive_name" "$safe_name" "$remote_files" "$drive_files" "$drive_dup_count" "$remote_allowed" "$drive_excl_count" "$drive_indexable" "$drive_mb"
     total_remote=$((total_remote + remote_files))
     total_local=$((total_local + drive_files))
     total_allowed=$((total_allowed + remote_allowed))
     total_indexable=$((total_indexable + drive_indexable))
+    total_excl=$((total_excl + drive_excl_count))
+    total_dups=$((total_dups + drive_dup_count))
     total_bytes=$((total_bytes + drive_bytes))
     # printf -v (not $(printf...)) preserves the trailing newline — command
     # substitution would strip it and concatenate the rows.
-    printf -v __row '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$drive_name" "$remote_files" "$drive_files" "$remote_allowed" "$drive_indexable" "$drive_excl_count" "$drive_dup_count"
+    # TSV order: name, remote, local, dups, allowed, excluded, indexable
+    # (dups before allowed — rclone applies the dup filter on the source before
+    # the allowlist; indexable is the final rightmost KB count).
+    printf -v __row '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$drive_name" "$remote_files" "$drive_files" "$drive_dup_count" "$remote_allowed" "$drive_excl_count" "$drive_indexable"
     drive_rows+="$__row"
 done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$drive_json")
 
 # Totals from the per-drive accumulators (NOT a fresh find/du on $destination —
 # that would double-count .sync-reports/*.report files at the destination root
-# and, with the old -exec form, count path-name BYTES instead of files). total_excl
-# is the EXCLUDE-tag count across all drives from $changes.
+# and, with the old -exec form, count path-name BYTES instead of files).
+# total_excl / total_dups are the ALLOWED-TYPED subsets accumulated in the loop
+# (excluded: truly removed, not leftovers on disk), so the table arithmetic
+# holds: total_allowed - total_excl - total_dups = total_indexable. The FULL
+# rclone EXCLUDE/DUP counts (all types) are in the report body.
 total_mb=$(awk -v bytes="$total_bytes" 'BEGIN { printf "%.2f", bytes / 1000000 }')
-total_excl=$(awk -F'\t' '$1=="EXCLUDE"' <<<"$changes" | wc -l)
-total_dups=$(awk -F'\t' '$1=="DUP"' <<<"$changes" | wc -l)
-emit "Sync report: ${processed_drives} drives, ${total_remote} remote, ${total_local} local, ${total_allowed} allowed, ${total_indexable} indexable, ${total_excl} excluded, ${total_dups} duplicates, ${total_mb} MB local"
+emit "Sync report: ${processed_drives} drives, ${total_remote} remote, ${total_local} local, ${total_dups} dups, ${total_allowed} allowed, ${total_excl} excluded, ${total_indexable} indexable, ${total_mb} MB local"
 
 # Deleted/overwritten files rclone moved into --backup-dir (recovery net). Empty
 # when nothing changed or under --dry-run (sync does not move files then).
