@@ -11,7 +11,7 @@ under `/memory/*`, `POST /admin/users`, and `/health`. An agent holds only
 | Surface | Path | Auth | Use |
 |---|---|---|---|
 | Open WebUI REST | `KB_HOST/api/*` | `Bearer <KB_API_KEY>` | files, knowledge bases, projects memory (Claude Code skill only; humans/admins also RAG directly here with an explicit `model`) |
-| kb-gateway memory | `KB_HOST/memory/*` | `Bearer <KB_API_KEY>` | Graphiti facts (whoami, groups, add, search, episodes, status, forget, delete-edge, delete-episode) + RAG chat (`POST /memory/rag`; the gateway inserts the chat model from `OPENWEBUI_MODEL`) |
+| kb-gateway memory | `KB_HOST/memory/*` | `Bearer <KB_API_KEY>` | Graphiti facts (whoami, groups, add, retrieve, episodes, status, forget, delete-edge, delete-episode) + RAG chat (`POST /memory/rag`; the gateway inserts the chat model from `OPENWEBUI_MODEL`) |
 | kb-gateway admin | `KB_HOST/admin/users` (POST) | `Bearer <KB_API_KEY>` (admin) | create a new KB user (returns temp password + `KB_API_KEY`) |
 | health | `KB_HOST/health` | none | read-only stack probe |
 
@@ -38,12 +38,12 @@ with `scripts/` symlinked to `../claude/scripts`. The wrappers are zero-dependen
 Python 3.10+ stdlib:
 
 - `scripts/owui.py` — Open WebUI REST: KB surface (read-scoped) `whoami`, `kbs`,
-  `search`, `rag`, `file`; **projects memory** (user-key writes to owned KBs)
-  `index-projects`, `search-projects`, `status-projects` — **Claude Code skill copy
+  `retrieve`, `rag`, `file`; **projects memory** (user-key writes to owned KBs)
+  `index-projects`, `retrieve-projects`, `status-projects` — **Claude Code skill copy
   only**; the shared `owui.py` keeps the subcommands, but the codex/opencode/pi
   `SKILL.md` copies do not document them.
 - `scripts/kb_gateway.py` — kb-gateway: facts memory (`whoami`, `groups`, `add`,
-  `search`, `episodes`, `status`, `forget`, `delete-edge`, `delete-episode`).
+  `retrieve`, `episodes`, `status`, `forget`, `delete-edge`, `delete-episode`).
 
 Both read ONLY `KB_HOST` + `KB_API_KEY` from the shell environment — no
 `.env` / `.env.local` files, no `--env-file`, no other env vars. Set both in
@@ -122,7 +122,7 @@ python3 "$S/kb_gateway.py" whoami    # kb-gateway: email + role + id (derived fr
 ```
 python3 "$S/owui.py" kbs                          # list visible KBs
 python3 "$S/owui.py" search-kbs "main"            # find a KB by name
-python3 "$S/owui.py" search <kb-id> "XSL streaming"   # raw chunks (you synthesize)
+python3 "$S/owui.py" retrieve <kb-id> "XSL streaming"   # raw chunks (you synthesize)
 python3 "$S/owui.py" rag "What is XSL?" --kb <kb-id>  # RAG chat (LLM answer from the KB)
 ```
 
@@ -153,21 +153,21 @@ KBs. `index-projects` fails with a clear message until this is run.
 KB name = `<host>--<encoded-dir-without-leading-dash>` (host = short hostname).
 Per-file metadata: `host`, `project`, `project_path`, `repo` (git repo name),
 `account`, `source_relpath` — `repo` rides in the KB `description` too, so hits
-are easy to reason about (`search-projects` returns compact JSON
+are easy to reason about (`retrieve-projects` returns compact JSON
 `{"kbs":N,"hits":[{"repo","kb_name","file","text"}],"errors":[...]}`).
 
 ```
 python3 "$S/owui.py" index-projects --dry-run                  # plan only
 python3 "$S/owui.py" index-projects --project knowledgebase --wait   # index this repo, wait for drain
 python3 "$S/owui.py" status-projects                           # current repo's drain status (walks up cwd)
-python3 "$S/owui.py" search-projects "QPU scheduling"          # across ALL your project KBs
-python3 "$S/owui.py" search-projects "X" --host mini2 --project knowledgebase   # filtered
+python3 "$S/owui.py" retrieve-projects "QPU scheduling"          # across ALL your project KBs
+python3 "$S/owui.py" retrieve-projects "X" --host <host> --project knowledgebase   # filtered
 ```
 
 **Workflow**: run `index-projects` at session start (so this session's memory is
 searchable across sessions/repos) and on an explicit "index projects memory"
 prompt; then `status-projects` to confirm the current repo's drain before
-relying on search — same "refresh at session start" convention as
+relying on retrieval — same "refresh at session start" convention as
 open-codebase-index. `index-projects` is a full snapshot every run (always
 re-uploads `memory/*.md`; OWUI idempotency reuses unchanged files; a modified
 file is delete-then-uploaded so no stale vectors; orphans are deleted).
@@ -177,7 +177,7 @@ file is delete-then-uploaded so no stale vectors; orphans are deleted).
 ```
 python3 "$S/kb_gateway.py" groups                              # list all groups that have data
 python3 "$S/kb_gateway.py" add "Project Atlas uses a QPU scheduler" --name atlas
-python3 "$S/kb_gateway.py" search "QPU scheduling" --k 5        # facts across ALL groups (read-only)
+python3 "$S/kb_gateway.py" retrieve "QPU scheduling" --k 5        # facts across ALL groups (read-only)
 python3 "$S/kb_gateway.py" episodes --max 20                    # episodes across ALL groups (read-only)
 python3 "$S/kb_gateway.py" status                               # graphiti server + DB status
 python3 "$S/kb_gateway.py" forget user:<me>                     # clear YOUR group (owner/admin)

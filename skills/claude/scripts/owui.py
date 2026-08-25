@@ -3,13 +3,13 @@
 
 Two surfaces, one key (the non-admin agent key, KB_API_KEY):
 
-  * KB surface (read-scoped): list/search KBs, semantic-search a KB, RAG chat
+  * KB surface (read-scoped): list/search KBs, retrieve (semantic) from a KB, RAG chat
     grounded on a KB, read file content. The agent key is read-only here: it
     cannot upload, modify, or delete KBs/files it does not own.
 
   * Projects-memory surface (user-key writes to OWNED KBs): index
     ~/.claude/projects/<encoded>/memory/*.md into OWUI KBs (one KB per project),
-    search across those KBs, and check a repo's index status. The user key
+    retrieve across those KBs, and check a repo's index status. The user key
     CREATES + OWNS each project KB (KB.user.email == caller) and uploads/deletes
     files in it. OWUI gates KB creation on the workspace.knowledge permission,
     which is off by default: run `make projects-bootstrap` once (admin) to enable
@@ -188,7 +188,7 @@ def cmd_file(base, key, a):
     # call() path (r.read().decode()) raised UnicodeDecodeError on every PDF.
     # Text files decode and print; binary files are saved to a temp file with a
     # note pointing the caller at an extractor. The extracted (searchable) text
-    # for a binary file is also available via `search <kb> "<query>"`.
+    # for a binary file is also available via `retrieve <kb> "<query>"`.
     url = base + "/api/v1/files/%s/content" % a.id
     req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key}, method="GET")
     try:
@@ -207,7 +207,7 @@ def cmd_file(base, key, a):
             f.write(raw)
         sys.exit("NOTE  file %s is binary (Content-Type: %s, %d bytes); the /content\n"
                  "  endpoint returns the RAW file, not extracted text. Saved to: %s\n"
-                 "  PDF -> pdftotext -layout %s -  |  Office/image -> `search <kb> \"<query>\"`\n"
+                 "  PDF -> pdftotext -layout %s -  |  Office/image -> `retrieve <kb> \"<query>\"`\n"
                  "  for the extracted text chunks, or open the saved file."
                  % (a.id, ctype or "?", len(raw), path, path))
     sys.stdout.write(txt if not txt.endswith("\n") else txt)

@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v1.4.0] — 2026-08-24
+
 ### Added
 
 - **`make provision` target** — one-shot from-scratch setup that chains
@@ -33,6 +35,25 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`search` → `retrieve` taxonomy split (breaking).** The `/kb` skill
+  overloaded `search` across four meanings (KB-name lookup, KB document
+  semantic fetch, cross-project semantic fetch, Graphiti facts search). Split
+  into a 3-verb taxonomy: `search`/`search-kbs` = lexical KB-name lookup only
+  (unchanged; upstream OWUI `/api/v1/knowledge/search`); `retrieve` = KB
+  document semantic fetch (raw chunks, no LLM) — the default query path;
+  `retrieve-projects` = cross-project semantic fetch; `retrieve` (kb-gateway) =
+  Graphiti facts fetch; `rag` = retrieve + generate (`POST /memory/rag`),
+  opt-in one-shot answer. **Breaking (the renamed subcommands shipped in
+  v1.1.0):** `owui.py search <kb-id>`, `owui.py search-projects`, and
+  `kb_gateway.py search` (facts) are renamed to `retrieve` / `retrieve-projects`
+  / `retrieve`, and the gateway `POST /memory/search` route becomes
+  `POST /memory/retrieve` (handler `_search` → `_retrieve`, OpenAPI spec
+  updated). `search-kbs` (KB-name lookup) is unchanged. Client dispatch in
+  `skills/claude/scripts/{owui.py,kb_gateway.py}` updated. Docs: `SKILL.md`
+  rewritten to default the agent to `retrieve` over `rag`; "search" retained as
+  a natural-language trigger synonym. Tests: test_02/06/08 updated to the
+  `/memory/retrieve` endpoint and the `retrieve` subcommand.
+
 - **Admin user provisioning moved out of the `/kb` skill to operator make
   targets.** The `kb_gateway.py user-create` subcommand (and its argparse entry,
   dispatch, the `test_user_create` unit test, and the test_08 e2e block) is
@@ -53,14 +74,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   emit structured JSON, not human prose/glyphs — the consumer is an agent (an
   LLM), not a human. The scripts print **compact JSON** (single line; whitespace
   costs the agent tokens): every `cmd_*` success path returns a JSON object
-  with a stable schema (`whoami`, `kbs`, `search`, `index-projects`,
-  `search-projects`, `status-projects`, `groups`, `add`, `search` → `facts`,
-  `episodes`, `status`, `forget`, `delete-edge`/`delete-episode`,
-  `user-create`). `rag` and `file` stay raw text (LLM answer / file content —
+  with a stable schema (`whoami`, `kbs`, `retrieve`, `index-projects`,
+  `retrieve-projects`, `status-projects`, `groups`, `add`, `retrieve` → `facts`,
+  `episodes`, `status`, `forget`, `delete-edge`/`delete-episode`).
+  `rag` and `file` stay raw text (LLM answer / file content —
   wrapping is lossy); error/`sys.exit("FAIL ...")` paths stay prose on stderr.
   `make gdrive-status` emits **pretty JSON (indent=2)** (passes `?json=1`,
-  pipes through `json.tool --indent 2`). The `--json` flags on `user-create`
-  and `status-projects` are removed (output is JSON regardless).
+  pipes through `json.tool --indent 2`). The `--json` flag on `status-projects`
+  is removed (output is JSON regardless).
   `index-projects` now returns `{projects:[{...,errors:[]}], total:{...},
   waited:[...]}`: per-file failures are collected into `errors` (not printed,
   which would break JSON), and a failed KB create is recorded as a project
@@ -137,10 +158,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
   can `json.load` stdout and extract `kb_api_key` / `temp_password` without
   parsing prose. `--email` + `--name` remain required. SKILL.md documents both.
 - **SKILL.md notes that `add` is asynchronous.** Graphiti extracts entity edges
-  in a background Ollama pass after `add` returns, so an immediate `search` for
+  in a background Ollama pass after `add` returns, so an immediate `retrieve` for
   the just-added fact can return `[]`; wait or retry before treating a 0-hit
-  search as "not remembered". Observed latency on this deployment (mini2 → mini4
-  Ollama, `qwen2.5:14b`): ~10-15s warm, cold start can exceed 90s (varies by
+  retrieve as "not remembered". Observed latency on this deployment (kb host → GPU Ollama host, `qwen2.5:14b`): ~10-15s warm, cold start can exceed 90s (varies by
   host/model). Documentation only — no code change.
 
 - **`make test` is fast and deterministic; the full real-gdrive drain moved to
@@ -367,7 +387,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **Projects memory indexing (Claude project memory → OWUI KBs).** New
-  `index-projects` / `search-projects` / `status-projects` subcommands in
+  `index-projects` / `retrieve-projects` / `status-projects` subcommands in
   `skills/claude/scripts/owui.py` index `~/.claude/projects/<encoded>/memory/*.md`
   into OWUI KBs — one KB per project — so an agent recalls knowledge across
   Claude Code projects and sessions. The skill-side wrapper walks the host
@@ -379,7 +399,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Every run is a full snapshot (always re-uploads; OWUI idempotency reuses
   unchanged files); a modified file is delete-then-uploaded (router `DELETE`
   cleans vectors — the upload's own reclaim does not); orphans are deleted.
-  `search-projects` filters by `--host`/`--project`/`--account`/`--kb-glob` and
+  `retrieve-projects` filters by `--host`/`--project`/`--account`/`--kb-glob` and
   makes one retrieval call per KB (hit metadata carries no `knowledge_id`, so
   one-call-per-KB is the reliable attribution). `status-projects` walks up
   `realpath(cwd)` to match the project KB. Naming: "projects memory" (this) vs
@@ -418,7 +438,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `UnicodeDecodeError` (the shared `call()` did `r.read().decode()`). `cmd_file`
   now fetches directly, prints text files unchanged, and on a binary body saves
   the raw bytes to a temp file (extension inferred from `Content-Type`) with a
-  note pointing at `pdftotext` / `search <kb>`. Only `cmd_file` changed;
+  note pointing at `pdftotext` / `retrieve <kb>`. Only `cmd_file` changed;
   `call()`/`jget()` (JSON-only) are untouched. Also redeployed the wrapper to
   `~/.claude/skills/kb/scripts/owui.py` (it was stale at the old
   `OPENWEBUI_BASE_URL` env name; the source had moved to `KB_HOST`), so the
@@ -650,5 +670,6 @@ clean-state e2e harness.
 Initial tagged release. MCP-based Graphiti memory stack (memory extraction
 non-functional with Ollama — fixed in v1.1.0).
 
+[v1.4.0]: https://github.com/dkhokhlov/knowledgebase/releases/tag/v1.4.0
 [v1.1.0]: https://github.com/dkhokhlov/knowledgebase/releases/tag/v1.1.0
 [v1.0.0]: https://github.com/dkhokhlov/knowledgebase/releases/tag/v1.0.0

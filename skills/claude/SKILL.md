@@ -164,9 +164,9 @@ make projects-bootstrap   # admin: enable workspace.knowledge + verify with a us
 
 - KB name = `<host>--<encoded-dir-without-leading-dash>`. Host = short hostname
   (`platform.node()`, or `--host`). Example: project
-  `/home/owner/SOURCE/Deployments/knowledgebase` → encoded
-  `-home-owner-SOURCE-Deployments-knowledgebase` → KB
-  `mini2--home-owner-SOURCE-Deployments-knowledgebase`.
+  `/home/user/projects/myrepo` → encoded
+  `-home-user-projects-myrepo` → KB
+  `<host>--home-user-projects-myrepo`.
 - Per-file metadata (flat in `File.meta.data`): `host`, `project` (exact encoded
   dir), `project_path` (decode; authoritative when the path exists on disk, else
   lossy), `repo` (git repo name = path basename), `account` (caller email),
@@ -199,8 +199,8 @@ python3 "$S" index-projects --dry-run              # plan only; JSON {projects,t
 python3 "$S" index-projects --project knowledgebase --wait   # index this repo, then wait for drain
 python3 "$S" status-projects                       # current repo's drain status (JSON; walks up cwd)
 python3 "$S" retrieve-projects "QPU scheduling"      # across ALL your project KBs
-python3 "$S" retrieve-projects "memory" --host mini2 --project knowledgebase   # filtered
-python3 "$S" retrieve-projects "XSL" --kb-glob 'mini2--*'   # wildcard KB name
+python3 "$S" retrieve-projects "memory" --host <host> --project knowledgebase   # filtered
+python3 "$S" retrieve-projects "XSL" --kb-glob '<host>--*'   # wildcard KB name
 ```
 
 `retrieve-projects` filters: `--host` (name starts with `<host>--`), `--project`
@@ -269,7 +269,7 @@ python3 "$G" delete-episode <uuid>               # delete one episode (owner/adm
 **`add` is asynchronous:** Graphiti extracts entity edges in a background
 Ollama pass after `add` returns, so an immediate `retrieve` for the just-added
 fact can return `[]`. Wait, or retry, before treating a 0-hit retrieve as "not
-remembered" — observed latency on this deployment (mini2 → mini4 Ollama,
+remembered" — observed latency on this deployment (kb host → GPU Ollama host,
 `qwen2.5:14b`): ~10-15s warm, and a cold start (model not loaded) can exceed
 90s. Varies by host/model.
 

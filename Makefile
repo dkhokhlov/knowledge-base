@@ -35,7 +35,7 @@ provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + adm
 	  echo "==> 7/8 rag-config (strict-grounding RAG template + rag.ollama.base_url sync)"; make rag-config; \
 	  echo "==> 8/8 gdrive-index-bootstrap (creates the gdrive KB + grants agent read + writes GDRIVE_KB_ID)"; make gdrive-index-bootstrap; \
 	  echo; echo "==> provision complete — stack is running."; \
-	  echo "    Populate the gdrive KB (one-time, ~40 min):  make gdrive-sync"; \
+	  echo "    Populate the gdrive KB (one-time):           make gdrive-sync"; \
 	  echo "    Everyday restart:                            make start"
 
 bootstrap: ## Create .env.local (generate WEBUI_SECRET_KEY) + ./data dirs

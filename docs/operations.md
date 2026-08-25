@@ -422,11 +422,11 @@ own reclaim does not clean KB vectors). Orphans (source file gone) are deleted
 `/knowledge/{id}/files` misses pending/unlinked uploads) until `pending +
 processing == 0` (deadline `PROJECTS_WAIT`, default 600s).
 
-### Status + search
+### Status + retrieve
 
 `status-projects` reports the current repo's drain (it walks up `realpath(cwd)`
 to match `~/.claude/projects/<encoded>`; `--project <substr>` overrides; output is
-compact JSON; `--wait` polls). `search-projects` searches across the caller's
+compact JSON; `--wait` polls). `retrieve-projects` retrieves across the caller's
 project KBs (filters: `--host`, `--project`, `--account` default caller,
 `--kb-glob`). It makes one retrieval call per KB (hit metadata carries no
 `knowledge_id`, so one-call-per-KB is the reliable attribution) and prints

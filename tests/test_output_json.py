@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for the agentic-first JSON output of the /kb skill scripts.
 
-Covers every report/status/search subcommand of skills/claude/scripts/{owui.py,
+Covers every report/status/retrieve subcommand of skills/claude/scripts/{owui.py,
 kb_gateway.py}: asserts the success path prints valid JSON with the expected
 top-level schema, and (for the agent-facing scripts) that the JSON is COMPACT
 (single line, no indent — whitespace costs an agent tokens). `rag` and `file`
@@ -86,10 +86,10 @@ class KbGatewayTests(_Assertions):
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["group"], "user:a@b")
 
-    def test_search(self):
+    def test_retrieve(self):
         ns = mock.Mock(query="q", k=5)
         out = _run([(kb_gateway, "jget", {"facts": [{"uuid": "f1"}]})],
-                   kb_gateway.cmd_search, ns)
+                   kb_gateway.cmd_retrieve, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d, {"facts": [{"uuid": "f1"}]})
 
@@ -172,13 +172,13 @@ class OwuiTests(_Assertions):
         self.assertEqual(d, {"kbs": [{"id": "k1", "name": "KB1"},
                                      {"id": "k2", "name": "KB2"}]})
 
-    def test_search(self):
+    def test_retrieve(self):
         chroma = {"documents": [["t1", "t2"]],
                   "distances": [[0.1, 0.2]],
                   "metadatas": [[{"file_name": "f1"}, {"file_name": "f2"}]],
                   "ids": [["id1", "id2"]]}
         ns = mock.Mock(kb_id="k1", query="q", k=4, no_hybrid=False)
-        out = _run([(owui, "jget", chroma)], owui.cmd_search, ns)
+        out = _run([(owui, "jget", chroma)], owui.cmd_retrieve, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(len(d["hits"]), 2)
         self.assertEqual(set(d["hits"][0]), {"id", "distance", "file", "text"})
@@ -330,7 +330,7 @@ class OwuiTests(_Assertions):
         self.assertEqual(len(d["waited"]), 1)
         self.assertEqual(d["waited"][0]["completed"], 1)
 
-    def test_search_projects(self):
+    def test_retrieve_projects(self):
         ns = mock.Mock(query="q", host=None, project=None, account=None,
                        kb_glob=None, k=4, no_hybrid=False)
         hits = [{"id": "h1", "distance": 0.1, "file": "f", "text": "t"}]
@@ -341,19 +341,19 @@ class OwuiTests(_Assertions):
             (owui, "jget", {"items": items}),
             (owui, "_search_one_kb", (hits, None)),
         ]
-        out = _run(patches, owui.cmd_search_projects, ns)
+        out = _run(patches, owui.cmd_retrieve_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["kbs"], 1)
         self.assertEqual(len(d["hits"]), 1)
         self.assertEqual(d["hits"][0]["kb_name"], "testhost--p")
         self.assertEqual(d["hits"][0]["repo"], "r")
 
-    def test_search_projects_empty(self):
+    def test_retrieve_projects_empty(self):
         ns = mock.Mock(query="q", host=None, project=None, account=None,
                        kb_glob=None, k=4, no_hybrid=False)
         patches = [(owui, "_whoami", {"email": "a@b"}),
                    (owui, "jget", {"items": []})]
-        out = _run(patches, owui.cmd_search_projects, ns)
+        out = _run(patches, owui.cmd_retrieve_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d, {"kbs": 0, "hits": [], "errors": []})
 
