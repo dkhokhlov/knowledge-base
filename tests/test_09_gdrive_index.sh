@@ -193,7 +193,7 @@ section "semantic search over gdrive KB (deterministic)"
 q_stem=$(printf '%s' "$status_json" | python3 -c '
 import sys, json, re
 d = json.load(sys.stdin)
-for f in (d.get("files") or []):
+for f in (d.get("indexed_files") or []):
     if f.get("status") == "completed" and f.get("filename"):
         stem = re.sub(r"[^A-Za-z0-9]+", " ", f["filename"].rsplit(".", 1)[0]).strip()
         if stem:

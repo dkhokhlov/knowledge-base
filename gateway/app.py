@@ -646,15 +646,19 @@ class Handler(BaseHTTPRequestHandler):
         if relpath:
             per_file = [p for p in per_file
                         if p.get("filename") == os.path.basename(relpath)]
-        summary = {"source": source, "kb_id": kb_id,
+        summary = {"indexed_files": per_file,
+                   "failed_files": [{"filename": f.get("filename"),
+                                     "error": f.get("error")} for f in failed],
+                   "pending_files": [{"filename": s.get("filename"),
+                                      "error": s.get("error")}
+                                     for s in file_status
+                                     if s.get("status") == "pending"],
+                   "source": source, "kb_id": kb_id,
                    "source_count": source_count,
                    "indexed_count": completed,
                    "pending": pending,
                    "processing": processing,
-                   "failed": len(failed),
-                   "failed_files": [{"filename": f.get("filename"),
-                                     "error": f.get("error")} for f in failed],
-                   "files": per_file}
+                   "failed": len(failed)}
         if as_json:
             return self._ok(summary)
         # human-readable: glyphs (✓/✗/○), no emoji, no ETA (no daemon). pending
