@@ -487,6 +487,7 @@ class Handler(BaseHTTPRequestHandler):
                     # socket.timeout (OSError) is not always wrapped as OwuiError.
                     # A failed dir leaves deeper segments without a parent -> stop
                     # this path; its files fall back to dir_id="" (KB root).
+                    log.warning("/index mkdir failed kb=%s path=%s: %s", kb_id, p, e)
                     errors.append({"path": p, "status": "error",
                                    "error": "create_directory failed: %s" % e})
                     break
@@ -505,6 +506,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 data_bytes = open(info["abspath"], "rb").read()
             except Exception as e:
+                log.warning("/index source read failed kb=%s file=%s: %s", kb_id, fn, e)
                 errors.append({"filename": fn, "status": "error",
                                "error": "source read failed: %s" % e})
                 continue
@@ -514,6 +516,7 @@ class Handler(BaseHTTPRequestHandler):
             except (owui.OwuiError, OSError) as e:
                 # socket.timeout (OSError) is not always wrapped as OwuiError.
                 # One slow/timed-out upload is a per-file error, not a run abort.
+                log.warning("/index upload failed kb=%s file=%s: %s", kb_id, fn, e)
                 errors.append({"filename": fn, "status": "error", "error": str(e)})
                 continue
             # modified: OWUI carries the prior file id as `stale_file_id`
@@ -538,6 +541,8 @@ class Handler(BaseHTTPRequestHandler):
         cleanup_file_ids = orphan_file_ids + [d.get("file_id") for d in deleted if d.get("file_id")]
         cleanup_dir_ids = list(rmdir)
         if cleanup_file_ids or cleanup_dir_ids:
+            log.info("/index cleanup kb=%s files=%d dirs=%d",
+                     kb_id, len(cleanup_file_ids), len(cleanup_dir_ids))
             try:
                 owui.sync_cleanup(admin_key, kb_id, cleanup_file_ids, cleanup_dir_ids)
             except (owui.OwuiError, OSError) as e:
@@ -563,6 +568,7 @@ class Handler(BaseHTTPRequestHandler):
             file_status = owui.list_file_status(admin_key, kb_id)
         except (owui.OwuiError, OSError) as e:
             file_status = None
+            log.warning("/index list_file_status failed kb=%s: %s", kb_id, e)
             errors.append({"filename": "<re-trigger>", "status": "error",
                            "error": "list_file_status failed: %s" % e})
         if file_status is not None:
@@ -603,9 +609,12 @@ class Handler(BaseHTTPRequestHandler):
                         errors.append({"filename": fn, "status": "error",
                                        "error": "re-trigger orphan delete failed: %s" % e})
                     continue
+                log.info("/index retry kb=%s file=%s file_id=%s status=%s",
+                         kb_id, fn, st.get("file_id"), st.get("status"))
                 try:
                     owui.delete_file(admin_key, st["file_id"])
                 except (owui.OwuiError, OSError) as e:
+                    log.warning("/index retry delete failed kb=%s file=%s: %s", kb_id, fn, e)
                     errors.append({"filename": fn, "status": "error",
                                    "error": "re-trigger delete failed: %s" % e})
                     continue
@@ -615,6 +624,7 @@ class Handler(BaseHTTPRequestHandler):
                     owui.upload_file(admin_key, kb_id, src["checksum"],
                                      dir_id, src["filename"], data_bytes, src.get("mtime"))
                 except (owui.OwuiError, OSError) as e:
+                    log.warning("/index retry re-upload failed kb=%s file=%s: %s", kb_id, fn, e)
                     errors.append({"filename": fn, "status": "error",
                                    "error": "re-trigger re-upload failed: %s" % e})
                     continue
@@ -673,6 +683,8 @@ class Handler(BaseHTTPRequestHandler):
         pending = sum(1 for s in file_status if s.get("status") == "pending")
         processing = sum(1 for s in file_status if s.get("status") == "processing")
         failed = [s for s in file_status if s.get("status") == "failed"]
+        log.info("/status kb=%s completed=%d pending=%d processing=%d failed=%d source=%d",
+                 kb_id, completed, pending, processing, len(failed), source_count)
         in_flight = pending + processing
         per_file = [{"filename": s.get("filename"), "status": s.get("status"),
                      "error": s.get("error")}
