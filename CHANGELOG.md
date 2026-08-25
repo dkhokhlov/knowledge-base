@@ -6,6 +6,33 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`retrieve-projects --account` wildcard globs** — the `--account` filter now
+  accepts an fnmatch glob (e.g. `*@corp.com` / `*` for all visible KBs) in
+  addition to an exact owner email. Backward-compatible: an exact email has no
+  glob chars and matches literally. Doc updated in `SKILL.md` + `docs/operations.md`.
+
+### Changed
+
+- **`retrieve` hits carry page-round-trip metadata.** `owui.py` `flatten_chroma`
+  now propagates `file_id`, `page`, `start_index`, and `source` from Chroma
+  chunk metadata into each hit (previously dropped). Enables the page
+  round-trip in `docs/ocr.md`: a hit's `file_id` + `page` -> `owui.py file
+  <file_id>` (save raw) -> `pdftotext`/`pdftoppm -f <page>` for that page and
+  its neighbors. Absent metadata defaults to `None` / `""`. Wrapper-side
+  only; no re-index needed (the metadata was already in Chroma, just not
+  surfaced). `tests/test_output_json.py` enriched to assert the new keys.
+
+### Fixed
+
+- **Strip `[Image OCR]`/`[End OCR]` region markers from OCR output.**
+  `markitdown/oursvc.py` strips the upstream markitdown-ocr
+  `PdfConverterWithOCR` region markers (markdown italics wrappers around
+  OCR'd image regions) from the extracted markdown at extraction time. They
+  were retrieval noise (the inner OCR text is preserved). Requires the
+  `markitdown-ocr` image rebuild + a re-OCR to clean the existing chunks.
+
 ## [v1.4.0] — 2026-08-24
 
 ### Added

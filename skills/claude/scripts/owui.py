@@ -96,6 +96,10 @@ def flatten_chroma(d):
                 "id": sub_i[j] if j < len(sub_i or []) else "",
                 "distance": sub_d[j] if j < len(sub_d or []) else None,
                 "file": m.get("file_name") or m.get("name") or "",
+                "file_id": m.get("file_id") or "",
+                "page": m.get("page"),
+                "start_index": m.get("start_index"),
+                "source": m.get("source") or "",
                 "text": t,
             })
     return out
@@ -550,7 +554,7 @@ def cmd_retrieve_projects(base, key, a):
     selected = []
     for k in items:
         name = k.get("name", "")
-        if ((k.get("user") or {}).get("email") or "") != account:
+        if not fnmatch.fnmatch(((k.get("user") or {}).get("email") or ""), account):
             continue
         tail = name.split("--", 1)[1] if "--" in name else name
         if a.host and not name.startswith(a.host + "--"):
@@ -663,7 +667,7 @@ def main():
     sp.add_argument("query")
     sp.add_argument("--host", default=None, help="filter by host segment (name starts with <host>--)")
     sp.add_argument("--project", default=None, help="substring filter on the project part of the KB name")
-    sp.add_argument("--account", default=None, help="KB owner email (default: the caller)")
+    sp.add_argument("--account", default=None, help="KB owner email, or fnmatch glob like '*@corp.com' / '*' for all visible (default: the caller)")
     sp.add_argument("--mine", action="store_true", help="alias for the default (account = caller)")
     sp.add_argument("--kb-glob", default=None, help="fnmatch glob on the KB name")
     sp.add_argument("--k", type=int, default=4, help="top-k hits after merge")

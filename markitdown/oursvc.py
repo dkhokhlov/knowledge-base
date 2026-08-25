@@ -76,6 +76,13 @@ from markitdown_ocr._ocr_service import OCRResult
 # does NOT strip. Strip every <|...|> token from the OCR text before returning.
 _LEAK = re.compile(r"<\|[^|]*\|>")
 
+# markitdown-ocr's PdfConverterWithOCR wraps each OCR'd image region in markdown
+# italics + "[Image OCR]"/"[End OCR]" boundary markers. They are retrieval noise
+# (the inner OCR text is kept); strip them at extraction so stored chunks are
+# clean for both retrieve and RAG (RAG reads the stored chunk text). The optional
+# "*" on either side is the markdown italics wrapper around the region.
+_OCR_MARKER = re.compile(r"\*?\s*\[(?:Image OCR|End OCR)\]\s*\*?")
+
 # Per-unit markers emitted by the upstream converters (after PPTX normalization).
 _PDF_HEADER = re.compile(r"^## Page (\d+)\s*$", re.MULTILINE)
 _PPTX_HEADER = re.compile(r"^<!-- Slide number: (\d+) -->\s*$", re.MULTILINE)
@@ -334,6 +341,10 @@ def extract(file_bytes, filename, content_type, md, service):
             os.unlink(tmp_path)
         except OSError:
             pass
+
+    # Strip the upstream "[Image OCR]"/"[End OCR]" region markers (markdown
+    # italics wrappers) — retrieval noise; the inner OCR text is preserved.
+    markdown = _OCR_MARKER.sub("", markdown)
 
     if kind == "pptx":
         # Upstream PPTX converter emits literal "\n" (two chars) not real

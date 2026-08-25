@@ -175,14 +175,25 @@ class OwuiTests(_Assertions):
     def test_retrieve(self):
         chroma = {"documents": [["t1", "t2"]],
                   "distances": [[0.1, 0.2]],
-                  "metadatas": [[{"file_name": "f1"}, {"file_name": "f2"}]],
+                  "metadatas": [[{"file_name": "f1", "file_id": "fid1", "page": 3,
+                                  "start_index": 0, "source": "upload"},
+                                 {"file_name": "f2"}]],
                   "ids": [["id1", "id2"]]}
         ns = mock.Mock(kb_id="k1", query="q", k=4, no_hybrid=False)
         out = _run([(owui, "jget", chroma)], owui.cmd_retrieve, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(len(d["hits"]), 2)
-        self.assertEqual(set(d["hits"][0]), {"id", "distance", "file", "text"})
+        # file_id/page/start_index/source propagate from Chroma metadata so the
+        # agent can round-trip a hit to the original page (file <file_id> +
+        # pdftotext/pdftoppm -f <page>); absent metadata defaults to None / "".
+        self.assertEqual(set(d["hits"][0]),
+                         {"id", "distance", "file", "file_id", "page",
+                          "start_index", "source", "text"})
         self.assertEqual(d["hits"][0]["file"], "f1")
+        self.assertEqual(d["hits"][0]["file_id"], "fid1")
+        self.assertEqual(d["hits"][0]["page"], 3)
+        self.assertIsNone(d["hits"][1]["page"])
+        self.assertEqual(d["hits"][1]["file_id"], "")
 
     def test_rag_is_raw_text(self):
         # rag prints the LLM answer verbatim — NOT JSON-wrapped (lossy for an agent).

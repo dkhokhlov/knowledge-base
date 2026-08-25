@@ -204,8 +204,9 @@ python3 "$S" retrieve-projects "XSL" --kb-glob '<host>--*'   # wildcard KB name
 ```
 
 `retrieve-projects` filters: `--host` (name starts with `<host>--`), `--project`
-(substring in the project part), `--account` (KB owner email; default = caller,
-aka `--mine`), `--kb-glob` (fnmatch on the KB name). No filters = all KBs you
+(substring in the project part), `--account` (KB owner email, or fnmatch glob
+like `*@corp.com` / `*` for all visible KBs; default = caller, aka `--mine`),
+`--kb-glob` (fnmatch on the KB name). No filters = all KBs you
 own. It makes one retrieval call per KB (hit metadata carries no `knowledge_id`,
 so one-call-per-KB is the reliable attribution) and prints compact JSON
 `{"kbs":N,"hits":[{"repo","kb_name","file","text",...}],"errors":[...]}`.
