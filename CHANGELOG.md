@@ -12,7 +12,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Nothing yet.
+- **Removed the empty `id` field from `retrieve`/`retrieve-projects` hits
+  (breaking).** OWUI's `/api/v1/retrieval/query/collection` returns no Chroma
+  `ids` array (verified for hybrid and pure-vector paths), so every hit carried
+  `"id": ""`. The chunk id is non-actionable (no OWUI endpoint takes it); chunks
+  are identified by `file_id` + `start_index` in metadata. Hit keys are now
+  `distance, file, file_id, page, start_index, source, mtime, text`. Also fixes a
+  latent `zip`-truncation footgun in `flatten_chroma` (the `ids` default would
+  drop collections after the first if `collection_names` grew >1).
+- **Raised `retrieve`/`retrieve-projects` `--k` default 4 → 5** and the skill
+  docs now suggest 10–20 for broader recall. The agent synthesizes from raw
+  chunks, so more chunks serve it better than a one-shot `rag` when coverage
+  matters. `kb_gateway retrieve` (facts) is unchanged (default 10).
 
 ### Fixed
 

@@ -83,18 +83,18 @@ def jget(base, key, method, path, body=None):
 
 
 def flatten_chroma(d):
-    """Chroma response: {documents:[[…]], distances:[[…]], metadatas:[[…]], ids:[[…]]}
-    — one inner list per collection_name. Flatten to a list of hit dicts."""
+    """Chroma response: {documents:[[…]], distances:[[…]], metadatas:[[…]]}
+    — one inner list per collection_name. OWUI returns no `ids` (verified for
+    both hybrid and pure-vector paths); a chunk is identified by metadata
+    file_id + start_index. Flatten to hit dicts."""
     docs = d.get("documents", [[]])
     dists = d.get("distances", [[]])
     metas = d.get("metadatas", [[]])
-    ids = d.get("ids", [[]])
     out = []
-    for sub_docs, sub_d, sub_m, sub_i in zip(docs, dists, metas, ids):
+    for sub_docs, sub_d, sub_m in zip(docs, dists, metas):
         for j, t in enumerate(sub_docs or []):
             m = (sub_m[j] if j < len(sub_m or []) else {}) or {}
             out.append({
-                "id": sub_i[j] if j < len(sub_i or []) else "",
                 "distance": sub_d[j] if j < len(sub_d or []) else None,
                 "file": m.get("file_name") or m.get("name") or "",
                 "file_id": m.get("file_id") or "",
@@ -681,7 +681,7 @@ def main():
 
     sp = sub.add_parser("retrieve", help="retrieve documents from a KB by name or id (semantic)")
     sp.add_argument("kb", help="KB name or id"); sp.add_argument("query")
-    sp.add_argument("--k", type=int, default=4); sp.add_argument("--no-hybrid", action="store_true")
+    sp.add_argument("--k", type=int, default=5); sp.add_argument("--no-hybrid", action="store_true")
 
     sp = sub.add_parser("rag", help="RAG chat grounded on one or more KBs (proxied by kb-gateway /memory/rag)")
     sp.add_argument("question"); sp.add_argument("--kb", action="append", default=[])
@@ -705,7 +705,7 @@ def main():
     sp.add_argument("--account", default=None, help="KB owner email, or fnmatch glob like '*@corp.com' / '*' for all visible (default: the caller)")
     sp.add_argument("--mine", action="store_true", help="alias for the default (account = caller)")
     sp.add_argument("--kb-glob", default=None, help="fnmatch glob on the KB name")
-    sp.add_argument("--k", type=int, default=4, help="top-k hits after merge")
+    sp.add_argument("--k", type=int, default=5, help="top-k hits after merge")
     sp.add_argument("--no-hybrid", action="store_true", help="pure vector search (no hybrid)")
 
     sp = sub.add_parser("status-projects",

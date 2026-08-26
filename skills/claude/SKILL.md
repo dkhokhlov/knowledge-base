@@ -47,10 +47,14 @@ the local model is adequate and the token cost of returning chunks matters.
 
 `POST /api/v1/retrieval/query/collection` — body
 `{collection_names:[<kb-id>], query, k, hybrid:true}` → Chroma
-`{documents, distances, metadatas, ids}` (nested arrays; the wrapper flattens
-them). Pure vector retrieval — no LLM call. Lower distance = better match
+`{documents, distances, metadatas}` (nested arrays; the wrapper flattens
+them; OWUI omits the Chroma `ids` array, so chunk ids are unavailable — each
+chunk is identified by `file_id` + `start_index` in its metadata). Pure vector
+retrieval — no LLM call. Lower distance = better match
 (cosine; 0 best). Wrapper: `retrieve <kb-name-or-id> "<query>" [--k N] [--no-hybrid]`
-(`--k` default 4; `--no-hybrid` = pure vector, no hybrid search). The wrapper
+(`--k` default 5; use 10–20 for broader recall — the agent synthesizes from
+raw chunks, so more chunks serve it better than a one-shot `rag`.
+`--no-hybrid` = pure vector, no hybrid search). The wrapper
 resolves the name to a KB id via `GET /api/v1/knowledge/` (exact name or exact
 id; a valid UUID that is not a real id FAILS — no silent fallthrough, so a
 wrong hand-copied id cannot query the wrong KB) and prints the resolved
@@ -186,7 +190,7 @@ defaults), `--wait`.
 `retrieve-projects`: `--host` (name starts with `<host>--`), `--project`
 (substring in the project part), `--account` (KB owner email, or fnmatch glob
 like `*@corp.com` / `*` for all visible; default = caller, aka `--mine`),
-`--kb-glob` (fnmatch on the KB name), `--k` (default 4), `--no-hybrid`. No
+`--kb-glob` (fnmatch on the KB name), `--k` (default 5), `--no-hybrid`. No
 filters = all KBs you own. It makes one retrieval call per KB (hit metadata
 carries no `knowledge_id`, so one-call-per-KB is the reliable attribution) and
 prints compact JSON `{"kbs":N,"hits":[...],"errors":[...]}`.

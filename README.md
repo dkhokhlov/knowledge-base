@@ -242,7 +242,7 @@ Measured warm on the GPU host (one 14B ctx-baked model loaded). The first call a
 | raw chunk retrieval | `POST /api/v1/retrieval/query/collection` | ~64 ms (first call ~328 ms) |
 | RAG chat (retrieval + grounded LLM) | `POST /api/chat/completions` (`files`) | ~1.5 s |
 
-- Raw retrieval (`/api/v1/retrieval/query/collection`) returns **chunks**: a Chroma-style object (`distances`, `documents`, `metadatas`, `ids`), top-k by vector similarity. No LLM runs.
+- Raw retrieval (`/api/v1/retrieval/query/collection`) returns **chunks**: a Chroma-style object (`distances`, `documents`, `metadatas`; OWUI omits the `ids` array — identify a chunk by `file_id` + `start_index` in its metadata), top-k by vector similarity. No LLM runs.
 - RAG chat (`/api/chat/completions` with `files:[{"type":"collection","id":<kb-id>}]`) runs retrieval, injects the chunks as context, and returns a grounded LLM answer. The `make rag-config` strict template makes the model answer only from the retrieved chunks and refuse when the answer is absent.
 
 ## Security

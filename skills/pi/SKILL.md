@@ -64,14 +64,14 @@ enforces KB read access natively. (Humans/admins still RAG directly at
 
 ### Retrieve
 
-`POST /api/v1/retrieval/query/collection` — body `{collection_names:[<kb-id>], query, k, hybrid:true}` → **Chroma** `{documents:[[…]], distances:[[…]], metadatas:[[…]], ids:[[…]]}` (one inner list per collection_name).
+`POST /api/v1/retrieval/query/collection` — body `{collection_names:[<kb-id>], query, k, hybrid:true}` → **Chroma** `{documents:[[…]], distances:[[…]], metadatas:[[…]]}` (one inner list per collection_name; OWUI omits `ids` — identify chunks by `file_id` + `start_index`).
 
 - Pure vector retrieval — **no LLM call**. Returns matched chunks + distances.
 - **Use when**: the answer must be correct — read the chunks and synthesize yourself.
 - **Cost**: more of your tokens (chunks return); zero Ollama.
 - **Risk**: none from synthesis (you do it). Lower distance = better match (Chroma cosine, 0 best).
-- **Response is nested arrays** (Chroma shape). Flatten `documents`/`distances`/`metadatas`/`ids` per collection before reading. The wrapper does this; if calling curl directly, parse with care.
-- Wrapper: `retrieve <kb-id> "<query>" [--k N] [--no-hybrid]`.
+- **Response is nested arrays** (Chroma shape). Flatten `documents`/`distances`/`metadatas` per collection before reading. OWUI returns no `ids`. The wrapper does this; if calling curl directly, parse with care.
+- Wrapper: `retrieve <kb-id> "<query>" [--k N] [--no-hybrid]` (`--k` default 5; use 10–20 for broader recall — the agent synthesizes from raw chunks, better than a one-shot `rag`).
 
 ### Discovery and file content
 

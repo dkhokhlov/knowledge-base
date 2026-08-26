@@ -178,8 +178,7 @@ class OwuiTests(_Assertions):
                   "metadatas": [[{"file_name": "f1", "file_id": "fid1", "page": 3,
                                   "start_index": 0, "source": "upload",
                                   "mtime": "2025-10-30T16:50:57Z"},
-                                 {"file_name": "f2"}]],
-                  "ids": [["id1", "id2"]]}
+                                 {"file_name": "f2"}]]}
         ns = mock.Mock(kb="k1", query="q", k=4, no_hybrid=False)
         # _resolve_kb supplies the provenance (kb_id, kb_name); jget serves the
         # Chroma collection query. retrieve no longer trusts a hand-copied id.
@@ -194,9 +193,10 @@ class OwuiTests(_Assertions):
         # file_id/page/start_index/source/mtime propagate from Chroma metadata
         # so the agent can round-trip a hit to the original page (file <file_id>
         # + pdftotext/pdftoppm -f <page>) and see the source mtime; absent
-        # metadata defaults to None / "".
+        # metadata defaults to None / "". The chunk `id` is NOT emitted: OWUI
+        # returns no `ids` array, so it was always "" and non-actionable.
         self.assertEqual(set(d["hits"][0]),
-                         {"id", "distance", "file", "file_id", "page",
+                         {"distance", "file", "file_id", "page",
                           "start_index", "source", "mtime", "text"})
         self.assertEqual(d["hits"][0]["file"], "f1")
         self.assertEqual(d["hits"][0]["file_id"], "fid1")
@@ -429,7 +429,7 @@ class OwuiTests(_Assertions):
     def test_retrieve_projects(self):
         ns = mock.Mock(query="q", host=None, project=None, account=None,
                        kb_glob=None, k=4, no_hybrid=False)
-        hits = [{"id": "h1", "distance": 0.1, "file": "f", "text": "t"}]
+        hits = [{"distance": 0.1, "file": "f", "text": "t"}]
         items = [{"id": "k1", "name": "testhost--p", "user": {"email": "a@b"},
                   "description": "repo=r"}]
         patches = [
