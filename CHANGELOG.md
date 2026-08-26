@@ -27,7 +27,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Nothing yet.
+- **Propagated the `retrieve` name-resolution doc to the codex/opencode/pi
+  SKILL.md copies.** The KB-id mis-mapping fix (name resolution + provenance)
+  had only updated `claude/SKILL.md`; the other three copies still instructed
+  agents to `retrieve <kb-id>` (hand-copied UUID) — inconsistent with the
+  wrapper, which resolves by name for all four skills. Now all copies read
+  `retrieve <kb-name-or-id>` and document the resolve + `kb_id`/`kb_name`
+  provenance output.
 
 ## [v1.5.0] — 2026-08-25
 

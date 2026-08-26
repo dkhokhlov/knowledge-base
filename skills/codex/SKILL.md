@@ -71,7 +71,7 @@ enforces KB read access natively. (Humans/admins still RAG directly at
 - **Cost**: more of your tokens (chunks return); zero Ollama.
 - **Risk**: none from synthesis (you do it). Lower distance = better match (Chroma cosine, 0 best).
 - **Response is nested arrays** (Chroma shape). Flatten `documents`/`distances`/`metadatas` per collection before reading. OWUI returns no `ids`. The wrapper does this; if calling curl directly, parse with care.
-- Wrapper: `retrieve <kb-id> "<query>" [--k N] [--no-hybrid]` (`--k` default 5; use 10–20 for broader recall — the agent synthesizes from raw chunks, better than a one-shot `rag`).
+- Wrapper: `retrieve <kb-name-or-id> "<query>" [--k N] [--no-hybrid]` (`--k` default 5; use 10–20 for broader recall — the agent synthesizes from raw chunks, better than a one-shot `rag`). The wrapper resolves the name to a KB id via `GET /api/v1/knowledge/` (exact name or exact id; a valid UUID that is not a real id FAILS — no silent fallthrough, so a wrong hand-copied id cannot query the wrong KB) and prints the resolved `kb_id` + `kb_name` alongside the hits.
 
 ### Discovery and file content
 
@@ -118,7 +118,7 @@ python3 "$S" whoami                             # verify key + role
 python3 "$S" kbs                                # list visible KBs
 python3 "$S" search-kbs "main"                  # find a KB by name
 python3 "$S" rag "What is XSL?" --kb <kb-id>    # chat (RAG) — LLM answer from the KB (via kb-gateway)
-python3 "$S" retrieve <kb-id> "XSL streaming"     # retrieve — raw chunks, you synthesize
+python3 "$S" retrieve <kb-name-or-id> "XSL streaming"     # retrieve — raw chunks, you synthesize
 python3 "$S" file <file-id>                     # file text content
 ```
 
