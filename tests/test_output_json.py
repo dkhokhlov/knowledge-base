@@ -180,9 +180,16 @@ class OwuiTests(_Assertions):
                                   "mtime": "2025-10-30T16:50:57Z"},
                                  {"file_name": "f2"}]],
                   "ids": [["id1", "id2"]]}
-        ns = mock.Mock(kb_id="k1", query="q", k=4, no_hybrid=False)
-        out = _run([(owui, "jget", chroma)], owui.cmd_retrieve, ns)
+        ns = mock.Mock(kb="k1", query="q", k=4, no_hybrid=False)
+        # _resolve_kb supplies the provenance (kb_id, kb_name); jget serves the
+        # Chroma collection query. retrieve no longer trusts a hand-copied id.
+        out = _run([(owui, "_resolve_kb", ("k1", "KB1")),
+                   (owui, "jget", chroma)], owui.cmd_retrieve, ns)
         d = self.assert_json(out); self.assert_compact(out)
+        # top-level provenance (#3): resolved kb_id + kb_name echo, plus hits.
+        self.assertEqual(set(d), {"kb_id", "kb_name", "hits"})
+        self.assertEqual(d["kb_id"], "k1")
+        self.assertEqual(d["kb_name"], "KB1")
         self.assertEqual(len(d["hits"]), 2)
         # file_id/page/start_index/source/mtime propagate from Chroma metadata
         # so the agent can round-trip a hit to the original page (file <file_id>
@@ -198,6 +205,23 @@ class OwuiTests(_Assertions):
         self.assertIsNone(d["hits"][1]["page"])
         self.assertIsNone(d["hits"][1]["mtime"])
         self.assertEqual(d["hits"][1]["file_id"], "")
+
+    def test_resolve_kb(self):
+        # Resolution order: exact id; valid-but-unknown UUID FAILS (no
+        # fallthrough to name matching); exact name; else fail. Guards the
+        # structural fix: a wrong hand-copied id cannot silently query the
+        # wrong KB.
+        items = [{"id": "k1", "name": "KB1"}, {"id": "k2", "name": "KB2"}]
+        def _r(arg):
+            with mock.patch.object(owui, "jget", return_value={"items": items}):
+                return owui._resolve_kb(BASE, KEY, arg)
+        self.assertEqual(_r("k1"), ("k1", "KB1"))   # exact id
+        self.assertEqual(_r("KB2"), ("k2", "KB2"))  # exact name
+        with mock.patch.object(owui, "jget", return_value={"items": items}):
+            with self.assertRaises(SystemExit):    # valid UUID, unknown -> fail
+                owui._resolve_kb(BASE, KEY, "00000000-0000-0000-0000-000000000000")
+            with self.assertRaises(SystemExit):    # no match -> fail
+                owui._resolve_kb(BASE, KEY, "no-such-kb")
 
     def test_rag_is_raw_text(self):
         # rag prints the LLM answer verbatim — NOT JSON-wrapped (lossy for an agent).

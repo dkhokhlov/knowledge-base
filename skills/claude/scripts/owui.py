@@ -40,6 +40,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 
 def base_url():
@@ -143,11 +144,44 @@ def cmd_search_kbs(base, key, a):
     print(json.dumps({"kbs": kbs}))
 
 
+def _is_uuid(arg):
+    try:
+        uuid.UUID(arg)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def _resolve_kb(base, key, arg):
+    """Resolve a KB name-or-id to (kb_id, kb_name) against
+    GET /api/v1/knowledge/. Resolution order: exact id; a VALID UUID that is
+    not a real id FAILS (no fallthrough to name matching, so a wrong
+    hand-copied id cannot silently query the wrong KB); exact name; else fail
+    with the visible KB list as `name (id)` pairs. Exact match only — no
+    substring/fragment step (a fragment unique today can turn ambiguous or
+    point at a different KB later). ID takes precedence over name."""
+    d = jget(base, key, "GET", "/api/v1/knowledge/")
+    items = d.get("items", []) if isinstance(d, dict) else d
+    cands = ["%s (%s)" % (k.get("name", ""), k.get("id", "")) for k in items]
+    for k in items:                       # exact id
+        if arg == k.get("id"):
+            return k.get("id"), k.get("name", "")
+    if _is_uuid(arg):                      # valid UUID, unknown -> fail, no fallthrough
+        sys.exit("FAIL  unknown KB id %r; visible KBs: %s"
+                 % (arg, "; ".join(cands)))
+    for k in items:                       # exact name
+        if arg == k.get("name"):
+            return k.get("id"), k.get("name", "")
+    sys.exit("FAIL  no KB matches name or id %r; visible KBs: %s"
+             % (arg, "; ".join(cands)))
+
+
 def cmd_retrieve(base, key, a):
-    body = {"collection_names": [a.kb_id], "query": a.query, "k": a.k, "hybrid": not a.no_hybrid}
+    kb_id, kb_name = _resolve_kb(base, key, a.kb)
+    body = {"collection_names": [kb_id], "query": a.query, "k": a.k, "hybrid": not a.no_hybrid}
     d = jget(base, key, "POST", "/api/v1/retrieval/query/collection", body)
     hits = flatten_chroma(d)
-    print(json.dumps({"hits": hits}))
+    print(json.dumps({"kb_id": kb_id, "kb_name": kb_name, "hits": hits}))
 
 
 def cmd_rag(base, key, a):
@@ -645,8 +679,8 @@ def main():
     sp = sub.add_parser("kb", help="print one knowledge base metadata"); sp.add_argument("id")
     sp = sub.add_parser("search-kbs", help="search KB names"); sp.add_argument("query")
 
-    sp = sub.add_parser("retrieve", help="retrieve documents from a KB (semantic)")
-    sp.add_argument("kb_id"); sp.add_argument("query")
+    sp = sub.add_parser("retrieve", help="retrieve documents from a KB by name or id (semantic)")
+    sp.add_argument("kb", help="KB name or id"); sp.add_argument("query")
     sp.add_argument("--k", type=int, default=4); sp.add_argument("--no-hybrid", action="store_true")
 
     sp = sub.add_parser("rag", help="RAG chat grounded on one or more KBs (proxied by kb-gateway /memory/rag)")

@@ -49,8 +49,12 @@ the local model is adequate and the token cost of returning chunks matters.
 `{collection_names:[<kb-id>], query, k, hybrid:true}` → Chroma
 `{documents, distances, metadatas, ids}` (nested arrays; the wrapper flattens
 them). Pure vector retrieval — no LLM call. Lower distance = better match
-(cosine; 0 best). Wrapper: `retrieve <kb-id> "<query>" [--k N] [--no-hybrid]`
-(`--k` default 4; `--no-hybrid` = pure vector, no hybrid search).
+(cosine; 0 best). Wrapper: `retrieve <kb-name-or-id> "<query>" [--k N] [--no-hybrid]`
+(`--k` default 4; `--no-hybrid` = pure vector, no hybrid search). The wrapper
+resolves the name to a KB id via `GET /api/v1/knowledge/` (exact name or exact
+id; a valid UUID that is not a real id FAILS — no silent fallthrough, so a
+wrong hand-copied id cannot query the wrong KB) and prints the resolved
+`kb_id` + `kb_name` alongside the hits.
 
 - **To confirm a specific file is searchable**, retrieve by its **literal
   filename stem** with a higher `--k` (e.g. 20). A generic concept query can be
@@ -107,12 +111,13 @@ python3 "$S" whoami                    # verify key + role
 python3 "$S" kbs                       # list KBs visible to this key
 python3 "$S" kb <kb-id>                 # one KB's metadata
 python3 "$S" search-kbs "main"         # find a KB by name
-python3 "$S" retrieve <kb-id> "XSL streaming"   # raw chunks, you synthesize (default)
+python3 "$S" retrieve <kb-name-or-id> "XSL streaming"   # raw chunks, you synthesize (default)
 python3 "$S" rag "What is XSL?" --kb <kb-id>     # one-shot RAG answer (via kb-gateway)
 python3 "$S" file <file-id>             # file text content
 ```
 
-Typical flow: `kbs` (or `search-kbs`) → grab the KB id → `retrieve`.
+Typical flow: `kbs` → `retrieve <kb-name>` (resolves name→id; fails loudly on
+no-match; output includes the resolved `kb_id` + `kb_name`).
 
 # Projects memory (Claude project memory → OWUI KBs)
 
