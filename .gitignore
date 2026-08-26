@@ -55,6 +55,10 @@ __pycache__/
 # wipe (recovery net). `make clean-backup` clears it.
 /.config-backup/
 
+# make backup DR snapshots: dated tarballs of ./data + .env + .env.local
+# (full stack state). Operator copies these off-host for disaster recovery.
+/.backups/
+
 # rclone exclude list for gdrive-sync (INI format: [<drive name>] sections of
 # per-drive patterns + a [*] section of all-drives patterns like *.pyc). LOCAL
 # ONLY — contains Drive file paths (business-sensitive, PII). Do NOT commit.

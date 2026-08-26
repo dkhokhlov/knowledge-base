@@ -13,7 +13,7 @@ DATA_DIR := ./data
         ocr-config \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
         projects-bootstrap \
-        shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-backup
+        shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-backup backup
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -216,3 +216,38 @@ clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + backup-and-r
 clean-backup: ## Remove the retention trees (./.gdrive-backup + ./.config-backup). Non-destructive: does not touch the stack, ./data, .env, or .env.local.
 	@rm -rf ./.gdrive-backup ./.config-backup
 	@echo "Removed ./.gdrive-backup + ./.config-backup (retention)."
+
+backup: ## DR snapshot: if running, stop stack; tar resolved DATA_ROOT + .env + .env.local into ./.backups/knowledge-base_backup-<host>-<UTC>.tar (root read, host-owned, mode 0600); restart only if it was running. Restore is manual — see docs/operations.md "Disaster recovery".
+	@set -euo pipefail; \
+	test -f .env || { echo "MISSING .env — run: make bootstrap"; exit 1; }; \
+	test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }; \
+	DATA_ROOT="$$(grep -E '^DATA_ROOT=' .env 2>/dev/null | cut -d= -f2- || true)"; \
+	DATA_ROOT="$${DATA_ROOT:-./data}"; \
+	REALDATA="$$(readlink -f "$$DATA_ROOT")"; \
+	test -d "$$REALDATA" || { echo "MISSING data dir ($$REALDATA from DATA_ROOT=$$DATA_ROOT) — nothing to back up"; exit 1; }; \
+	WAS_RUNNING=0; \
+	if [ -n "$$($(COMPOSE) ps -q 2>/dev/null)" ]; then WAS_RUNNING=1; fi; \
+	mkdir -p .backups && chmod 700 .backups; \
+	TS=$$(date -u +%Y%m%dT%H%M%SZ); HOST=$$(hostname -s); \
+	TARBALL=".backups/knowledge-base_backup-$$HOST-$$TS.tar"; TMP="$$TARBALL.tmp"; \
+	cleanup() { rc=$$?; rm -f "$$TMP"; \
+	  if [ "$$WAS_RUNNING" = 1 ]; then echo "==> restarting stack"; $(MAKE) --no-print-directory start || true; fi; \
+	  exit $$rc; }; \
+	trap cleanup EXIT HUP INT TERM; \
+	if [ "$$WAS_RUNNING" = 1 ]; then \
+	  echo "==> stopping stack for a clean snapshot"; $(MAKE) --no-print-directory stop; \
+	  if [ -n "$$($(COMPOSE) ps -q 2>/dev/null)" ]; then \
+	    echo "FAIL: stack still running after stop — aborting before tar (no tarball written)"; exit 1; fi; \
+	fi; \
+	echo "==> tarring $$REALDATA + .env + .env.local -> $$TARBALL (root read; host-owned output)"; \
+	umask 077; \
+	docker run --rm \
+	  -v "$$REALDATA:/staging/data:ro" \
+	  -v "$(CURDIR)/.env:/staging/.env:ro" \
+	  -v "$(CURDIR)/.env.local:/staging/.env.local:ro" \
+	  alpine tar -cf - -C /staging data .env .env.local > "$$TMP"; \
+	tar -tf "$$TMP" >/dev/null || { echo "FAIL: tarball validation (tar -tf) failed"; exit 1; }; \
+	mv "$$TMP" "$$TARBALL"; \
+	SHA=$$(sha256sum "$$TARBALL" | cut -d' ' -f1); SIZE=$$(du -h "$$TARBALL" | cut -f1); \
+	echo "==> backup complete: $$TARBALL ($$SIZE)  sha256=$$SHA"; \
+	echo "==> restore: see docs/operations.md \"Disaster recovery\""

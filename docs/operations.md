@@ -166,6 +166,57 @@ Host: a CUDA GPU host with enough VRAM for the chat model weights plus the 12-sl
   ```
 - `DATA_ROOT=./data` resolves through the symlink, so no `.env` edit is needed.
 
+## Disaster recovery (backup + restore)
+
+`make backup` makes a full-state snapshot for restoring the stack on another host.
+
+### What `make backup` does
+
+| Step | Detail |
+|---|---|
+| Prechecks | Requires `.env` + `.env.local` + the resolved `DATA_ROOT` dir. |
+| Stop (if running) | Stops the stack only if it was running; a stopped stack stays stopped. |
+| Guard | Aborts if any container is still running after stop (no tarball written). |
+| Tar | `docker run --rm alpine tar` reads `DATA_ROOT` (resolved through the symlink) + `.env` + `.env.local` as **root**; the stream is written to a **host-owned** tarball. |
+| Validate + rename | `tar -tf` checks the archive, then it is atomically renamed into place. |
+| Restart (if it was running) | Restarts the stack only if it was running before backup. |
+| Output | `./.backups/knowledge-base_backup-<host>-<UTC>.tar` (mode `0600`; `.backups/` is `0700`, gitignored). Prints path, size, and `sha256`. |
+
+The archive contains the full `./data` tree (OWUI `webui.db` + its `-wal`/`-shm` sidecars, uploads, vector store; Neo4j graph + transaction logs) plus `.env` and `.env.local`. Nothing is excluded.
+
+### What the backup does NOT cover
+
+- [Ollama][ollama] and its pulled models (external; re-pull on the destination with `make pull-models`).
+- Docker images (re-pull with `make pull`, or rebuild built images).
+- `graphiti/config.yaml` and `caddy/Caddyfile` (tracked in git — they come with the repo clone).
+- The `./gdrive` mirror (re-derivable with `make gdrive-sync`).
+
+### Restore on another host
+
+The destination host needs a clone of this repo and the external prerequisites above.
+
+1. Copy the tarball into the destination repo root.
+2. If the stack is running there, stop it: `make stop`.
+3. Extract as **root** so the root-owned data files keep their ownership. Either:
+   ```
+   sudo tar -xf knowledge-base_backup-<host>-<ts>.tar -C <repo-root>
+   ```
+   or, with no sudo:
+   ```
+   docker run --rm -v "$PWD:/repo" alpine tar -xf /repo/knowledge-base_backup-<host>-<ts>.tar -C /repo
+   ```
+   Restore into an empty or freshly cloned checkout. Extracting over an existing `./data` leaves stale files that the backup did not contain.
+4. Edit host-specific values in the restored `.env`:
+   - `OLLAMA_HOST` — the destination Ollama address.
+   - `DATA_ROOT` — set to `./data` (the restored location), or move `./data` and repoint it.
+   - `KB_HOST`, `KB_HOST_PORT`, `KB_DOMAIN` — as needed for the destination network.
+5. Edit the restored `.env.local`:
+   - `HOST_UID` / `HOST_GID` — set to the destination operator's uid/gid (the kb-gateway runs as these).
+   - Keep `WEBUI_SECRET_KEY` identical so existing sessions/JWTs stay valid.
+   - Keep `OPENWEBUI_ADMIN_API_KEY` / `OPENWEBUI_USER_API_KEY` — they are bound to user ids, not email, so they survive the restore.
+   - Keep `NEO4J_PASSWORD` unchanged (it must match the restored Neo4j database credentials).
+6. Start the stack: `make start`.
+
 ## KB RAG indexing (gdrive → Open WebUI)
 
 The `gdrive` KB is indexed by **kb-gateway** (stateless, no sidecar). `make
