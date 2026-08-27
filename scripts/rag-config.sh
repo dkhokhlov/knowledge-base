@@ -27,7 +27,7 @@ set -a
 set +a
 
 python3 - <<'PY'
-import os, json, urllib.request, urllib.error, sys
+import os, json, re, urllib.request, urllib.error, sys
 
 # OWUI is fronted by Caddy at the KB_HOST root; reach its /api/* there.
 O = os.environ.get("KB_HOST") or ("http://localhost:%s" % os.environ.get("KB_HOST_PORT", "3000"))
@@ -100,6 +100,12 @@ print("      merge sanity: TOP_K=%s CHUNK_SIZE=%s" % (d.get("TOP_K"), d.get("CHU
 # it back. /embedding/update REPLACES the whole config, so we preserve
 # engine/model/batch/async/concurrent/key from the GET. Idempotent.
 OLLAMA_URL = (os.environ.get("OLLAMA_HOST") or "http://host.docker.internal:11434").rstrip("/")
+# OWUI uses this URL INSIDE its container, where localhost is the container's
+# own loopback (no Ollama). Apply the same localhost->host.docker.internal
+# translation the container entrypoint shim (scripts/ollama-host.sh) and
+# preflight apply, so OLLAMA_HOST=http://localhost:11434 (the shell convention)
+# writes http://host.docker.internal:11434 to the DB.
+OLLAMA_URL = re.sub(r'(https?://)(localhost|127\.0\.0\.1)([:/]|$)', r'\1host.docker.internal\3', OLLAMA_URL)
 
 st, txt = call("GET", "/api/v1/retrieval/embedding")
 if st != 200:

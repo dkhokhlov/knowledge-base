@@ -82,8 +82,14 @@ ok "Ollama has embedder 'nomic-embed-text'"
 # needs OWUI up. First boot (no webui.db / row absent) -> nothing to check.
 emb_warn=0
 if emb_msg="$(python3 - 2>&1 <<'PY'
-import sqlite3, json, os, sys
+import sqlite3, json, os, re, sys
 env_url = (os.environ.get("OLLAMA_HOST") or "http://host.docker.internal:11434").rstrip("/")
+# OWUI persists the CONTAINER-reachable URL (host.docker.internal, not
+# localhost) in webui.db, so apply the same localhost->host.docker.internal
+# translation the container entrypoint shim (scripts/ollama-host.sh) and
+# rag-config apply before comparing. Without this, a DB holding
+# host.docker.internal vs OLLAMA_HOST=localhost reads as a false STALE.
+env_url = re.sub(r'(https?://)(localhost|127\.0\.0\.1)([:/]|$)', r'\1host.docker.internal\3', env_url)
 db = "./data/openwebui/webui.db"
 if not os.path.exists(db):
     print("rag.ollama.base_url: webui.db not present (first boot) - nothing to sync")

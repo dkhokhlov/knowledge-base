@@ -93,6 +93,14 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:?LOG_LEVEL required in .env}
     volumes:
       - ./graphiti/bootstrap.py:/app/bootstrap.py:ro
+      - ./scripts/ollama-host.sh:/app/ollama-host.sh:ro
+    # Translate OLLAMA_HOST localhost/127.0.0.1 -> host.docker.internal before
+    # bootstrap.py reads OPENAI_BASE_URL. The image ENTRYPOINT is null, so this
+    # shim is safe to set; it execs "$@" = the command below. See the shim header
+    # (scripts/ollama-host.sh). OWUI is NOT wrapped here: it persists
+    # rag.ollama.base_url to its DB on first boot, so `make rag-config` writes the
+    # translated value to that DB instead.
+    entrypoint: ["/app/ollama-host.sh"]
     command: ["python", "/app/bootstrap.py"]
     healthcheck:
       # The uv-based image has no curl/wget; use the stdlib. /healthcheck only
@@ -360,9 +368,18 @@ services:
       - OCR_KEEP_ALIVE=${OCR_KEEP_ALIVE:?OCR_KEEP_ALIVE required in .env}
       - PORT=8080
       - LOG_LEVEL=${LOG_LEVEL:?LOG_LEVEL required in .env}
+    # Translate OLLAMA_HOST localhost/127.0.0.1 -> host.docker.internal before
+    # oursvc.py reads OLLAMA_BASE_URL. The Dockerfile ENTRYPOINT
+    # ["python","/app/oursvc.py"] is moved into command: below so the shim
+    # execs it. See the shim header (scripts/ollama-host.sh).
+    entrypoint: ["/app/ollama-host.sh"]
+    command: ["python", "/app/oursvc.py"]
+    volumes:
+      # Read-only code mount only (the service is stateless: config via env,
+      # temp files in /tmp, unlinked). No data mounts.
+      - ./scripts/ollama-host.sh:/app/ollama-host.sh:ro
     # No `ports:` — internal to owui_net only; OWUI reaches it as
-    # http://markitdown-ocr:8080. No data mounts: the service is stateless
-    # (config via env only; temp files are written to /tmp and unlinked).
+    # http://markitdown-ocr:8080.
     healthcheck:
       # python:3.13-slim has no curl/wget — use the stdlib (mirror graphiti at
       # compose.yml:93 and api-gateway at compose.yml:172).
