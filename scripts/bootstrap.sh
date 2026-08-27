@@ -149,6 +149,26 @@ if [ -n "${OCR_ENABLED:-}" ]; then
   printf '  persisted OCR_ENABLED=%s into .env (defines the compose profile)\n' "$OCR_ENABLED"
 fi
 
+# Persist `make bootstrap KB_HOST=... KB_HOST_PORT=... OLLAMA_HOST=...`
+# overrides into .env (force-set: replace an existing line, append if absent or
+# commented). This is the standard make-tunable override mechanism (see
+# operations.md "Variable precedence"); the isolated e2e (test-e2e-iso) uses it
+# to pin the e2e port + KB_HOST + OLLAMA_HOST so they survive test-e2e's internal
+# clean-all (rm .env) -> bootstrap (recreates .env from .env.template). Without
+# an override the existing .env value is the source of truth (idempotent, not
+# rewritten) -- the live operator, who sets these in the shell env, is
+# unaffected (no tunable -> no change).
+for _k in KB_HOST KB_HOST_PORT OLLAMA_HOST; do
+  _v="${!_k:-}"
+  [ -n "$_v" ] || continue
+  if grep -qE "^${_k}=" .env; then
+    sed -i "s|^${_k}=.*|${_k}=${_v}|" .env
+  else
+    printf '%s=%s\n' "$_k" "$_v" >> .env
+  fi
+  printf '  persisted %s=%s into .env\n' "$_k" "$_v"
+done
+
 chmod 600 .env.local
 printf '  set .env.local permissions to 0600\n'
 

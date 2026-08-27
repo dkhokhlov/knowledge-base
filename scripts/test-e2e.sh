@@ -30,6 +30,14 @@ test -f .env.local || { echo "REFUSING: no .env.local (no admin creds to stash) 
 _OCR_OVR="${OCR_ENABLED:-}"
 set -a; . ./.env; . ./.env.local; set +a
 if [ -n "$_OCR_OVR" ]; then export OCR_ENABLED="$_OCR_OVR"; fi
+# Capture KB_HOST / KB_HOST_PORT / OLLAMA_HOST from the just-sourced .env (after
+# the source, so the isolated e2e reads the persisted localhost:<E2E_PORT>
+# values, not the empty shell env). They are re-forwarded to the internal
+# `make bootstrap` below as make-tunables, so the freshly recreated .env keeps
+# the e2e port + host + Ollama URL instead of reverting to the .env.template
+# default. For a bare in-place `make test-e2e` these are the live stack values
+# (the .env live default + the operator's shell) -- standalone is unchanged.
+_E2E_KB_HOST="${KB_HOST:-}"; _E2E_KB_HOST_PORT="${KB_HOST_PORT:-}"; _E2E_OLLAMA_HOST="${OLLAMA_HOST:-}"
 [ -n "${OPENWEBUI_FIRST_USER:-}" ] && [ -n "${OPENWEBUI_FIRST_PASSWORD:-}" ] \
   || { echo "REFUSING: OPENWEBUI_FIRST_USER/PASSWORD not set in .env.local (admin account) — fill them first" >&2; exit 1; }
 
@@ -40,7 +48,11 @@ trap 'rm -f "$stash"' EXIT
 
 make clean-all
 unset GDRIVE_KB_ID
-make bootstrap
+# Re-forward the captured host/port/Ollama values as make-tunables so the
+# recreated .env keeps them (bootstrap.sh force-persists them into .env). The
+# values live in this shell across clean-all (a child process); empty values are
+# skipped by bootstrap, so passing an unset one is a no-op.
+make bootstrap KB_HOST="$_E2E_KB_HOST" KB_HOST_PORT="$_E2E_KB_HOST_PORT" OLLAMA_HOST="$_E2E_OLLAMA_HOST"
 ./scripts/e2e-restore-creds.sh "$stash"
 # Pull the OCR vision model before preflight (preflight hard-fails on a missing
 # OCR model when OCR_ENABLED=true). Pull only the OCR model, NOT full
