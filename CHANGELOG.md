@@ -12,6 +12,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Nothing yet.
+
+### Fixed
+
+- Nothing yet.
+
+## [v1.6.0] — 2026-08-26
+
+### Changed
+
 - **Removed the empty `id` field from `retrieve`/`retrieve-projects` hits
   (breaking).** OWUI's `/api/v1/retrieval/query/collection` returns no Chroma
   `ids` array (verified for hybrid and pure-vector paths), so every hit carried
@@ -34,6 +44,25 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Orphan-vector cleanup on file delete (Open WebUI custom-image patch 4).**
+  OWUI inserts a file's KB-collection vectors during `process_file` **before**
+  the KB-link step (`add_file_to_knowledge`). If the link fails (sqlite
+  "database is locked" under parallel contention, or a transport error), the
+  file is marked `failed` but its vectors are already committed — an orphan with
+  no `knowledge_file` membership row. The `DELETE /api/v1/files/{id}` route
+  cleaned KB vectors only for KBs the file was a **member** of, so a failed-link
+  orphan's vectors were never removed; the next sync re-trigger re-uploaded the
+  same logical file, recomputed the path-aware dedup hash, found the orphan's
+  vectors already in the collection, and hit `DUPLICATE_CONTENT` — failing
+  forever (the deterministic "Duplicate content detected" stuck-failures).
+  The route now also cleans the collection named by the upload metadata
+  `meta.data.knowledge_id` (delete by `file_id`, and by `hash` when present),
+  guarded so it is a no-op for member KBs. New build-time patch
+  `open-webui/apply_vector_cleanup_on_delete.py` (see `open-webui/PATCH.md`
+  patch 4); no KB reset needed (only the delete path changed; existing vectors
+  untouched). Image tag bumped to
+  `ghcr.io/dkhokhlov/open-webui:0.11.0-pathdedup-idem-mtime-orphanclean` (the
+  prior `…-mtime` tag held patches 1–3 only).
 - **Propagated the `retrieve` name-resolution doc to the codex/opencode/pi
   SKILL.md copies.** The KB-id mis-mapping fix (name resolution + provenance)
   had only updated `claude/SKILL.md`; the other three copies still instructed

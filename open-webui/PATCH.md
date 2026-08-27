@@ -1,15 +1,22 @@
-# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime
+# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete
 
-This directory builds a thin-overlay custom Open WebUI image that applies three
+This directory builds a thin-overlay custom Open WebUI image that applies four
 build-time patches to the backend. Patches 1–2 target the **2b churn**: the
 gdrive-indexer (oikb) re-uploading files every sync cycle. Patch 3 propagates
 the source file mtime into chunk metadata so a retrieve hit can report it.
+Patch 4 makes file-delete clean failed-link orphan vectors from the KB
+collection, closing the root cause of the stuck `DUPLICATE_CONTENT` re-triggers.
 
 - **Patch 1 — path-aware dedup hash** (`retrieval.py`): OWUI rejected same-content
   files at different paths as `DUPLICATE_CONTENT`; oikb re-uploaded them every cycle.
 - **Patch 2 — upload idempotency** (`files.py`): OWUI minted a new uuid + on-disk blob
   + `FileModel` row on every upload; failed-to-index files (never members) were
   re-uploaded every cycle and never cleaned up, so disk grew without bound.
+- **Patch 4 — orphan-vector cleanup on delete** (`files.py`): the file-delete route
+  cleaned KB vectors only for member KBs; a failed-link orphan (vectors inserted
+  before the link step, no membership row) left its vectors behind, so the next
+  re-upload hit `DUPLICATE_CONTENT` and failed forever. Delete now also cleans the
+  collection named by `meta.data.knowledge_id`.
 
 ## Problem
 
@@ -41,10 +48,12 @@ uploads, STT, `/file/add`), the hash becomes
 `sha256("/" + filename + "\n" + text)` — filename-aware, a safe improvement
 over pure-text; no caller breaks.
 
-This is a **dedup-policy** fix only. The separate upload-status/lifecycle
-defect (HTTP 200 returned before processing/linking succeeds; failed-link
-orphans not cleaned for local storage) is **deferred** — see CHANGELOG. The
-dedup fix alone stops the duplicate-content churn (the disk-growth driver).
+This is a **dedup-policy** fix only. The separate failed-link-orphan defect
+(vectors inserted before the link step are not cleaned when the link fails
+and the file is deleted) is addressed by **patch 4** (orphan-vector cleanup on
+delete). The HTTP-200-before-processing part of the lifecycle defect remains
+out of scope. The dedup fix stops the duplicate-content churn; patch 4 stops
+the orphan-vector recurrence.
 
 ## What the patch changes (2 sites in `retrieval.py`)
 
@@ -355,3 +364,130 @@ embedded without `mtime` and keep their old metadata until re-indexed. A full
 re-OCR (`make gdrive-index INDEX_ALL=1`) repopulates every chunk with `mtime`
 so the field is present on all hits. Without it, hits on pre-patch chunks have
 `mtime == None` (the wrapper surfaces `None`, not a missing key).
+
+---
+
+# Patch 4 — orphan-vector cleanup on delete (`files.py`)
+
+## Problem (patch 4)
+
+OWUI inserts a file's KB-collection vectors during `process_file` **before**
+the KB-link step (`add_file_to_knowledge`). The per-upload pipeline is:
+
+```
+extract -> embed (insert vectors into collection, with dedup-hash check)
+       -> link  (add_file_to_knowledge: write the knowledge_file membership row)
+```
+
+If the link step fails (sqlite "database is locked" under parallel contention,
+or a transport error), the file is marked `failed` but its vectors are already
+committed in the collection. The file has **no `knowledge_file` membership
+row** — it is not a KB member.
+
+The `DELETE /api/v1/files/{id}` route (`delete_file_by_id`) cleans a file's
+KB-collection vectors, but only for KBs the file is a **member** of
+(`Knowledges.get_knowledges_by_file_id`). A failed-link orphan is not a member,
+so that loop is empty and its vectors are never removed. The route then
+deletes the FileModel + blob, leaving the vectors behind, keyed by a
+now-deleted `file_id`.
+
+On the next sync re-trigger, oikb deletes the failed file (this route) and
+re-uploads. The re-upload extracts, recomputes the path-aware dedup hash
+(patch 1), and finds the orphan's vectors already in the collection by `hash`
+(`filter={'hash': metadata['hash']}` at `retrieval.py` ~1653) ->
+`DUPLICATE_CONTENT` -> the file fails **forever**. This is the root cause of
+the deterministic "Duplicate content detected" stuck-failures: the orphan
+vectors block every re-upload of the same logical file.
+
+Patch 2's reclaim path does **not** cause this: it calls the pure-row
+`Files.delete_file_by_id` model method only on **stale** orphans (same logical
+file, different `file_hash`); same-`file_hash` failed-link orphans are
+**reused** (returned as `_existing`), not deleted, so no vectors are orphaned
+by that path. (Patch 2's doc note "Orphans have no KB link / no vectors" was
+correct for the extraction-failure orphans it targeted, but not for the
+failed-link orphans patch 4 addresses.)
+
+Chroma is not transactional across stores: `webui.db` (FileModel + link),
+`chroma.sqlite3` (embedding metadata), and the per-collection HNSW binary
+(vectors) are three independent stores with no distributed transaction. No
+rollback reaches the vectors when the link in `webui.db` fails. The only safe
+prevention is to make the destructive path (file-delete) clean its vectors
+actively — which is what this patch does.
+
+## Fix (patch 4)
+
+After the member-loop vector cleanup in the `DELETE /api/v1/files/{id}` route,
+also clean the collection named by the upload metadata
+`file.meta['data']['knowledge_id']` (the KB the file was uploaded to), deleting
+by `file_id` (and by `hash` when present). This catches the failed-link
+orphan's vectors that the member loop skipped.
+
+`file.meta['data']['knowledge_id']` is set by the upload handler from oikb's
+metadata (verified present on every gdrive-uploaded file). The block is
+guarded by `_kid not in {k.id for k in knowledges}` so it is a no-op when the
+file was a member of that KB (the member loop already cleaned it).
+
+## What patch 4 changes (1 site in `files.py`)
+
+`apply_vector_cleanup_on_delete.py` inserts one block in the
+`delete_file_by_id` route, between the member-loop `except` tail and the
+`result = await Files.delete_file_by_id(id, db=db)` line (8-space indent).
+
+```python
+# before
+            except Exception as e:
+                log.debug(f'KB embedding cleanup for {knowledge.id}: {e}')
+
+        result = await Files.delete_file_by_id(id, db=db)
+```
+
+```python
+# after
+            except Exception as e:
+                log.debug(f'KB embedding cleanup for {knowledge.id}: {e}')
+
+        # Clean orphan vectors: a file that failed the KB-link step keeps
+        # its embeddings in the collection it was uploaded to (embed runs
+        # before link) but has no knowledge_file membership row, so the
+        # member loop above skipped it. Derive the target collection from
+        # the upload metadata (meta.data.knowledge_id) and delete by file_id;
+        # also by hash when present. No-op if the file was a member of that
+        # KB (the member loop already cleaned it).
+        _kid = ((file.meta or {}).get('data') or {}).get('knowledge_id')
+        if _kid and _kid not in {k.id for k in knowledges}:
+            try:
+                await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=_kid, filter={'file_id': id})
+                if file.hash:
+                    await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=_kid, filter={'hash': file.hash})
+            except Exception as e:
+                log.debug(f'Orphan KB embedding cleanup for {_kid}: {e}')
+
+        result = await Files.delete_file_by_id(id, db=db)
+```
+
+The anchor (the `except` tail + blank line + `result =` line) asserts exactly
+once. `ASYNC_VECTOR_DB_CLIENT`, `file` (the FileModel, with `.meta` and
+`.hash`), `id`, `knowledges`, and `log` are all in scope in the route. No new
+imports, no other file touched.
+
+## What patch 4 does NOT do
+
+- It does not change the pure-row `Files.delete_file_by_id` model method (it
+  never cleaned vectors; patch 2's reclaim relies on that for vector-less
+  stale orphans).
+- It does not add a dedup-on-collision "reuse" path (an alternative, more
+  efficient fix that avoids re-extraction on retry). Reuse was rejected: it
+  changes OWUI dedup semantics globally and needs fragile re-link surgery.
+  Cleaning on delete is the simpler, lower-risk cure. See CHANGELOG.
+- It does not purge pre-existing legacy orphan vectors. The one-time purge of
+  the 7224 legacy orphans was done out-of-band via the Chroma
+  `collection.delete(ids=...)` API before this patch shipped. After this
+  patch, failed-link re-triggers no longer create new orphans.
+
+## No KB reset on cutover (patch 4)
+
+No re-index needed. The patch only changes the file-**delete** path; existing
+vectors and memberships are untouched. It takes effect on the next
+`docker compose build openwebui` + restart, and prevents **future** orphan
+accumulation. Legacy orphans (if any remain) are unaffected and require the
+one-time API purge, not a re-index.
