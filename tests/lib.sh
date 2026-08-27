@@ -58,15 +58,23 @@ kb_host() {
 }
 
 # Bail early if the stack is not up and healthy. Exits with status 2.
+# Retries for up to ~10s: Caddy returns a transient 502 when an upstream
+# (OWUI/api-gateway) is briefly unavailable -- e.g. under the async gdrive
+# extraction/embedding drain load right after `make gdrive-index`. A single
+# non-retried probe would flake on that blip; a genuinely-down stack still
+# fails after the retries.
 require_stack_up() {
-  local h code
+  local h code try
   h="$(kb_host)"
   code=$(http_code "$h/health" --connect-timeout 2)
-  if [ "$code" != "200" ]; then
-    printf 'Stack not healthy (KB_HOST=%s /health=%s). Run: make start && make health\n' \
-      "$h" "$code" >&2
-    exit 2
-  fi
+  for try in 1 2 3 4 5; do
+    [ "$code" = 200 ] && return 0
+    sleep 2
+    code=$(http_code "$h/health" --connect-timeout 2)
+  done
+  printf 'Stack not healthy (KB_HOST=%s /health=%s). Run: make start && make health\n' \
+    "$h" "$code" >&2
+  exit 2
 }
 
 # Print a summary and exit non-zero if anything failed. Call once at script end.
