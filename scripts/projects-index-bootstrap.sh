@@ -8,14 +8,16 @@
 # (KB.user.email == account; search filters by KB owner). OWUI gates KB
 # creation on the workspace.knowledge permission, which is FALSE by default in
 # this deployment. This script enables it once (admin, idempotent) and verifies
-# with a disposable user-key probe KB.
+# with a disposable user-key probe KB. It also enables
+# sharing.public_knowledge so a user key can grant public read (user:*) on the
+# project KBs it creates, letting every provisioned user retrieve every project
+# KB (the chosen public-read model).
 #
-#   1. GET /api/v1/users/default/permissions (admin); if workspace.knowledge is
-#      already true, skip.
-#   2. Else flip workspace.knowledge=true and POST the FULL body back (replace,
-#      not merge — like the access-grants gotcha). The agent user record has no
-#      stored per-user permissions field, so flipping the default propagates to
-#      the existing agent user.
+#   1. GET /api/v1/users/default/permissions (admin); ensure both
+#      workspace.knowledge and sharing.public_knowledge are true. POST the FULL
+#      body back (replace, not merge — like the access-grants gotcha) only if a
+#      flag changed. User records have no per-user permissions field, so flipping
+#      the default propagates to existing users (no restart).
 #   3. Verify: create a disposable probe KB with the USER key. 403 means the
 #      enable did not take (FAIL loudly). 200/201/409 all mean KB creation is
 #      permitted (409 = a leftover probe from a prior run; cleaned up). Delete
@@ -61,21 +63,30 @@ def call(method, path, body=None, token=None):
     except urllib.error.HTTPError as e:
         return e.code, (e.read().decode(errors="replace") or "")
 
-# --- 1. read default permissions; is workspace.knowledge already on? ----------
+# --- 1. read default permissions; ensure workspace.knowledge AND ------------
+#     sharing.public_knowledge are on. Both gate the projects-memory flow:
+#     workspace.knowledge lets a user key CREATE a project KB; public_knowledge
+#     lets the owner grant public read (user:*) so every user can retrieve it.
+#     POST replaces the FULL body, so set both flags on the fetched dict and
+#     post it back only if something changed (idempotent).
 st, txt = call("GET", "/api/v1/users/default/permissions")
 if st != 200:
     sys.exit("FAIL  GET /api/v1/users/default/permissions -> HTTP %s: %s" % (st, txt[:300]))
 perms = json.loads(txt)
-wk = (perms.get("workspace") or {}).get("knowledge", False)
-if wk:
-    print("OK    workspace.knowledge already enabled (default permissions)")
-else:
-    # --- 2. flip workspace.knowledge=true; POST the FULL body back (replace) -
+changed = []
+if not (perms.get("workspace") or {}).get("knowledge", False):
     perms.setdefault("workspace", {})["knowledge"] = True
+    changed.append("workspace.knowledge")
+if not (perms.get("sharing") or {}).get("public_knowledge", False):
+    perms.setdefault("sharing", {})["public_knowledge"] = True
+    changed.append("sharing.public_knowledge")
+if changed:
     st, txt = call("POST", "/api/v1/users/default/permissions", perms)
     if st != 200:
         sys.exit("FAIL  POST /api/v1/users/default/permissions -> HTTP %s: %s" % (st, txt[:300]))
-    print("OK    enabled workspace.knowledge (default permissions)")
+    print("OK    enabled %s (default permissions)" % ", ".join(changed))
+else:
+    print("OK    workspace.knowledge + sharing.public_knowledge already enabled (default permissions)")
 
 # --- 3. verify with a disposable user-key probe KB -----------------------------
 # Clean up any leftover probe from a prior run (admin can delete any KB).

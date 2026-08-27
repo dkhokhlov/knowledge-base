@@ -293,8 +293,9 @@ admin key is used internally for the scan).
 ### Provisioning (one-time, after `make api-keys`)
 
 `make gdrive-index-bootstrap` creates the `gdrive` KB (find-or-create), grants
-the agent user read access (merged with existing grants so admin-added group
-grants are preserved), and writes `GDRIVE_KB_ID` to `.env.local`. It is
+public read (`user:*`, so every authenticated user can retrieve/RAG it; merged
+with existing grants so admin-added group grants are preserved), and writes
+`GDRIVE_KB_ID` to `.env.local`. It is
 idempotent. It does NOT start a sidecar (there is none). The agent user id is
 resolved from `OPENWEBUI_USER_API_KEY` via `GET /api/v1/auths/` (the same
 identity-from-key pattern the api-gateway uses — no email env var needed); the
@@ -477,13 +478,16 @@ OWUI-KB write path). Manual/on-demand only: no daemon, no schedule.
 
 ### Provisioning (one-time, after `make api-keys`)
 
-`make projects-bootstrap` enables the `workspace.knowledge` permission (off by
-default; OWUI gates KB creation on it). It reads the default permissions, flips
-`workspace.knowledge=true`, POSTs the full body back (replace, not merge), and
-verifies with a disposable user-key probe KB (create + delete). The agent user
-record has no per-user permission override, so flipping the default propagates
-to it. Run once; re-runs are a no-op. No `*_KB_ID` is written — `index-projects`
-derives KB names and lists KBs at run time.
+`make projects-bootstrap` enables two default-user permissions (both off by
+default): `workspace.knowledge` (OWUI gates KB creation on it) and
+`sharing.public_knowledge` (lets a non-admin owner grant public read on the KBs
+it creates — used by `index-projects` below). It reads the default permissions,
+sets both flags, POSTs the full body back (replace, not merge) only if one
+changed, and verifies KB creation with a disposable user-key probe KB (create +
+delete). User records have no per-user permission override, so flipping the
+default propagates to existing users (no restart). Run once; re-runs are a
+no-op. No `*_KB_ID` is written — `index-projects` derives KB names and lists
+KBs at run time.
 
 ### Indexing
 
@@ -493,6 +497,15 @@ derives KB names and lists KBs at run time.
 `project` (encoded dir), `project_path` (decode; authoritative when the path
 exists on disk), `repo` (git repo name), `account` (caller email),
 `source_relpath` (`memory/<file>`); `repo` also rides in the KB `description`.
+
+On first create of a project KB the caller (user key, owner) grants public read
+(`user:*`) on it via `POST /knowledge/{id}/access/update`, so every
+authenticated user can retrieve every project KB. This needs
+`sharing.public_knowledge` (set by `make projects-bootstrap`); if the grant
+fails the KB is still created and indexed for the owner — run
+`make kb-public-read` to backfill visibility. The KB lookup matches only KBs the
+caller can write (`write_access=true`), so a same-name KB owned by another user
+(now visible under public read) is ignored and a new one is created instead.
 
 Every run is a full snapshot: all `memory/*.md` are uploaded (OWUI idempotency
 reuses unchanged files, no re-extract). A **modified** file (sha256 differs) is
@@ -582,7 +595,8 @@ dependency is down.
 | `ocr-config` | re-assert the OWUI external-extraction keys (engine + URL + API key); auto-set by `make api-keys` when `OCR_ENABLED=true`; re-run after a DB reset; no-ops (exit 0) when `OCR_ENABLED!=true` |
 | `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./gdrive-exclude.conf` (`[<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections; then POSTs `/index` to reconcile the tree into the KB (`--index-all` for a full re-index; `--retry-pending` to re-trigger stalled pending; fail-fast on `ok=false`) |
 | `gdrive-index` | POST `/index` alone (no rclone): reconcile `./gdrive` into the KB via api-gateway (admin; incremental). `INDEX_ALL=1` for a full re-index. `RETRY_PENDING=1` also re-triggers stalled `pending` files (default retries only `failed`). `SCOPE_PATH=<relpath>` indexes only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path — see "Subpath reconcile" above) |
-| `gdrive-index-bootstrap` | create the `gdrive` KB, grant the agent user read, write `GDRIVE_KB_ID` to `.env.local` (run after `make api-keys`; idempotent; no sidecar) |
+| `gdrive-index-bootstrap` | create the `gdrive` KB, grant public read (`user:*`), write `GDRIVE_KB_ID` to `.env.local` (run after `make api-keys`; idempotent; no sidecar) |
+| `kb-public-read` | grant public read (`user:*`) on EVERY knowledge base + enable `sharing.public_knowledge` so all authenticated users read all KBs (admin). One-time backfill for an already-running stack; re-run as a safety net for KBs created outside the flows (e.g. via the OWUI UI). Idempotent |
 | `gdrive-status` | GET `/status` (api-gateway), pretty JSON (indent=2): `indexed_files` (completed only; `len == indexed_count`), `pending_files`, `failed_files` (last list), then `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`. Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |

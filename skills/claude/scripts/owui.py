@@ -221,13 +221,29 @@ def _content_ext(ctype):
 
 
 def cmd_file(base, key, a):
-    # Fetch directly (not via call()) so we keep the Content-Type and can handle
-    # a binary body. The /content endpoint returns the RAW file for binary
-    # formats (PDF/DOCX/PPTX/XLSX/images), not the extracted text — so the old
-    # call() path (r.read().decode()) raised UnicodeDecodeError on every PDF.
-    # Text files decode and print; binary files are saved to a temp file with a
-    # note pointing the caller at an extractor. The extracted (searchable) text
-    # for a binary file is also available via `retrieve <kb> "<query>"`.
+    # Print a file's TEXT content. Default: GET /files/{id}/data/content returns
+    # the EXTRACTED text OWUI produced at index time (stored in
+    # file.data['content']) — for PDF/Office/image files this is the full
+    # extracted text, so the caller needs no client-side extractor. Access is
+    # gated by file read (a KB read grant covers the files in that KB). With
+    # --raw, skip the extracted text and fetch GET /files/{id}/content (the
+    # ORIGINAL bytes) instead.
+    if not getattr(a, "raw", False):
+        code, txt = call(base, key, "GET", "/api/v1/files/%s/data/content" % a.id)
+        if code == 200:
+            try:
+                content = (json.loads(txt) or {}).get("content", "")
+            except Exception:
+                content = ""
+            if content:
+                sys.stdout.write(content if content.endswith("\n") else content + "\n")
+                return
+    # Fallback: GET /files/{id}/content returns the ORIGINAL bytes. Text files
+    # decode and print; binary files (no extracted text — e.g. extraction
+    # pending or a raw-only upload) are saved to a temp file with a note. Fetch
+    # directly (not via call()) to keep the Content-Type and handle a binary
+    # body (call()'s r.read().decode() would raise UnicodeDecodeError on a PDF).
+    # The extracted, searchable text is also available via `retrieve <kb> "<q>"`.
     url = base + "/api/v1/files/%s/content" % a.id
     req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key}, method="GET")
     try:
@@ -244,12 +260,14 @@ def cmd_file(base, key, a):
         fd, path = tempfile.mkstemp(prefix="owui-file-", suffix=ext)
         with os.fdopen(fd, "wb") as f:
             f.write(raw)
-        sys.exit("NOTE  file %s is binary (Content-Type: %s, %d bytes); the /content\n"
-                 "  endpoint returns the RAW file, not extracted text. Saved to: %s\n"
-                 "  PDF -> pdftotext -layout %s -  |  Office/image -> `retrieve <kb> \"<query>\"`\n"
-                 "  for the extracted text chunks, or open the saved file."
-                 % (a.id, ctype or "?", len(raw), path, path))
-    sys.stdout.write(txt if not txt.endswith("\n") else txt)
+        sys.stderr.write("NOTE  file %s has no extracted text (Content-Type: %s, %d bytes); the\n"
+                         "  /content endpoint returns the RAW file. Saved to: %s\n"
+                         "  Use `retrieve <kb> \"<query>\"` for the extracted text chunks, or open the saved file.\n"
+                         % (a.id, ctype or "?", len(raw), path))
+        if getattr(a, "raw", False):
+            sys.stderr.write("  (fetched with --raw)\n")
+        return  # not a failure: file saved + guidance emitted
+    sys.stdout.write(txt if txt.endswith("\n") else txt + "\n")
 
 
 # --- projects-memory surface (user-key writes to OWNED KBs) ------------------
@@ -468,7 +486,12 @@ def cmd_index_projects(base, key, a):
         return
     d = jget(base, key, "GET", "/api/v1/knowledge/")
     items = d.get("items", []) if isinstance(d, dict) else d
-    kb_by_name = {k.get("name", ""): k for k in items}
+    # Match only KBs the caller can WRITE (owner or write grant). Public-read
+    # KBs (user:*) are visible to everyone; without this filter a same-name KB
+    # owned by another user would be selected and uploads to it would 403. A
+    # non-writable same-name KB is ignored and a new one is created instead
+    # (KB names are not unique).
+    kb_by_name = {k.get("name", ""): k for k in items if k.get("write_access")}
     touched = []  # (kb_id, kb_name) with uploads, for --wait
     for encoded, mem in projects:
         project_path = _decode_project_path(encoded)
@@ -495,6 +518,22 @@ def cmd_index_projects(base, key, a):
                 continue
             kb_id = json.loads(txt).get("id")
             pentry["kb_id"] = kb_id
+            # Grant public read (user:*) so every authenticated user can
+            # retrieve this project KB. The caller owns it (their user key
+            # created it), so access/update is permitted once
+            # sharing.public_knowledge is enabled (make projects-bootstrap or
+            # make kb-public-read). access/update REPLACES the grant set; a
+            # fresh KB has no grants, so the public-read grant alone is correct
+            # (owner access is implicit). On failure, log and continue — the
+            # owner still gets their KB, and `make kb-public-read` backfills
+            # visibility.
+            gcode, gtxt = call(base, key, "POST",
+                "/api/v1/knowledge/%s/access/update" % kb_id,
+                {"access_grants": [{"principal_type": "user",
+                                    "principal_id": "*", "permission": "read"}]})
+            if gcode != 200:
+                pentry["errors"].append("public-read grant -> HTTP %s: %s"
+                                        % (gcode, (gtxt or "")[:200]))
         src = {}
         for fn in sorted(os.listdir(mem)):
             p = os.path.join(mem, fn)
@@ -686,7 +725,9 @@ def main():
     sp = sub.add_parser("rag", help="RAG chat grounded on one or more KBs (proxied by api-gateway /memory/rag)")
     sp.add_argument("question"); sp.add_argument("--kb", action="append", default=[])
 
-    sp = sub.add_parser("file", help="print a file's text content"); sp.add_argument("id")
+    sp = sub.add_parser("file", help="print a file's extracted text content"); sp.add_argument("id")
+    sp.add_argument("--raw", action="store_true",
+                    help="fetch the ORIGINAL bytes (/content) instead of the extracted text")
 
     sp = sub.add_parser("index-projects",
                         help="index ~/.claude/projects/*/memory/*.md into OWUI KBs (one KB per project, user key)")

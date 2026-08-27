@@ -4,9 +4,11 @@
 Covers every report/status/retrieve subcommand of skills/claude/scripts/{owui.py,
 kb_gateway.py}: asserts the success path prints valid JSON with the expected
 top-level schema, and (for the agent-facing scripts) that the JSON is COMPACT
-(single line, no indent — whitespace costs an agent tokens). `rag` and `file`
-are asserted to stay raw text. No stack required: the HTTP layer is monkeypatched
-(unittest.mock), and cmd_file's direct urllib.request.urlopen call is patched too.
+(single line, no indent — whitespace costs an agent tokens). `rag` stays raw
+text; `file` defaults to the EXTRACTED text (GET /files/{id}/data/content) and
+has a `--raw` escape hatch (GET /files/{id}/content, original bytes). No stack
+required: the HTTP layer is monkeypatched (unittest.mock), and cmd_file's
+owui.call + direct urllib.request.urlopen calls are patched too.
 
 Run:  python3 tests/test_output_json.py -v   (or: make test-output)
 """
@@ -241,41 +243,24 @@ class OwuiTests(_Assertions):
         self.assertNotIn("model", body)
         self.assertNotIn("files", body)  # kb empty -> no files key
 
-    def test_file_text_is_raw(self):
-        # file bypasses owui.call() -> urllib.request.urlopen directly.
-        class _Resp:
-            def __init__(self, body, ctype):
-                self._b = body
-                self.headers = {"Content-Type": ctype}
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-            def read(self): return self._b
-        urlopen = mock.Mock(return_value=_Resp(b"hello world text", "text/plain"))
-        ns = mock.Mock(id="f1")
-        out = _run([(owui.urllib.request, "urlopen", urlopen)], owui.cmd_file, ns)
-        self.assertEqual(out, "hello world text")  # raw, not JSON
+    def test_file_default_returns_extracted_text(self):
+        # Default: GET /files/{id}/data/content -> the EXTRACTED text OWUI stored
+        # at index time (file.data['content']). Bypasses urlopen entirely; one
+        # owui.call, no raw-bytes fetch. Asserts the URL + a trailing newline.
+        ns = mock.Mock(id="f1", raw=False)
+        call = mock.Mock(return_value=(200, json.dumps({"content": "hello world text"})))
+        urlopen = mock.Mock(
+            side_effect=AssertionError("urlopen must not be called without --raw"))
+        out = _run([(owui, "call", call), (owui.urllib.request, "urlopen", urlopen)],
+                   owui.cmd_file, ns)
+        self.assertEqual(out, "hello world text\n")  # trailing newline added
+        self.assertEqual(call.call_args.args[:4],
+                         (BASE, KEY, "GET", "/api/v1/files/f1/data/content"))
 
-    def test_file_binary_fallback_exits(self):
-        # Undecodable bytes -> save to temp + sys.exit("NOTE ...") (prose, non-JSON).
-        class _Resp:
-            def __init__(self, body, ctype):
-                self._b = body
-                self.headers = {"Content-Type": ctype}
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-            def read(self): return self._b
-        urlopen = mock.Mock(return_value=_Resp(b"\xff\xfe\x00\x01", "application/pdf"))
-        ns = mock.Mock(id="f1")
-        buf = io.StringIO()
-        stack = contextlib.ExitStack()
-        stack.enter_context(mock.patch.object(owui.urllib.request, "urlopen", new=urlopen))
-        with stack, contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
-            owui.cmd_file(BASE, KEY, ns)
-
-    def test_file_hits_content_url_with_bearer(self):
-        # The raw-download endpoint: GET /api/v1/files/{id}/content with the
-        # Bearer key. Proves the skill targets the right URL + auth (the core
-        # "download a raw file" capability), not just the decode branch.
+    def test_file_raw_flag_uses_content_endpoint(self):
+        # --raw skips the extracted-text endpoint and fetches the ORIGINAL bytes
+        # via GET /files/{id}/content (urlopen, bearer auth). Text bytes decode
+        # and print verbatim. Proves the "download a raw file" capability + auth.
         class _Resp:
             def __init__(self, body, ctype):
                 self._b = body
@@ -288,9 +273,11 @@ class OwuiTests(_Assertions):
             captured["req"] = req
             return _Resp(b"plain text body", "text/plain")
         urlopen = mock.Mock(side_effect=_urlopen)
-        ns = mock.Mock(id="f1")
-        out = _run([(owui.urllib.request, "urlopen", urlopen)], owui.cmd_file, ns)
-        self.assertEqual(out, "plain text body")  # raw text, not JSON
+        call = mock.Mock(side_effect=AssertionError("call() must not be called with --raw"))
+        ns = mock.Mock(id="f1", raw=True)
+        out = _run([(owui, "call", call), (owui.urllib.request, "urlopen", urlopen)],
+                   owui.cmd_file, ns)
+        self.assertEqual(out, "plain text body\n")
         req = captured["req"]
         self.assertEqual(req.get_method(), "GET")
         self.assertEqual(req.full_url, BASE + "/api/v1/files/f1/content")
@@ -299,10 +286,36 @@ class OwuiTests(_Assertions):
         hdrs = {k.lower(): v for k, v in req.header_items()}
         self.assertEqual(hdrs.get("authorization"), "Bearer " + KEY)
 
+    def test_file_binary_fallback_saves_and_exits_zero(self):
+        # No extracted text (empty /data/content) + undecodable raw bytes -> save
+        # to a temp file + NOTE on stderr, and the command RETURNS (exit 0): not a
+        # hard failure (the agent can open the saved file or `retrieve` chunks).
+        class _Resp:
+            def __init__(self, body, ctype):
+                self._b = body
+                self.headers = {"Content-Type": ctype}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return self._b
+        urlopen = mock.Mock(return_value=_Resp(b"\xff\xfe\x00\x01", "application/pdf"))
+        call = mock.Mock(return_value=(200, json.dumps({"content": ""})))
+        ns = mock.Mock(id="f1", raw=False)
+        buf, err = io.StringIO(), io.StringIO()
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(owui, "call", new=call))
+        stack.enter_context(mock.patch.object(owui.urllib.request, "urlopen", new=urlopen))
+        with stack, contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            ret = owui.cmd_file(BASE, KEY, ns)
+        self.assertIsNone(ret)                 # no SystemExit (exit 0)
+        self.assertEqual(buf.getvalue(), "")  # nothing on stdout
+        note = err.getvalue()
+        self.assertIn("application/pdf", note)
+        os.unlink(note.split("Saved to: ", 1)[1].split()[0])  # clean temp file
+
     def test_file_binary_saves_raw_bytes_and_notes_path(self):
-        # Binary body -> the exact raw bytes are written to a temp file AND the
-        # NOTE names that path + the content-type + size (a real download, not
-        # just an exit). Cleans up the temp file it created.
+        # No extracted text + binary body -> the exact raw bytes are written to a
+        # temp file AND the NOTE (on stderr) names that path + content-type + size
+        # (a real download, not just a message). Cleans up the temp file.
         raw = b"\x89PNG\r\n\x1a\n\x00\x01\x02\xff"  # 12 bytes, not utf-8 decodable
         class _Resp:
             def __init__(self, body, ctype):
@@ -314,13 +327,16 @@ class OwuiTests(_Assertions):
         def _urlopen(req, timeout=None):
             return _Resp(raw, "image/png")
         urlopen = mock.Mock(side_effect=_urlopen)
-        ns = mock.Mock(id="f9")
-        buf = io.StringIO()
+        call = mock.Mock(return_value=(200, json.dumps({"content": ""})))
+        ns = mock.Mock(id="f9", raw=False)
+        buf, err = io.StringIO(), io.StringIO()
         stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(owui, "call", new=call))
         stack.enter_context(mock.patch.object(owui.urllib.request, "urlopen", new=urlopen))
-        with stack, contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as cm:
-            owui.cmd_file(BASE, KEY, ns)
-        note = cm.exception.code
+        with stack, contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            ret = owui.cmd_file(BASE, KEY, ns)
+        self.assertIsNone(ret)  # exit 0, not a SystemExit
+        note = err.getvalue()
         self.assertIn("image/png", note)
         self.assertIn("%d bytes" % len(raw), note)
         path = note.split("Saved to: ", 1)[1].split()[0]

@@ -117,7 +117,8 @@ python3 "$S" kb <kb-id>                 # one KB's metadata
 python3 "$S" search-kbs "main"         # find a KB by name
 python3 "$S" retrieve <kb-name-or-id> "XSL streaming"   # raw chunks, you synthesize (default)
 python3 "$S" rag "What is XSL?" --kb <kb-id>     # one-shot RAG answer (via api-gateway)
-python3 "$S" file <file-id>             # file text content
+python3 "$S" file <file-id>             # file's extracted text content (full doc)
+python3 "$S" file <file-id> --raw       # original bytes instead of extracted text (binary saved to /tmp)
 ```
 
 Typical flow: `kbs` → `retrieve <kb-name>` (resolves name→id; fails loudly on

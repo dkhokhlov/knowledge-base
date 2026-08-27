@@ -3,18 +3,17 @@
 # local ./gdrive tree into (stateless POST /index, no sidecar). The gateway
 # references a KB by id and does NOT create KBs, so this script:
 #   1. finds or creates a KB named "gdrive" (idempotent);
-#   2. grants the agent user read access so the read-scoped agent key
-#      (OPENWEBUI_USER_API_KEY) can search / RAG the KB. The agent user id is
-#      resolved FROM that key via GET /api/v1/auths/ (the same tamper-proof
-#      identity-from-key pattern the api-gateway uses — no email env var needed);
-#      the grant is merged with any existing grants so admin-added group grants
-#      are preserved;
+#   2. grants PUBLIC READ (user:*) so every authenticated user (any account on
+#      this instance) can search / RAG the KB — the chosen public-read model. The
+#      admin key makes the call (bypasses the sharing.public_knowledge filter),
+#      so no per-user permission is needed here; the grant is merged with any
+#      existing grants (deduped by (principal_type, principal_id, permission))
+#      so admin-added group grants are preserved;
 #   3. writes GDRIVE_KB_ID into .env.local.
 #
 # Preconditions:
 #   - Stack running and healthy (`make start`).
-#   - OPENWEBUI_ADMIN_API_KEY + OPENWEBUI_USER_API_KEY in .env.local
-#     (provisioned by `make api-keys`).
+#   - OPENWEBUI_ADMIN_API_KEY in .env.local (provisioned by `make api-keys`).
 #
 # Idempotent: re-running re-asserts the grant and refreshes the same KB id.
 # Indexing itself is manual: run `make gdrive-sync` (rclone + POST /index) to
@@ -30,7 +29,6 @@ set -a
 set +a
 
 : "${OPENWEBUI_ADMIN_API_KEY:?FAIL  OPENWEBUI_ADMIN_API_KEY not set in .env.local (run: make api-keys)}"
-: "${OPENWEBUI_USER_API_KEY:?FAIL  OPENWEBUI_USER_API_KEY not set in .env.local (run: make api-keys)}"
 
 # Steps 1-2 run in Python (stdlib urllib); they print GDRIVE_KB_ID as the last
 # stdout line (stderr carries the human progress log).
@@ -39,7 +37,6 @@ import os, json, urllib.request, urllib.error, sys
 
 O = os.environ.get("KB_HOST") or ("http://localhost:%s" % os.environ.get("KB_HOST_PORT", "3000"))
 AK = os.environ["OPENWEBUI_ADMIN_API_KEY"]
-UK = os.environ["OPENWEBUI_USER_API_KEY"]
 KB_NAME = "gdrive"
 
 def call(method, path, body=None, token=None):
@@ -59,14 +56,6 @@ def jget(method, path, body=None, token=None):
         sys.exit("FAIL  %s %s -> HTTP %s: %s" % (method, path, st, txt[:300]))
     return json.loads(txt) if txt else None
 
-# --- resolve the agent user id FROM its own key (tamper-proof, no email var) --
-# GET /api/v1/auths/ with the user key returns the key owner's {id,email,role}.
-me = jget("GET", "/api/v1/auths/", token=UK)
-agent_uid = (me or {}).get("id")
-if not agent_uid:
-    sys.exit("FAIL  could not resolve agent user id from OPENWEBUI_USER_API_KEY via /api/v1/auths/")
-agent_email = (me or {}).get("email", "?")
-
 # --- find or create the "gdrive" KB ------------------------------------------
 st, txt = call("GET", "/api/v1/knowledge/")
 if st != 200:
@@ -83,10 +72,13 @@ else:
     kb_id = d["id"]
     print("OK    created KB %s: %s" % (KB_NAME, kb_id), file=sys.stderr)
 
-# --- grant the agent user READ, merged with existing grants ------------------
+# --- grant PUBLIC READ (user:*), merged with existing grants ------------------
 # access/update REPLACES the full grant set, so read current grants and re-post
-# the union (normalized to the three client fields) to avoid clobbering any
-# admin-added group grants.
+# the union (deduped by the full (principal_type, principal_id, permission)
+# tuple) to avoid clobbering any admin-added group grants. user:* grants read
+# to every AUTHENTICATED user (not internet-public; OWUI's 'anyone' principal is
+# not used). The admin key bypasses the sharing.public_knowledge filter, so no
+# permission is required to set this here.
 kb_detail = jget("GET", "/api/v1/knowledge/%s" % kb_id)
 existing = kb_detail.get("access_grants") or []
 grants = []
@@ -95,17 +87,17 @@ for g in existing:
     pt, pid, perm = g.get("principal_type"), g.get("principal_id"), g.get("permission")
     if not pt or not pid or not perm:
         continue
-    key = (pt, pid)
+    key = (pt, pid, perm)
     if key in seen:
         continue
     seen.add(key)
     grants.append({"principal_type": pt, "principal_id": pid, "permission": perm})
-need = ("user", agent_uid)
-if need not in seen:
-    grants.append({"principal_type": "user", "principal_id": agent_uid, "permission": "read"})
-    print("OK    granting agent user %s read on KB %s" % (agent_email, kb_id), file=sys.stderr)
+pub = ("user", "*", "read")
+if pub not in seen:
+    grants.append({"principal_type": "user", "principal_id": "*", "permission": "read"})
+    print("OK    granting public read (user:*) on KB %s" % kb_id, file=sys.stderr)
 else:
-    print("OK    agent user %s already has access on KB %s" % (agent_email, kb_id), file=sys.stderr)
+    print("OK    public read (user:*) already granted on KB %s" % kb_id, file=sys.stderr)
 jget("POST", "/api/v1/knowledge/%s/access/update" % kb_id, {"access_grants": grants})
 
 # Final line: the value the bash caller captures.

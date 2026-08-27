@@ -20,6 +20,7 @@ DATA_DIR := ./data
         users-create users-list users-search \
         ocr-config \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
+        kb-public-read \
         projects-bootstrap \
         shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-test clean-backup backup
 
@@ -42,9 +43,9 @@ provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + adm
 	  echo "  stack healthy ($$H/health)"; \
 	  echo "==> 4/8 admin-signup (creates the admin@<KB_DOMAIN> account)"; make admin-signup; \
 	  echo "==> 5/8 api-keys (admin + agent keys; auto-configures OWUI -> markitdown-ocr when OCR_ENABLED=true)"; make api-keys; \
-	  echo "==> 6/8 projects-bootstrap (one-time admin enable of workspace.knowledge so user keys can create project-memory KBs)"; make projects-bootstrap; \
+	  echo "==> 6/8 projects-bootstrap (one-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs)"; make projects-bootstrap; \
 	  echo "==> 7/8 rag-config (strict-grounding RAG template + rag.ollama.base_url sync)"; make rag-config; \
-	  echo "==> 8/8 gdrive-index-bootstrap (creates the gdrive KB + grants agent read + writes GDRIVE_KB_ID)"; make gdrive-index-bootstrap; \
+	  echo "==> 8/8 gdrive-index-bootstrap (creates the gdrive KB + grants public read + writes GDRIVE_KB_ID)"; make gdrive-index-bootstrap; \
 	  echo; echo "==> provision complete — stack is running."; \
 	  echo "    Populate the gdrive KB (one-time):           make gdrive-sync"; \
 	  echo "    Everyday restart:                            make start"
@@ -171,13 +172,17 @@ gdrive-index: ## Reconcile ./gdrive into the OWUI gdrive KB via api-gateway POST
 	    -H "Authorization: Bearer $$OPENWEBUI_ADMIN_API_KEY" \
 	    -H "Content-Type: application/json" -d '{}'; echo
 
-gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant agent read + write GDRIVE_KB_ID to .env.local (run after `make api-keys`)
+gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant public read (user:*) + write GDRIVE_KB_ID to .env.local (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
-	@grep -qE '^OPENWEBUI_USER_API_KEY=.+$$' .env.local \
-	  || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (the read-scoped agent key; run: make api-keys)"; exit 1; }
 	@./scripts/gdrive-index-bootstrap.sh
+
+kb-public-read: ## Grant public read (user:*) on EVERY knowledge base + enable sharing.public_knowledge so all authenticated users read all KBs (admin). Backfills existing KBs; re-run as a safety net for KBs created outside the flows (e.g. via the OWUI UI).
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
+	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
+	@./scripts/kb-public-read.sh
 
 gdrive-status: ## Show gdrive index status via api-gateway GET /status (completed/pending/processing/failed), pretty JSON. Set SCOPE_PATH=<relpath> to scope source_count to a subpath (file counts are KB-wide; accurate when the KB's whole scope is that path).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
@@ -190,7 +195,7 @@ gdrive-status: ## Show gdrive index status via api-gateway GET /status (complete
 	    -H "Authorization: Bearer $$OPENWEBUI_USER_API_KEY" \
 	    | python3 -m json.tool --indent 2
 
-projects-bootstrap: ## One-time admin enable of workspace.knowledge so the user key can create + own project-memory KBs (run after `make api-keys`)
+projects-bootstrap: ## One-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
