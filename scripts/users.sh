@@ -5,7 +5,7 @@
 # gdrive /index pattern (operator-only, not in the skill).
 #
 # Subcommands:
-#   create  -> POST /admin/users (kb-gateway robust flow: create + signin +
+#   create  -> POST /admin/users (api-gateway robust flow: create + signin +
 #              genkey + verify + rollback). Args via env: EMAIL, NAME, ROLE
 #              (default user). Prints the gateway response (email,
 #              temp_password, kb_api_key, role, id) as pretty JSON (indent 2).

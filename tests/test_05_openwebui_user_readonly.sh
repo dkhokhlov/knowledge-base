@@ -178,7 +178,7 @@ else
 fi
 
 # --- 7. /kb skill path: gateway /memory/rag (gateway inserts the model) -------
-# The /kb skill reaches RAG via POST /memory/rag (kb-gateway), NOT direct
+# The /kb skill reaches RAG via POST /memory/rag (api-gateway), NOT direct
 # /api/chat/completions. The gateway inserts the chat model from OPENWEBUI_MODEL
 # and forwards the caller's key, so OWUI enforces KB read access natively. The
 # request sends NO `model` field. Reuses the same KB_ID + MARKER + agent key as

@@ -4,8 +4,8 @@
 # bind-mount tree exists. Idempotent: existing non-empty values are kept.
 #
 # Agents authenticate with KB_API_KEY (an Open Web UI per-account key); the
-# kb-gateway validates it against Open Web UI and authorizes per call. See
-# README "KB_API_KEY & the kb-gateway".
+# api-gateway validates it against Open Web UI and authorizes per call. See
+# README "KB_API_KEY & the api-gateway".
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -102,7 +102,7 @@ KB_DOMAIN="${KB_DOMAIN:-$(. ./.env 2>/dev/null; printf '%s' "${KB_DOMAIN:-local.
 ensure_value .env.local OPENWEBUI_FIRST_USER "admin@${KB_DOMAIN}"
 ensure_secret .env.local OPENWEBUI_FIRST_PASSWORD
 
-# kb-gateway run user: derive from the current user (id -u/id -g) so the
+# api-gateway run user: derive from the current user (id -u/id -g) so the
 # read-only ./gdrive bind mount (owner-only from rclone) is readable. Kept if
 # already set (operator override); clean-all wipes .env.local so a fresh
 # bootstrap re-derives from the current user.
@@ -131,4 +131,4 @@ printf '  ensured ./data/{neo4j/data,neo4j/logs,openwebui} exist\n'
 printf '\nBootstrap done. Next: make preflight && make start\n'
 printf 'After start: make admin-signup (admin %s; password in .env.local OPENWEBUI_FIRST_PASSWORD),\n' "admin@${KB_DOMAIN}"
 printf 'then make api-keys (admin + shared-agent keys), then provision accounts\n'
-printf 'via the kb-gateway (see README KB_API_KEY).\n'
+printf 'via the api-gateway (see README KB_API_KEY).\n'

@@ -106,7 +106,7 @@ or the sync fail-fasts on `cannot list shared drives`.
 - normalizes the synced tree to owner-only perms (dirs 700, files 600) because
   Drive content is business-sensitive — rclone v1.60 has no `--umask`, so the
   script normalizes after the sync;
-- POSTs `/index` to kb-gateway to reconcile `./gdrive` into the `gdrive` KB.
+- POSTs `/index` to api-gateway to reconcile `./gdrive` into the `gdrive` KB.
 
 The exclude list (`./gdrive-exclude.conf`, gitignored) and the backup-dir
 recovery are documented in [docs/operations.md](operations.md). The

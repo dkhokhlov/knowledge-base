@@ -225,7 +225,7 @@ class OwuiTests(_Assertions):
 
     def test_rag_is_raw_text(self):
         # rag prints the LLM answer verbatim — NOT JSON-wrapped (lossy for an agent).
-        # Proxied by the kb-gateway: one POST /memory/rag, no `model` key (the
+        # Proxied by the api-gateway: one POST /memory/rag, no `model` key (the
         # gateway inserts it). Asserting the route + body means this cannot pass
         # against the old direct-/api/chat/completions endpoint (codex #5).
         jget = mock.Mock(return_value={"content": "the answer"})

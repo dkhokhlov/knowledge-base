@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kb-gateway: stack-side authorization + Graphiti REST bridge + admin user
+"""api-gateway: stack-side authorization + Graphiti REST bridge + admin user
 provisioning. Zero-dependency (Python 3 stdlib only).
 
 Listens on :8010 (container-internal). Caddy (:3000, edge) is the public face.

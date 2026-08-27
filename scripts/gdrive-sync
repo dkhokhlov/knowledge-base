@@ -34,7 +34,7 @@ rclone sync, so files removed from Drive are deleted from the destination
 so a bad/empty mount is recoverable from the backup dir (`make clean` clears it).
 
 After the sync (unless --dry-run), the synced tree is reconciled into the OWUI
-"gdrive" knowledge base via kb-gateway POST /index (stateless sync/diff against
+"gdrive" knowledge base via api-gateway POST /index (stateless sync/diff against
 the live KB; the gateway holds the admin key). Default is incremental (only
 new/changed files uploaded + extracted); --index-all drains + re-uploads every
 file. Fail-fast: a non-2xx /index response or ok=false aborts after the report.
@@ -180,7 +180,7 @@ report="$reports_dir/sync-${ts}.report"
 
 # rclone sync --backup-dir retention: deleted/overwritten files are moved here
 # (in their original hierarchy) instead of being deleted in place. MUST sit
-# outside <destination> — kb-gateway walks <destination> read-only and would
+# outside <destination> — api-gateway walks <destination> read-only and would
 # index any backup file matching the gateway allowlist (*.pdf, *.docx, ...).
 # Dated subdir per run so backups never overwrite each other. `make clean`
 # wipes the whole .<destination>-backup tree.
@@ -202,7 +202,7 @@ temp_files=()
 # no longer alive (crashed/killed holder) is retaken — `kill -0` is the
 # liveness probe. PID reuse is a residual: a dead PID recycled to an unrelated
 # live process would look alive and block (rare on a single-user host). The
-# lock file has no gateway-allowlisted extension, so kb-gateway does not index it.
+# lock file has no gateway-allowlisted extension, so api-gateway does not index it.
 # `lock_held` gates release so a contention abort (exit 1 before we acquire)
 # does NOT delete the other holder's lock via the EXIT trap.
 LOCK="$dest_norm/.sync.lock"
@@ -245,7 +245,7 @@ emit() { printf '%s\n' "$*"; summary+="$*"$'\n'; }
 
 # Owner-only perms (files 600, dirs 700) on the synced tree + backup retention.
 # Drive content is business-sensitive; rclone v1.60 has no --umask, so normalize
-# after the sync. kb-gateway reads ./gdrive read-only as the host owner uid
+# after the sync. api-gateway reads ./gdrive read-only as the host owner uid
 # (HOST_UID, default 1000), so owner-only is readable by the container. Skip
 # under --dry-run (no files are created). Run on every exit path (success +
 # fail-fast).
@@ -662,7 +662,7 @@ if (( !dry_run )) && [[ -d "$backup_root" ]]; then
 fi
 emit "Files backed up (deleted/overwritten): ${backed_up} (in ${backup_root})"
 
-# --- index chain: reconcile the synced tree into the OWUI KB via kb-gateway ---
+# --- index chain: reconcile the synced tree into the OWUI KB via api-gateway ---
 # Stateless: the gateway walks ./gdrive (ro mount), drives OWUI sync/diff against
 # the live KB, uploads new/changed files (the OWUI per-upload background task is
 # the sole linker: extract -> embed -> link), cleans up removed ones, and
@@ -685,9 +685,9 @@ if (( !dry_run )); then
             idx_q="${idx_q}&path=${path_enc}"
         fi
         if (( index_all )); then
-            emit "Indexing synced tree into OWUI KB (via kb-gateway /index, full re-index)..."
+            emit "Indexing synced tree into OWUI KB (via api-gateway /index, full re-index)..."
         else
-            emit "Indexing synced tree into OWUI KB (via kb-gateway /index, incremental)..."
+            emit "Indexing synced tree into OWUI KB (via api-gateway /index, incremental)..."
         fi
         # shellcheck disable=SC2086 # idx_q is a single query string, intentionally unquoted
         if ! idx_resp=$(curl -sS --max-time 1200 -X POST \

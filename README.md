@@ -14,15 +14,15 @@
 
 Self-hosted, **agent-first** knowledge stack combining **two complementary knowledge bases** in one system. [Open WebUI][open-webui] provides a **document knowledge base**: ingest curated documents into **access-controlled collections**; query by **RAG** (LLM-grounded answer) or **precise text / raw chunk retrieval** (no LLM). [Graphiti][graphiti] provides a **temporal fact memory** over [Neo4j][neo4j]: each **episode** is **time-stamped**, and extracted facts and edges are **time-bound** — a fact is true over a **time window** and is **invalidated, not deleted**, when superseded. This preserves history so the graph represents **current truth**, **what was true when**, and **how knowledge changed** — beyond static vector retrieval of fixed text chunks.
 
-Documents provide **grounded answers** from a **curated reference corpus**. **Fact memory** replaces scattered, untrimmed README, notes, and tracker files across projects — where every context load pays a growing **token tax** and specific facts become hard to find — with one **searchable temporal graph**, so accumulated knowledge stays findable instead of bloating linearly with every addition. Agents use the stack through the stack-side `kb-gateway`, which authorizes **per-account** `KB_API_KEY` credentials with **identity and role** derived server-side, plus a **thin zero-dependency CLI** and the `/kb` skill. Humans can also use the Open WebUI web interface.
+Documents provide **grounded answers** from a **curated reference corpus**. **Fact memory** replaces scattered, untrimmed README, notes, and tracker files across projects — where every context load pays a growing **token tax** and specific facts become hard to find — with one **searchable temporal graph**, so accumulated knowledge stays findable instead of bloating linearly with every addition. Agents use the stack through the stack-side `api-gateway`, which authorizes **per-account** `KB_API_KEY` credentials with **identity and role** derived server-side, plus a **thin zero-dependency CLI** and the `/kb` skill. Humans can also use the Open WebUI web interface.
 
-The document KB also indexes **Claude Code's project memory** — the **per-project auto-memory** Claude Code writes under `~/.claude/projects/*/memory/` — into **one Open WebUI KB per project**, so knowledge accumulated across **sessions and repositories** stays **searchable** instead of expiring with each session's context. The `/kb` skill drives this **host-side** with the caller's own **user key** (`index-projects` / `retrieve-projects` / `status-projects`); the caller **creates and owns** each project KB, and the **kb-gateway is not involved** on this surface. See [Projects memory indexing](docs/operations.md#projects-memory-indexing-claude-project-memory--open-webui) in docs/operations.md, and the `/kb` skill ([docs/agents.md](docs/agents.md)).
+The document KB also indexes **Claude Code's project memory** — the **per-project auto-memory** Claude Code writes under `~/.claude/projects/*/memory/` — into **one Open WebUI KB per project**, so knowledge accumulated across **sessions and repositories** stays **searchable** instead of expiring with each session's context. The `/kb` skill drives this **host-side** with the caller's own **user key** (`index-projects` / `retrieve-projects` / `status-projects`); the caller **creates and owns** each project KB, and the **api-gateway is not involved** on this surface. See [Projects memory indexing](docs/operations.md#projects-memory-indexing-claude-project-memory--open-webui) in docs/operations.md, and the `/kb` skill ([docs/agents.md](docs/agents.md)).
 
 - **[Graphiti][graphiti]** — temporal fact memory over [Neo4j][neo4j]; reached via an internal REST server.
-- **[Open WebUI][open-webui]** — document knowledge base with vector search, grounded RAG chat, and user/group access control; also the identity provider for the kb-gateway.
+- **[Open WebUI][open-webui]** — document knowledge base with vector search, grounded RAG chat, and user/group access control; also the identity provider for the api-gateway.
 - **[Neo4j][neo4j]** — graph store for [Graphiti][graphiti] (internal only).
-- **kb-gateway** — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti REST bridge, live group discovery, and admin user provisioning (zero-dependency Python stdlib).
-- **[Caddy][caddy]** — the single public edge (`KB_HOST`): fronts Open WebUI at the root and proxies `/memory/*`, `POST /admin/users`, `/health` to the kb-gateway.
+- **api-gateway** — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti REST bridge, live group discovery, and admin user provisioning (zero-dependency Python stdlib).
+- **[Caddy][caddy]** — the single public edge (`KB_HOST`): fronts Open WebUI at the root and proxies `/memory/*`, `POST /admin/users`, `/health` to the api-gateway.
 
 [Ollama][ollama] supplies the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings; it is reached via `OLLAMA_HOST` (Ollama's native client env var) and can run on the [Docker][docker] host or a remote/LAN host.
 
@@ -59,12 +59,12 @@ Sub-documents:
   │                │                                           Docker host       │
   │  ┌─────────────┴──────────────────────────────────────────────────────────┐  │
   │  │Caddy  :3000   KB_HOST — single public edge (only published port)       │  │
-  │  │/memory/*  /admin/users(POST)  /health   → kb-gateway :8010             │  │
+  │  │/memory/*  /admin/users(POST)  /health   → api-gateway :8010            │  │
   │  │/* catch-all                          → openwebui   :8080               │  │
   │  └─────────────┬─────────────────────────────────────┬────────────────────┘  │
   │                ▼                                     ▼                       │
   │  ┌─────────────┴────────────┐   ┌────────────────────┴────────────────────┐  │
-  │  │openwebui :8080           │   │kb-gateway :8010  (zero-dep stdlib)      │  │
+  │  │openwebui :8080           │   │api-gateway :8010  (zero-dep stdlib)     │  │
   │  │owui_net                  │   │identity+role from KB_API_KEY via OWUI   │  │
   │  │identity + users          │   │owui_net ► openwebui :8080               │  │
   │  │+ RAG                     │   │graph_internal ► graphiti :8000          │  │
@@ -86,11 +86,11 @@ Sub-documents:
   └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- A user with a browser and an agent both reach the stack through **one** URL, **`KB_HOST`** (default `http://localhost:3000`): [Caddy][caddy] fronts [Open WebUI][open-webui] at the root and the **kb-gateway** under `/memory/*`, `POST /admin/users`, and `/health`. One port, one var for agents (mirrors `OLLAMA_HOST`).
-- An agent holds only `KB_API_KEY` + `KB_HOST` (no Graphiti token, no repo files) — it works on any host. Its CLI (`kb_gateway.py` / `owui.py`) is a thin client that reads ONLY those two env vars (no `.env` files) and hits `KB_HOST`: OWUI REST at `/api/*` (KBs, retrieve, files, projects memory), kb-gateway at `/memory/*` (memory + RAG; the gateway inserts the chat model server-side).
-- **kb-gateway** is the sole bridge to the graph. It resolves the caller's identity + role from `KB_API_KEY` via Open WebUI (tamper-proof), enforces ownership-bounded writes + owner/admin destructive gating, discovers all existing groups live from [Neo4j][neo4j], calls the internal [Graphiti][graphiti] REST server, and provisions new KB users for admins.
+- A user with a browser and an agent both reach the stack through **one** URL, **`KB_HOST`** (default `http://localhost:3000`): [Caddy][caddy] fronts [Open WebUI][open-webui] at the root and the **api-gateway** under `/memory/*`, `POST /admin/users`, and `/health`. One port, one var for agents (mirrors `OLLAMA_HOST`).
+- An agent holds only `KB_API_KEY` + `KB_HOST` (no Graphiti token, no repo files) — it works on any host. Its CLI (`kb_gateway.py` / `owui.py`) is a thin client that reads ONLY those two env vars (no `.env` files) and hits `KB_HOST`: OWUI REST at `/api/*` (KBs, retrieve, files, projects memory), api-gateway at `/memory/*` (memory + RAG; the gateway inserts the chat model server-side).
+- **api-gateway** is the sole bridge to the graph. It resolves the caller's identity + role from `KB_API_KEY` via Open WebUI (tamper-proof), enforces ownership-bounded writes + owner/admin destructive gating, discovers all existing groups live from [Neo4j][neo4j], calls the internal [Graphiti][graphiti] REST server, and provisions new KB users for admins.
 - **Graphiti client injection.** The `ghcr.io/dkhokhlov/graphiti-rest` server defaults to `OpenAIClient` (OpenAI Responses API), which [Ollama][ollama] cannot satisfy — entity/fact extraction silently stores nothing. `graphiti/bootstrap.py` is mounted into the container and run as the command; it overrides the FastAPI dependency to inject the stock `OpenAIGenericClient` (graphiti_core >= 0.29 defaults to **`json_schema` structured outputs**, which Ollama enforces server-side; set at `temperature=0`) + `OpenAIEmbedder` (`nomic-embed-text`, 768-dim), so extraction works with Ollama. There is no config switch for this; the injection is required. See `graphiti/bootstrap.py`.
-- **Network split**: `graph_internal` (neo4j + graphiti + kb-gateway), `edge` (caddy + kb-gateway), `owui_net` (caddy + kb-gateway + openwebui). graphiti and Neo4j are **internal-only** — no host ports, reachable only through the gateway. Open WebUI is internal-only too (fronted by Caddy).
+- **Network split**: `graph_internal` (neo4j + graphiti + api-gateway), `edge` (caddy + api-gateway), `owui_net` (caddy + api-gateway + openwebui). graphiti and Neo4j are **internal-only** — no host ports, reachable only through the gateway. Open WebUI is internal-only too (fronted by Caddy).
 - Only `KB_HOST_PORT` (default `3000`) → Caddy `:3000` binds to the host. Caddy's `depends_on` uses `service_started` (not `service_healthy`) so the OWUI root stays reachable even if the gateway is broken.
 - [Ollama][ollama] is external on the Docker host (reached via host-gateway); not published by this stack. [Open WebUI][open-webui] (RAG + chat) and graphiti (extraction LLM + embedder) both reach it.
 - **TLS**: the Caddyfile is plain HTTP on the port. For a non-local `KB_HOST` you MUST either front Caddy with an upstream TLS reverse proxy, or switch the `:3000` site block to a hostname block so Caddy auto-terminates TLS and publishes `:443`. For the local MVP (`http://localhost:3000`) no TLS is needed.
@@ -131,7 +131,7 @@ make gdrive-sync   # rclone pull into ./gdrive + POST /index (reconcile into the
 make gdrive-status # pretty JSON: completed/pending/processing/failed vs source (no ETA — no daemon)
 ```
 
-See [gdrive indexing (manual, via kb-gateway)](#gdrive-indexing-manual-via-kb-gateway). `make gdrive-sync` chains rclone → POST `/index`; indexing is manual/on-demand (no sidecar).
+See [gdrive indexing (manual, via api-gateway)](#gdrive-indexing-manual-via-api-gateway). `make gdrive-sync` chains rclone → POST `/index`; indexing is manual/on-demand (no sidecar).
 
 **Everyday restart** (provision is done once): `make start`. Re-assert after a DB reset: `make rag-config` (+ `make ocr-config`). Rotate keys: `make api-keys FORCE=1`.
 
@@ -157,11 +157,11 @@ All endpoints are on one URL, **`KB_HOST`** (`http://<host>:3000` by default). C
 | `KB_HOST/api/*` | `Authorization: Bearer <OWUI API key>` | OWUI REST for agents (files, KBs, projects memory); humans/admins also RAG directly here with an explicit `model` |
 | `KB_HOST/docs` | none (read-only) | Swagger UI (OWUI; `ENV=dev`) |
 | `KB_HOST/openapi.json` | none (read-only) | OpenAPI schema (OWUI) |
-| `KB_HOST/memory/*` | `Authorization: Bearer <KB_API_KEY>` | kb-gateway: memory (whoami, groups, add, retrieve, episodes, status, forget, delete-edge, delete-episode) + RAG chat (`POST /memory/rag`; the gateway inserts the chat model from `OPENWEBUI_MODEL`) |
-| `KB_HOST/admin/users` | `Authorization: Bearer <KB_API_KEY>` (admin, POST) | kb-gateway: create a new KB user (returns temp password + `KB_API_KEY`); GET falls through to the OWUI SPA |
-| `KB_HOST/health` | none (read-only) | health probe (Caddy → kb-gateway → OWUI, aggregated) |
+| `KB_HOST/memory/*` | `Authorization: Bearer <KB_API_KEY>` | api-gateway: memory (whoami, groups, add, retrieve, episodes, status, forget, delete-edge, delete-episode) + RAG chat (`POST /memory/rag`; the gateway inserts the chat model from `OPENWEBUI_MODEL`) |
+| `KB_HOST/admin/users` | `Authorization: Bearer <KB_API_KEY>` (admin, POST) | api-gateway: create a new KB user (returns temp password + `KB_API_KEY`); GET falls through to the OWUI SPA |
+| `KB_HOST/health` | none (read-only) | health probe (Caddy → api-gateway → OWUI, aggregated) |
 
-`KB_HOST` is set in `.env` (default `http://localhost:3000`); `KB_HOST_PORT` (default `3000`) is the only host-published port. [Neo4j][neo4j] (`:7474`, `:7687`) and graphiti (`:8000` internal) are not published — reachable only through the kb-gateway over `graph_internal`.
+`KB_HOST` is set in `.env` (default `http://localhost:3000`); `KB_HOST_PORT` (default `3000`) is the only host-published port. [Neo4j][neo4j] (`:7474`, `:7687`) and graphiti (`:8000` internal) are not published — reachable only through the api-gateway over `graph_internal`.
 
 ### Environment variable precedence
 
@@ -185,7 +185,7 @@ Full detail: [docs/operations.md](docs/operations.md) → Variable precedence.
 
 ### KB user provisioning (admin)
 
-An admin runs **`make users-create EMAIL=alice@example.com NAME=Alice`** (an operator make target; the former in-skill `user-create` command is removed — admin functions are operator-only now). The make target calls the kb-gateway `POST /admin/users` flow below.
+An admin runs **`make users-create EMAIL=alice@example.com NAME=Alice`** (an operator make target; the former in-skill `user-create` command is removed — admin functions are operator-only now). The make target calls the api-gateway `POST /admin/users` flow below.
 
 - The gateway enforces `role=admin` **server-side** before any write. A non-admin key → `403` (not merely a CLI check). OWUI down → `503`.
 - Flow (all inside the gateway, one stateless request): generate a strong temp password → create the OWUI user (`POST /api/v1/auths/add`, admin key) → sign in as the new user → generate that user's `KB_API_KEY` with the new user's own JWT (`POST /api/v1/auths/api_key`) → verify the key via `GET /api/v1/auths/` resolves to the expected email + `role=user`.
@@ -197,19 +197,19 @@ An admin runs **`make users-create EMAIL=alice@example.com NAME=Alice`** (an ope
 
 - A user's uploaded files and knowledge bases are private to that user by default. The KB owner (with `sharing.knowledge`) or an admin grants a KB to user groups: Workspace -> Knowledge.
 - An agent using a user's API key inherits that user's permissions: the user's own files + KBs shared with the user's groups. It cannot see other users' private docs. An admin key bypasses access control — give agents a dedicated low-priv user's key, not an admin key.
-- To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds. The `/kb` skill reaches RAG via `POST /memory/rag` (the kb-gateway inserts the chat model from `OPENWEBUI_MODEL`; send `messages` + `files`, no `model`); humans/admins RAG directly at `POST /api/chat/completions` with an explicit `model`.
+- To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds. The `/kb` skill reaches RAG via `POST /memory/rag` (the api-gateway inserts the chat model from `OPENWEBUI_MODEL`; send `messages` + `files`, no `model`); humans/admins RAG directly at `POST /api/chat/completions` with an explicit `model`.
 - `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
 
-### gdrive indexing (manual, via kb-gateway)
+### gdrive indexing (manual, via api-gateway)
 
-The `gdrive` knowledge base is indexed by **kb-gateway** (stateless, no sidecar). `make gdrive-sync` runs rclone to sync `./gdrive` from the shared drives, then POSTs `/index` to kb-gateway, which walks `./gdrive` read-only and drives OWUI's native sync/diff protocol to reconcile the tree into the KB. Indexing is **manual/on-demand only**: no daemon, no schedule, no hooks. **Prerequisite:** a configured + authenticated rclone `gdrive` remote — one-time `rclone config` (new `gdrive` remote, Google Drive storage, browser OAuth login); `make gdrive-sync` fail-fasts if no shared drives are visible. Full setup (headless auth, verify, re-auth): see [docs/gdrive.md](docs/gdrive.md).
+The `gdrive` knowledge base is indexed by **api-gateway** (stateless, no sidecar). `make gdrive-sync` runs rclone to sync `./gdrive` from the shared drives, then POSTs `/index` to api-gateway, which walks `./gdrive` read-only and drives OWUI's native sync/diff protocol to reconcile the tree into the KB. Indexing is **manual/on-demand only**: no daemon, no schedule, no hooks. **Prerequisite:** a configured + authenticated rclone `gdrive` remote — one-time `rclone config` (new `gdrive` remote, Google Drive storage, browser OAuth login); `make gdrive-sync` fail-fasts if no shared drives are visible. Full setup (headless auth, verify, re-auth): see [docs/gdrive.md](docs/gdrive.md).
 
 - `make gdrive-sync` syncs `./gdrive` from all shared drives (rclone `sync --backup-dir --delete-after`; delta — files removed from Drive are deleted from `./gdrive`, and the next `/index` drops them from the KB via `sync/cleanup`; deleted/overwritten files are retained in a dated `./.gdrive-backup/<UTC-ISO>/` dir outside `./gdrive` as a recovery net; `make clean-backup` clears it). Per-drive non-downloadable files and global patterns (e.g. `*.tmp`) are read from the gitignored `./gdrive-exclude.conf` (INI format: `[<drive name>]` and `[*]` sections; format documented in the tracked `gdrive-exclude.conf.example`) and converted to `--exclude-from` per drive. It fail-fasts on any transfer error and writes a per-run report (`0600`) to `./gdrive/.sync-reports/sync-<UTC-ISO>.report` with a per-drive `remote`/`local`/`excluded`/`dups` table, a `COPY`/`UPDATE`/`DELETE` breakdown (per file; correct under `--backup-dir`), a "Files excluded" section (Drive files matching the exclude patterns), a "Duplicates ignored" section (Drive files rclone skipped because another file shares the same path — Drive permits duplicate names), and a "Files not downloaded" section (e.g. admin-protected / download-restricted Drive files, surfaced with their 403 reason). Downloadable files still transfer; exit code is non-zero if any drive had errors. After rclone, it POSTs `/index` and fail-fasts on a non-2xx response or `ok=false` (per-file errors logged to stderr). `--index-all` forces a full re-index instead of incremental.
 - `make gdrive-index` runs POST `/index` alone (no rclone). Default incremental; set `INDEX_ALL=1` for a full re-index (drain + re-upload every file). Set `RETRY_PENDING=1` to also re-trigger stalled `pending` files (delete + re-upload; the default retries only `failed`).
 - `make gdrive-index-bootstrap` (one-time, after `make api-keys`) creates the `gdrive` KB, grants the agent user read access (so the read-scoped agent key can retrieve/RAG it), and writes `GDRIVE_KB_ID` to `.env.local`. Idempotent. Does NOT start a sidecar (there is none).
 - `make gdrive-status` reads GET `/status` and emits **pretty JSON (indent=2)**: `source` (`gdrive`), `kb_id`, `source_count` (allowlisted `gdrive/` file count), `indexed_count` (files with `data.status=completed` — extracted, embedded, linked, searchable), `pending` (in extraction / OCR / GPU, or queued), `processing` (embedding + linking), `failed`, `failed_files` (`{filename, error}`), `pending_files` (`{filename, error}`), and the per-file `indexed_files` list. Key order: `indexed_files` first (the long list scrolls off the top), then `failed_files`/`pending_files`, then the single-field counts (visible at the bottom). The drain is terminal when `pending+processing=0` AND `completed+failed` covers `source_count`. No ETA (no daemon). (It passes `?json=1`; the bare `/status` text/glyph form still exists for direct curl.)
 - Indexed file types are the documents-only allowlist hardcoded in `gateway/app.py` `DEFAULT_ALLOW` (source code is handled by open-codebase-index; `.npy`, audio/video, images, archives, `.svg`/`.drawio` are excluded). Max size is `KB_MAX_SIZE` (default `100mb`, `.env`). `/index` does incremental SHA-256 diffing against the live KB and **fails closed on an empty source** (0 files + not `?force=1` → 422, no `cleanup`), so a bad/empty mount cannot mass-delete the KB.
-- kb-gateway reaches OWUI internally (`openwebui:8080` on `owui_net`) with the admin key in its env (`OPENWEBUI_ADMIN_API_KEY`, injected from `.env.local`). The caller's `KB_API_KEY` is authorization only (identity via OWUI, role checked for `/index` admin). The gateway is stateless: no `history.db`, no `./data/oikb`. File bytes flow gateway → OWUI internally (not through Caddy); Caddy carries only the trigger + the results JSON.
+- api-gateway reaches OWUI internally (`openwebui:8080` on `owui_net`) with the admin key in its env (`OPENWEBUI_ADMIN_API_KEY`, injected from `.env.local`). The caller's `KB_API_KEY` is authorization only (identity via OWUI, role checked for `/index` admin). The gateway is stateless: no `history.db`, no `./data/oikb`. File bytes flow gateway → OWUI internally (not through Caddy); Caddy carries only the trigger + the results JSON.
 - Per-file transparency: `/index` returns `{added, modified, deleted, unmodified, retried, errors, ok}` where `errors` carries `{filename, status, error}` per failed upload/dir-create/re-trigger — the diagnosis surface (no opaque daemon aggregate). The gateway does NOT link files itself: `POST /files/` queues OWUI's per-upload background task (extract → embed → link), which is the sole linker. `/index` re-triggers `failed` files every run (delete + re-upload; `--retry-pending` / `?retry_pending=1` also re-triggers `pending`). `ok=false` means a real upload/extract error (the upload-idempotency + path-aware-dedup patches make duplicate-content 400s not occur).
 - Subpath reconcile: `/index` and `/status` accept `?path=<relpath>` (relative to the gdrive root; a directory or a single file) — exposed as `make gdrive-sync SCOPE_PATH=<relpath>` / `make gdrive-index SCOPE_PATH=<relpath>` / `make gdrive-status SCOPE_PATH=<relpath>` (the env var is `SCOPE_PATH`, not `PATH`, to avoid clobbering the shell's executable-search `PATH`). `path` is a SOURCE FILTER only: it scopes the walk to that subpath (entry keys stay root-relative, so a later full `/index` sees `unmodified`). The reconcile is a FULL reconcile of that subpath — files removed from the source under it ARE removed from the KB — so use a KB whose whole scope is that `path` (a dedicated/subpath KB; on a shared KB `path` deletes every KB file outside the subpath). `/status?path=` scopes `source_count` to the subpath (file counts are KB-wide). The full walk skips dot-dirs/dot-files (hidden metadata like `.sync-reports`/`.sync.lock` is never indexed); `path` opts into a dot-subtree.
 
@@ -223,7 +223,7 @@ For per-tool agent integration (skill install, CLI examples), see [docs/agents.m
 
 Measured warm on the GPU host (one 14B ctx-baked model loaded). The first call after idle adds model-load time (~30 s cold). RAG chat and async extraction include the LLM; the other operations do not.
 
-### Memory (kb-gateway)
+### Memory (api-gateway)
 
 | Operation | Endpoint | Median latency |
 |---|---|---|
@@ -256,9 +256,9 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 - Knowledge bases are private by default; admins grant access to user groups (Workspace -> Knowledge). RBAC is additive: role + group membership.
 - JWTs signed with a generated secret key (gitignored `.env.local`; `make start` rejects an empty/missing key). See [docs/operations.md#secrets-handling](docs/operations.md#secrets-handling).
 
-### kb-gateway (`KB_HOST/memory/*`, `/admin/users`, `/health` → `:8010`)
+### api-gateway (`KB_HOST/memory/*`, `/admin/users`, `/health` → `:8010`)
 
-- graphiti and Neo4j have no agent-facing auth and are **internal-only** on `graph_internal`. The kb-gateway is the sole bridge; [Caddy][caddy] (`KB_HOST`) proxies `/memory/*`, `POST /admin/users`, and `/health` to it. The Graphiti REST server has no native auth — the gateway is the gate.
+- graphiti and Neo4j have no agent-facing auth and are **internal-only** on `graph_internal`. The api-gateway is the sole bridge; [Caddy][caddy] (`KB_HOST`) proxies `/memory/*`, `POST /admin/users`, and `/health` to it. The Graphiti REST server has no native auth — the gateway is the gate.
 - Every gateway endpoint (except `/health`) requires `Authorization: Bearer <KB_API_KEY>`. No key → `401`; bad key → `401`; Open WebUI unreachable → `503` (fail closed).
 - `/health` is ungated on purpose: non-sensitive probe, carries no data or credentials. It also probes Open WebUI so `make health` catches an identity-broken stack rather than reporting healthy while auth is down.
 - `KB_API_KEY` is a bearer — `KB_HOST` MUST be HTTPS or VPN/tunnel for any non-local agent. Plain HTTP is safe only on a trusted local interface.
@@ -268,9 +268,9 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 
 | Path | Contents |
 |---|---|
-| `compose.yml` | services + networks (`graph_internal`, `edge`, `owui_net`); kb-gateway internal env |
-| `gateway/` | kb-gateway: `app.py`, `authorize.py`, `graphiti.py`, `neo4j.py`, `owui.py`, `Dockerfile` (zero-dependency stdlib, non-root) |
-| `caddy/Caddyfile` | public edge `KB_HOST`; routes `/memory/*`, `POST /admin/users`, `/health` → kb-gateway:8010, catch-all → openwebui:8080 |
+| `compose.yml` | services + networks (`graph_internal`, `edge`, `owui_net`); api-gateway internal env |
+| `gateway/` | api-gateway: `app.py`, `authorize.py`, `graphiti.py`, `neo4j.py`, `owui.py`, `Dockerfile` (zero-dependency stdlib, non-root) |
+| `caddy/Caddyfile` | public edge `KB_HOST`; routes `/memory/*`, `POST /admin/users`, `/health` → api-gateway:8010, catch-all → openwebui:8080 |
 | `graphiti/bootstrap.py` | mounted into the `graphiti` container and run as the command; injects `OpenAIGenericClient` + `nomic` embedder (768) so Ollama extraction works, runs a robust `/messages` worker, owns the app lifespan |
 | `graphiti/config.yaml` | UNUSED — config for the retired MCP image; kept for reference (not mounted) |
 | `Modelfile_qwen2_5` | reference Modelfile for the custom ctx-baked `GRAPHITI_MODEL` (`FROM qwen2.5:14b` + `PARAMETER num_ctx 8192`); see [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant) |

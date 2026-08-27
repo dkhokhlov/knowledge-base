@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# System integration test: kb-gateway authorization matrix.
+# System integration test: api-gateway authorization matrix.
 # Uses the admin key (role=admin) + the shared-agent key (role=user). Both
 # identities come from the keys via the gateway (tamper-proof). Exercises:
 #   - personal write: agent adds to user:<agent> -> 200

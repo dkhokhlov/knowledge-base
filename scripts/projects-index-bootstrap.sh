@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time admin enable for projects-memory indexing (Option A).
 #
-# The kb-gateway has NO user-key OWUI-KB write path (its /index uses the admin
+# The api-gateway has NO user-key OWUI-KB write path (its /index uses the admin
 # key internally). Projects memory is indexed by the skill-side wrapper
 # (skills/claude/scripts/owui.py index-projects), which calls OWUI REST
 # directly with the caller's USER key so each project KB is owned by the caller

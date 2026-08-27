@@ -1,9 +1,9 @@
 ---
 name: kb
-description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, index/search/retrieve Claude projects memory (~/.claude/projects/*/memory), or remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "index projects memory", "search projects memory"/"retrieve projects memory", "projects/repo index status", "remember …", "what do we know about …", and "forget …". One URL (KB_HOST) fronts OWUI REST (/api/*) and kb-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side for facts memory). Zero-dependency Python CLI wrappers: scripts/owui.py (OWUI KBs + projects memory), scripts/kb_gateway.py (Graphiti facts).
+description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, index/search/retrieve Claude projects memory (~/.claude/projects/*/memory), or remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "index projects memory", "search projects memory"/"retrieve projects memory", "projects/repo index status", "remember …", "what do we know about …", and "forget …". One URL (KB_HOST) fronts OWUI REST (/api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side for facts memory). Zero-dependency Python CLI wrappers: scripts/owui.py (OWUI KBs + projects memory), scripts/kb_gateway.py (Graphiti facts).
 ---
 
-# KB + memory (agent / kb-gateway)
+# KB + memory (agent / api-gateway)
 
 Drive a self-hosted Open WebUI knowledge base over REST with the **agent
 (user-role) API key**. This skill is read-only against KBs you do not own and
@@ -12,12 +12,12 @@ create/delete, access grants, and admin config are out of scope (see
 [Admin surface](#admin-surface)).
 
 The stack is fronted at one URL, **KB_HOST**. OWUI REST is at the KB_HOST root
-(`/api/*`); the kb-gateway memory endpoints are at `/memory/*` on the same host.
+(`/api/*`); the api-gateway memory endpoints are at `/memory/*` on the same host.
 One URL, one key.
 
 ## Prerequisites
 
-- A running, healthy Open WebUI + kb-gateway you can reach.
+- A running, healthy Open WebUI + api-gateway you can reach.
 - **KB_HOST** — required, no default (e.g. `http://localhost:3000` for a local
   stack). The wrapper exits if it is unset.
 - **KB_API_KEY** — an Open WebUI agent key with read grants on the KBs you
@@ -68,7 +68,7 @@ wrong hand-copied id cannot query the wrong KB) and prints the resolved
 
 ### Chat (RAG)
 
-`POST /memory/rag` (via the kb-gateway) — body
+`POST /memory/rag` (via the api-gateway) — body
 `{messages, files:[{type:collection,id:<kb-id>}]}` (NO `model` field) →
 `{content}`. The gateway inserts the chat model server-side and forwards your
 `KB_API_KEY` to OWUI, which enforces KB read access natively.
@@ -116,7 +116,7 @@ python3 "$S" kbs                       # list KBs visible to this key
 python3 "$S" kb <kb-id>                 # one KB's metadata
 python3 "$S" search-kbs "main"         # find a KB by name
 python3 "$S" retrieve <kb-name-or-id> "XSL streaming"   # raw chunks, you synthesize (default)
-python3 "$S" rag "What is XSL?" --kb <kb-id>     # one-shot RAG answer (via kb-gateway)
+python3 "$S" rag "What is XSL?" --kb <kb-id>     # one-shot RAG answer (via api-gateway)
 python3 "$S" file <file-id>             # file text content
 ```
 
@@ -128,11 +128,11 @@ no-match; output includes the resolved `kb_id` + `kb_name`).
 **Projects memory** = Claude's per-project auto-memory
 (`~/.claude/projects/<encoded-dir>/memory/*.md`), indexed into OWUI KBs — one
 KB per project — so an agent can recall knowledge accumulated across Claude
-Code projects and sessions. (Distinct from [Facts memory](#facts-memory-graphiti-kb-gateway)
+Code projects and sessions. (Distinct from [Facts memory](#facts-memory-graphiti-api-gateway)
 below, which is the Graphiti knowledge graph.) The wrapper walks the host
 filesystem and calls OWUI REST **directly with the caller's user key**: the
 caller creates + owns each project KB (`KB.user.email == caller`), so
-`retrieve-projects` filters KBs by owner. The kb-gateway is not involved.
+`retrieve-projects` filters KBs by owner. The api-gateway is not involved.
 
 ## One-time setup
 
@@ -198,16 +198,16 @@ prints compact JSON `{"kbs":N,"hits":[...],"errors":[...]}`.
 Note: "search projects memory for X" maps to `retrieve-projects` (semantic). Do
 not reach for `search-kbs` (KB-name lexical lookup only).
 
-# Facts memory (Graphiti, kb-gateway)
+# Facts memory (Graphiti, api-gateway)
 
 Fact memory lives in Graphiti (Neo4j). Agents reach it **only** through the
-kb-gateway at **KB_HOST** under `/memory/*`. The gateway derives your identity
+api-gateway at **KB_HOST** under `/memory/*`. The gateway derives your identity
 + role from your `KB_API_KEY` via Open WebUI (tamper-proof — you cannot set your
 own identity). Authorization is server-side.
 
 ## Prerequisites
 
-- A running, healthy kb-gateway at **KB_HOST** under `/memory/*`.
+- A running, healthy api-gateway at **KB_HOST** under `/memory/*`.
 - **KB_HOST** and **KB_API_KEY** set in your shell env (same two vars as above;
   the wrapper reads only those). For non-local `KB_HOST`, the URL must be HTTPS
   or a VPN/tunnel (`KB_API_KEY` is a bearer). On a trusted local interface plain

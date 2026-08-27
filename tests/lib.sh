@@ -51,7 +51,7 @@ http_code() {
 }
 
 # Resolve the single public URL (KB_HOST). Caddy fronts OWUI at the root and
-# the kb-gateway at /memory/*, /admin/users, /health. Falls back to synth from
+# the api-gateway at /memory/*, /admin/users, /health. Falls back to synth from
 # KB_HOST_PORT. Call after load_env.
 kb_host() {
   printf '%s' "${KB_HOST:-http://localhost:${KB_HOST_PORT:-3000}}"

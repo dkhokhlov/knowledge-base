@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# System integration test: kb-gateway /index `path` parameter on a small,
+# System integration test: api-gateway /index `path` parameter on a small,
 # deterministic, committed fixture set (fast `make test` replacement for the
 # full real-gdrive drain in test_09).
 #
@@ -96,7 +96,7 @@ else
 fi
 
 # --- POST /index (admin): reconcile gdrive/.tests into the temp KB -----------
-section "POST /index (kb-gateway, path=.tests)"
+section "POST /index (api-gateway, path=.tests)"
 idx_resp=$(curl -sS --max-time 1200 -X POST \
   "$O/index?source=gdrive&kb_id=${KB_ID}&path=.tests" \
   "${ADM[@]}" -H 'Content-Type: application/json' -d '{}' 2>&1)

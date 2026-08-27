@@ -14,10 +14,10 @@ natively (no libreoffice), which also solves the PPTX orphan.
 
 ## Data flow
 
-`gdrive → kb-gateway (POST /index) → Open WebUI → markitdown-ocr →
+`gdrive → api-gateway (POST /index) → Open WebUI → markitdown-ocr →
 deepseek-ocr (Ollama) → per-page / per-slide / per-sheet chunks`
 
-kb-gateway uploads a file to Open WebUI (driving OWUI's sync protocol); Open
+api-gateway uploads a file to Open WebUI (driving OWUI's sync protocol); Open
 WebUI calls the external engine (`PUT /process`); markitdown-ocr runs the OCR
 converters with `OllamaNativeOCRService`, splits the result into per-unit
 documents, and returns a JSON list. OWUI turns each into a Document, adds

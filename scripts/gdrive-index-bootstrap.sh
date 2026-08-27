@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Provision the Open WebUI "gdrive" knowledge base that kb-gateway indexes the
+# Provision the Open WebUI "gdrive" knowledge base that api-gateway indexes the
 # local ./gdrive tree into (stateless POST /index, no sidecar). The gateway
 # references a KB by id and does NOT create KBs, so this script:
 #   1. finds or creates a KB named "gdrive" (idempotent);
 #   2. grants the agent user read access so the read-scoped agent key
 #      (OPENWEBUI_USER_API_KEY) can search / RAG the KB. The agent user id is
 #      resolved FROM that key via GET /api/v1/auths/ (the same tamper-proof
-#      identity-from-key pattern the kb-gateway uses — no email env var needed);
+#      identity-from-key pattern the api-gateway uses — no email env var needed);
 #      the grant is merged with any existing grants so admin-added group grants
 #      are preserved;
 #   3. writes GDRIVE_KB_ID into .env.local.
@@ -79,7 +79,7 @@ if kb:
     print("OK    KB %s already exists: %s" % (KB_NAME, kb_id), file=sys.stderr)
 else:
     d = jget("POST", "/api/v1/knowledge/create",
-             {"name": KB_NAME, "description": "Indexed from local gdrive/ via kb-gateway"})
+             {"name": KB_NAME, "description": "Indexed from local gdrive/ via api-gateway"})
     kb_id = d["id"]
     print("OK    created KB %s: %s" % (KB_NAME, kb_id), file=sys.stderr)
 
@@ -144,14 +144,14 @@ PY
 update_env_local GDRIVE_KB_ID "$KB_ID"
 printf 'OK    wrote GDRIVE_KB_ID to .env.local\n'
 
-# Recreate kb-gateway so it picks up OPENWEBUI_ADMIN_API_KEY + GDRIVE_KB_ID from
+# Recreate api-gateway so it picks up OPENWEBUI_ADMIN_API_KEY + GDRIVE_KB_ID from
 # .env.local (the gateway holds the admin key for /index writes + defaults
 # kb_id from GDRIVE_KB_ID). `make start` launched it before these existed; a
 # bare restart would NOT re-read compose env, so force-recreate is required.
 # Re-source .env.local (just written) so the interpolated values are current.
 set -a; . ./.env 2>/dev/null || true; . ./.env.local 2>/dev/null || true; set +a
-docker compose up -d --no-deps --force-recreate kb-gateway >/dev/null
-printf 'OK    recreated kb-gateway (admin key + GDRIVE_KB_ID now in env)\n'
+docker compose up -d --no-deps --force-recreate api-gateway >/dev/null
+printf 'OK    recreated api-gateway (admin key + GDRIVE_KB_ID now in env)\n'
 
 printf '\nDone. gdrive KB id: %s\n' "$KB_ID"
 printf 'Index the tree: make gdrive-sync   |   status: make gdrive-status\n'

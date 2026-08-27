@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# System integration test: kb-gateway read path. Exercises Caddy -> kb-gateway
+# System integration test: api-gateway read path. Exercises Caddy -> api-gateway
 # -> graphiti (REST) -> Neo4j with the admin KB_API_KEY: whoami (identity from
 # key), groups (Neo4j discovery), retrieve (read-all facts), episodes, status.
 # Read-only; no graph writes.
@@ -30,7 +30,7 @@ code() {  # code <method> <path> [json-body]
   fi
 }
 
-section "kb-gateway whoami (identity from key, via OWUI)"
+section "api-gateway whoami (identity from key, via OWUI)"
 code=$(code GET /memory/whoami)
 if [ "$code" = 200 ]; then
   body=$(gw GET /memory/whoami)
@@ -40,19 +40,19 @@ else
   fail "whoami -> HTTP $code (want 200)"
 fi
 
-section "kb-gateway groups (Neo4j group discovery)"
+section "api-gateway groups (Neo4j group discovery)"
 code=$(code GET /memory/groups)
 [ "$code" = 200 ] && pass "groups -> 200" || fail "groups -> HTTP $code (want 200)"
 
-section "kb-gateway retrieve (read-all facts across all groups)"
+section "api-gateway retrieve (read-all facts across all groups)"
 code=$(code POST /memory/retrieve '{"query":"bootstrap test probe","k":5}')
 [ "$code" = 200 ] && pass "retrieve -> 200" || fail "retrieve -> HTTP $code (want 200)"
 
-section "kb-gateway episodes (read-all)"
+section "api-gateway episodes (read-all)"
 code=$(code GET /memory/episodes)
 [ "$code" = 200 ] && pass "episodes -> 200" || fail "episodes -> HTTP $code (want 200)"
 
-section "kb-gateway status (graphiti server + DB, global)"
+section "api-gateway status (graphiti server + DB, global)"
 body=$(gw GET /memory/status)
 if printf '%s' "$body" | grep -q '"status"'; then
   pass "status -> result"

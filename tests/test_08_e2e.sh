@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# System integration test: comprehensive kb-gateway end-to-end surface.
+# System integration test: comprehensive api-gateway end-to-end surface.
 # Drives skills/claude/scripts/kb_gateway.py through every gateway endpoint
 # the agent surface exposes:
 #   whoami, status, groups, add, retrieve, episodes, delete-edge,

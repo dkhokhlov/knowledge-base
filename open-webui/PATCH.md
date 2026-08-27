@@ -291,7 +291,7 @@ to `0.11.0-pathdedup` (dedup only) or `main` (stock) to undo.
 
 ## Problem (patch 3)
 
-The kb-gateway indexes gdrive files (rclone-preserved mtime) and stores each
+The api-gateway indexes gdrive files (rclone-preserved mtime) and stores each
 file's mtime in `File.meta.data.mtime` at upload. OWUI does **not** propagate
 custom `File.meta.data` into Chroma chunk metadata by default — the per-branch
 doc-metadata dicts spread `**file.meta` (whose `data` is a nested dict that

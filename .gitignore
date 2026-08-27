@@ -40,7 +40,7 @@ __pycache__/
 # oikb populate it at runtime). .sync-reports/ under it is ignored too.
 /gdrive/*
 !/gdrive/.gitkeep
-# Committed kb-gateway /index fixture set: a dot-dir so the full gdrive walk
+# Committed api-gateway /index fixture set: a dot-dir so the full gdrive walk
 # skips it (no contamination of the real gdrive KB); the fixture test indexes
 # it via /index?path=.tests. gdrive-sync never touches it (per-drive sync
 # targets are siblings under ./gdrive/<drive>/, not the root).

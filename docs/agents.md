@@ -4,15 +4,15 @@ How an agent (Claude Code, Codex, OpenCode, Pi) connects to this knowledge stack
 One URL (`KB_HOST`), one key (`KB_API_KEY`), one skill (`kb`).
 
 The stack exposes a single public URL, **`KB_HOST`** (default
-`http://localhost:3000`). Caddy fronts Open WebUI at the root and the kb-gateway
+`http://localhost:3000`). Caddy fronts Open WebUI at the root and the api-gateway
 under `/memory/*`, `POST /admin/users`, and `/health`. An agent holds only
 `KB_API_KEY` + `KB_HOST` and works on any host that can reach `KB_HOST`.
 
 | Surface | Path | Auth | Use |
 |---|---|---|---|
 | Open WebUI REST | `KB_HOST/api/*` | `Bearer <KB_API_KEY>` | files, knowledge bases, projects memory (Claude Code skill only; humans/admins also RAG directly here with an explicit `model`) |
-| kb-gateway memory | `KB_HOST/memory/*` | `Bearer <KB_API_KEY>` | Graphiti facts (whoami, groups, add, retrieve, episodes, status, forget, delete-edge, delete-episode) + RAG chat (`POST /memory/rag`; the gateway inserts the chat model from `OPENWEBUI_MODEL`) |
-| kb-gateway admin | `KB_HOST/admin/users` (POST) | `Bearer <KB_API_KEY>` (admin) | create a new KB user (returns temp password + `KB_API_KEY`) |
+| api-gateway memory | `KB_HOST/memory/*` | `Bearer <KB_API_KEY>` | Graphiti facts (whoami, groups, add, retrieve, episodes, status, forget, delete-edge, delete-episode) + RAG chat (`POST /memory/rag`; the gateway inserts the chat model from `OPENWEBUI_MODEL`) |
+| api-gateway admin | `KB_HOST/admin/users` (POST) | `Bearer <KB_API_KEY>` (admin) | create a new KB user (returns temp password + `KB_API_KEY`) |
 | health | `KB_HOST/health` | none | read-only stack probe |
 
 `KB_API_KEY` is an Open WebUI per-account API key. The admin key
@@ -42,13 +42,13 @@ Python 3.10+ stdlib:
   `index-projects`, `retrieve-projects`, `status-projects` — **Claude Code skill copy
   only**; the shared `owui.py` keeps the subcommands, but the codex/opencode/pi
   `SKILL.md` copies do not document them.
-- `scripts/kb_gateway.py` — kb-gateway: facts memory (`whoami`, `groups`, `add`,
+- `scripts/kb_gateway.py` — api-gateway: facts memory (`whoami`, `groups`, `add`,
   `retrieve`, `episodes`, `status`, `forget`, `delete-edge`, `delete-episode`).
 
 Both read ONLY `KB_HOST` + `KB_API_KEY` from the shell environment — no
 `.env` / `.env.local` files, no `--env-file`, no other env vars. Set both in
 your shell before invoking them (`export KB_HOST=...` / `export KB_API_KEY=...`).
-RAG chat is proxied by the kb-gateway (`POST /memory/rag`), which inserts the
+RAG chat is proxied by the api-gateway (`POST /memory/rag`), which inserts the
 chat model server-side; the wrappers carry no model.
 
 ### Triggers
@@ -114,7 +114,7 @@ S=~/.claude/skills/kb/scripts                   # your tool's installed skill di
 
 ```
 python3 "$S/owui.py" whoami    # OWUI: email + role
-python3 "$S/kb_gateway.py" whoami    # kb-gateway: email + role + id (derived from the key)
+python3 "$S/kb_gateway.py" whoami    # api-gateway: email + role + id (derived from the key)
 ```
 
 ### Open WebUI KBs (read-scoped)
@@ -129,7 +129,7 @@ python3 "$S/owui.py" rag "What is XSL?" --kb <kb-id>  # RAG chat (LLM answer fro
 RAG chat needs `make rag-config` (strict-grounding template + synced embedding
 URL); without it the model confabulates. Ground the chat via the top-level
 `files` field only (`{"type":"collection","id":"<kb-id>"}`) — a `knowledge` field
-is ignored. The `/kb` skill reaches RAG via `POST /memory/rag` (the kb-gateway
+is ignored. The `/kb` skill reaches RAG via `POST /memory/rag` (the api-gateway
 inserts the chat model from `OPENWEBUI_MODEL`; send no `model` field); humans/admins
 RAG directly at `POST /api/chat/completions` with an explicit `model`.
 
@@ -144,7 +144,7 @@ keeps the subcommands.
 per project — so an agent recalls knowledge across Claude Code projects and
 sessions. The wrapper walks the host filesystem and calls OWUI REST directly
 with the caller's user key, which creates + owns each project KB
-(`KB.user.email == caller`). The kb-gateway is not involved.
+(`KB.user.email == caller`). The api-gateway is not involved.
 
 **One-time setup** (admin): `make projects-bootstrap` enables the
 `workspace.knowledge` permission (off by default) so the user key can create
@@ -172,7 +172,7 @@ open-codebase-index. `index-projects` is a full snapshot every run (always
 re-uploads `memory/*.md`; OWUI idempotency reuses unchanged files; a modified
 file is delete-then-uploaded so no stale vectors; orphans are deleted).
 
-### Facts memory (Graphiti, kb-gateway)
+### Facts memory (Graphiti, api-gateway)
 
 ```
 python3 "$S/kb_gateway.py" groups                              # list all groups that have data
@@ -201,7 +201,7 @@ make users-create EMAIL=alice@example.com NAME=Alice
 ```
 
 `make users-list` and `make users-search QUERY=<q>` list/search users (pretty
-JSON). The make target calls the kb-gateway `POST /admin/users` flow: the gateway
+JSON). The make target calls the api-gateway `POST /admin/users` flow: the gateway
 enforces `role=admin` server-side (non-admin → `403`) and rolls back a partial
 user if key generation fails. The returned `temp_password` + `kb_api_key` exist
 only in the one response — relay them to the new account out-of-band and do not

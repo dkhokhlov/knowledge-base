@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# System integration test: admin-driven KB user provisioning via the kb-gateway
+# System integration test: admin-driven KB user provisioning via the api-gateway
 # (POST /admin/users). Covers:
 #   (a) admin creates a user -> email + temp_password + kb_api_key + role=user
 #   (b) the returned key resolves to the new user (GET /memory/whoami)
@@ -94,10 +94,10 @@ code=$(provision "$G" "$ADMIN_KEY" "$EMAIL_A" "Alice Again" user | cut -f1)
 
 # --- (e) partial-failure rollback -----------------------------------------
 section "partial-failure rollback (isolated gateway, test-only flag)"
-# Start an isolated kb-gateway on host :8011 with the fail-after-create flag.
+# Start an isolated api-gateway on host :8011 with the fail-after-create flag.
 # It shares the stack's OWUI (identity) for the provisioning flow.
 CID=$(docker compose run -d --rm --no-deps -p 8011:8010 \
-  -e KB_TEST_PROVISION_FAIL_AFTER_CREATE=1 kb-gateway 2>/dev/null)
+  -e KB_TEST_PROVISION_FAIL_AFTER_CREATE=1 api-gateway 2>/dev/null)
 iso_up=""
 if [ -n "$CID" ]; then
   for _ in $(seq 1 25); do

@@ -72,7 +72,7 @@ config: ## Render effective compose config incl. the --profile ocr sidecar (secr
 	  [ -n "$$_OVR" ] && export OCR_ENABLED="$$_OVR"; \
 	  $(COMPOSE) $$(./scripts/compose-profiles.sh) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_FIRST_PASSWORD): .*/\1: <redacted>/'
 
-health: ## Probe the stack /health (Caddy -> kb-gateway aggregated, reflects OWUI)
+health: ## Probe the stack /health (Caddy -> api-gateway aggregated, reflects OWUI)
 	@set -a; . ./.env; set +a; \
 	H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
 	curl -sf "$$H/health" >/dev/null \
@@ -105,7 +105,7 @@ admin-signup: ## Create the OWUI admin account (OPENWEBUI_FIRST_USER/PASSWORD) v
 	  || { echo "MISSING OPENWEBUI_FIRST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
 	@./scripts/admin-signup.sh
 
-users-create: ## Create a new OWUI KB user (admin) via kb-gateway POST /admin/users. Set EMAIL=, NAME=, [ROLE=user]. Prints {email, temp_password, kb_api_key, role, id} as pretty JSON; relay temp_password + kb_api_key out-of-band.
+users-create: ## Create a new OWUI KB user (admin) via api-gateway POST /admin/users. Set EMAIL=, NAME=, [ROLE=user]. Prints {email, temp_password, kb_api_key, role, id} as pretty JSON; relay temp_password + kb_api_key out-of-band.
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
@@ -142,7 +142,7 @@ ocr-config: ## Re-assert OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-o
 gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup), then POST /index to reconcile into the OWUI gdrive KB. Use --index-all for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
 	@./scripts/gdrive-sync $${SCOPE_PATH:+--path "$$SCOPE_PATH"}
 
-gdrive-index: ## Reconcile ./gdrive into the OWUI gdrive KB via kb-gateway POST /index (admin; incremental). Self-heals FAILED files (delete + re-upload) by default. Set RETRY_PENDING=1 to also retry stalled PENDING files. Set INDEX_ALL=1 for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
+gdrive-index: ## Reconcile ./gdrive into the OWUI gdrive KB via api-gateway POST /index (admin; incremental). Self-heals FAILED files (delete + re-upload) by default. Set RETRY_PENDING=1 to also retry stalled PENDING files. Set INDEX_ALL=1 for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
@@ -163,7 +163,7 @@ gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant agent read + writ
 	  || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (the read-scoped agent key; run: make api-keys)"; exit 1; }
 	@./scripts/gdrive-index-bootstrap.sh
 
-gdrive-status: ## Show gdrive index status via kb-gateway GET /status (completed/pending/processing/failed), pretty JSON. Set SCOPE_PATH=<relpath> to scope source_count to a subpath (file counts are KB-wide; accurate when the KB's whole scope is that path).
+gdrive-status: ## Show gdrive index status via api-gateway GET /status (completed/pending/processing/failed), pretty JSON. Set SCOPE_PATH=<relpath> to scope source_count to a subpath (file counts are KB-wide; accurate when the KB's whole scope is that path).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
@@ -192,7 +192,7 @@ shell-graphiti: ## Shell into the graphiti container
 	@docker exec -it kb-graphiti sh
 
 shell-caddy: ## Shell into the Caddy gateway container
-	@docker exec -it kb-graphiti-gateway sh
+	@docker exec -it kb-proxy sh
 
 clean: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.local.
 	@$(COMPOSE) down --remove-orphans

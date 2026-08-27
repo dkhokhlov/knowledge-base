@@ -16,13 +16,13 @@ Two surfaces, one key (the non-admin agent key, KB_API_KEY):
     it before the first `index-projects`.
 
 The stack is fronted by Caddy at KB_HOST: OWUI REST is at the KB_HOST root
-(/api/* via Caddy catch-all -> openwebui:8080). The kb-gateway memory endpoints are
+(/api/* via Caddy catch-all -> openwebui:8080). The api-gateway memory endpoints are
 at /memory/* on the same KB_HOST. One URL, one key.
 
 Zero dependencies (Python 3.10+ stdlib). Config: the wrapper is a thin client.
 It reads ONLY two env vars from the shell environment — KB_HOST and KB_API_KEY.
 It does not read .env / .env.local files (set both in your shell before invoking
-it). RAG chat is proxied by the kb-gateway (POST /memory/rag), which inserts the
+it). RAG chat is proxied by the api-gateway (POST /memory/rag), which inserts the
 chat model server-side from OPENWEBUI_MODEL; the wrapper carries no model. The
 projects-memory --wait deadline is 600s (fixed).
 
@@ -185,7 +185,7 @@ def cmd_retrieve(base, key, a):
 
 
 def cmd_rag(base, key, a):
-    # RAG is proxied by the kb-gateway (POST /memory/rag), which inserts the
+    # RAG is proxied by the api-gateway (POST /memory/rag), which inserts the
     # chat model server-side from OPENWEBUI_MODEL and forwards the caller's key
     # to OWUI so KB read access is enforced natively. The wrapper carries no
     # model (the model is backend-side config; everything is tested against it).
@@ -683,7 +683,7 @@ def main():
     sp.add_argument("kb", help="KB name or id"); sp.add_argument("query")
     sp.add_argument("--k", type=int, default=5); sp.add_argument("--no-hybrid", action="store_true")
 
-    sp = sub.add_parser("rag", help="RAG chat grounded on one or more KBs (proxied by kb-gateway /memory/rag)")
+    sp = sub.add_parser("rag", help="RAG chat grounded on one or more KBs (proxied by api-gateway /memory/rag)")
     sp.add_argument("question"); sp.add_argument("--kb", action="append", default=[])
 
     sp = sub.add_parser("file", help="print a file's text content"); sp.add_argument("id")

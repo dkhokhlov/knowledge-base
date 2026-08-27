@@ -1,4 +1,4 @@
-# kb-gateway: zero-dependency Python stdlib service (no pip install).
+# api-gateway: zero-dependency Python stdlib service (no pip install).
 # Authorizes KB_API_KEY via Open WebUI, bridges to Graphiti REST, discovers
 # groups from Neo4j, and provisions admin-created users. Runs non-root.
 FROM python:3.12-slim

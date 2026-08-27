@@ -53,11 +53,11 @@ fi
 make preflight
 # Rebuild locally-built images whose code changed since the last run, so e2e
 # tests current code (clean-all wipes volumes/data, NOT images; `up -d` without
-# --build reuses the existing image). kb-gateway is stdlib-only so this is fast.
+# --build reuses the existing image). api-gateway is stdlib-only so this is fast.
 # markitdown-ocr is rebuilt here (gated on OCR_ENABLED) so e2e runs current OCR
 # code; openwebui (patched) is rebuilt only when its patches change (manual:
 # `docker compose build openwebui`).
-docker compose build kb-gateway
+docker compose build api-gateway
 if [ "${OCR_ENABLED:-true}" = "true" ]; then
   docker compose --profile ocr build markitdown-ocr
 fi

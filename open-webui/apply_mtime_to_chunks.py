@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Apply the source-mtime chunk-metadata patch to OWUI retrieval.py (build-time).
 
-Why: the kb-gateway indexes gdrive files (rclone-preserved mtime) and stores each
+Why: the api-gateway indexes gdrive files (rclone-preserved mtime) and stores each
 file's mtime in File.meta.data.mtime at upload. OWUI does NOT propagate custom
 File.meta.data into Chroma chunk metadata by default — the per-branch doc-metadata
 dicts spread `**file.meta` (whose `data` is a nested dict that Chroma drops) or

@@ -4,7 +4,7 @@
 #   - --profile ocr     when OCR_ENABLED=true (default; set false in .env to
 #                       disable; overridable via `make start OCR_ENABLED=<val>`).
 #
-# gdrive indexing is no longer a sidecar: kb-gateway serves POST /index (manual,
+# gdrive indexing is no longer a sidecar: api-gateway serves POST /index (manual,
 # driven by `make gdrive-sync`). No gdrive profile.
 #
 # Refuses to start without .env.local + a WEBUI_SECRET_KEY, and fails fast if

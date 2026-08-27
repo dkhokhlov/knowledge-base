@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the kb-gateway source-side functions (no stack needed).
+"""Unit tests for the api-gateway source-side functions (no stack needed).
 
 Covers the gdrive mtime capture added to gateway/app.py (_entry_for,
 walk_source) and its propagation into the OWUI upload multipart metadata

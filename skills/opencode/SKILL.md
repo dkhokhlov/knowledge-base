@@ -1,6 +1,6 @@
 ---
 name: kb
-description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, or to remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "remember …", "what do we know about …", and "forget …". Covers list/search KBs, retrieve (semantic search) from a KB, RAG chat grounded on a KB, and Graphiti facts memory (add/retrieve/episodes/forget via the kb-gateway). One URL (KB_HOST) fronts OWUI REST (root /api/*) and kb-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the kb-gateway for facts memory). Includes zero-dependency Python CLI wrappers (scripts/owui.py for OWUI KBs, scripts/kb_gateway.py for Graphiti facts memory).
+description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, or to remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "remember …", "what do we know about …", and "forget …". Covers list/search KBs, retrieve (semantic search) from a KB, RAG chat grounded on a KB, and Graphiti facts memory (add/retrieve/episodes/forget via the api-gateway). One URL (KB_HOST) fronts OWUI REST (root /api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the api-gateway for facts memory). Includes zero-dependency Python CLI wrappers (scripts/owui.py for OWUI KBs, scripts/kb_gateway.py for Graphiti facts memory).
 ---
 
 # Open WebUI REST (agent / read-scoped)
@@ -12,7 +12,7 @@ content. Write/delete/admin operations are out of scope (see [Admin surface](#ad
 
 The whole stack is fronted by Caddy at one URL, **KB_HOST** (default
 `http://localhost:3000`). OWUI REST is at the KB_HOST root (`/api/*`); the
-kb-gateway memory endpoints are at `/memory/*` on the same host. One URL, one
+api-gateway memory endpoints are at `/memory/*` on the same host. One URL, one
 key.
 
 ## Prerequisites
@@ -47,7 +47,7 @@ Two ways to query a KB — pick by what you need:
 
 ### Chat (RAG)
 
-The `/kb` skill reaches RAG via the kb-gateway: `POST /memory/rag` — body
+The `/kb` skill reaches RAG via the api-gateway: `POST /memory/rag` — body
 `{messages, files:[{type:collection,id:<kb-id>}]}` (NO `model` field) →
 `{content}`. The gateway inserts the chat model server-side (from
 `OPENWEBUI_MODEL`) and forwards the caller's `KB_API_KEY` to OWUI, so OWUI
@@ -117,7 +117,7 @@ export KB_API_KEY="$OPENWEBUI_USER_API_KEY"     # from .env.local (make api-keys
 python3 "$S" whoami                             # verify key + role
 python3 "$S" kbs                                # list visible KBs
 python3 "$S" search-kbs "main"                  # find a KB by name
-python3 "$S" rag "What is XSL?" --kb <kb-id>    # chat (RAG) — LLM answer from the KB (via kb-gateway)
+python3 "$S" rag "What is XSL?" --kb <kb-id>    # chat (RAG) — LLM answer from the KB (via api-gateway)
 python3 "$S" retrieve <kb-name-or-id> "XSL streaming"     # retrieve — raw chunks, you synthesize
 python3 "$S" file <file-id>                     # file text content
 ```
@@ -126,17 +126,17 @@ Config: the wrapper is a thin client. It reads ONLY `KB_HOST` and `KB_API_KEY`
 from the shell environment — no `.env` / `.env.local` files, no other env vars,
 no `--base-url` / `--key` / `--model` flags. Set both in your shell before
 invoking it (`export KB_HOST=...` / `export KB_API_KEY=...`). RAG chat is
-proxied by the kb-gateway (`POST /memory/rag`), which inserts the chat model
+proxied by the api-gateway (`POST /memory/rag`), which inserts the chat model
 server-side from `OPENWEBUI_MODEL`; the wrapper carries no model.
 
 Typical flow: `kbs` (or `search-kbs`) → grab the KB id → `rag` for a one-shot
 answer, or `retrieve` for raw chunks when the answer must be right (see the
 Retrieve vs Chat (RAG) groups above).
 
-# Facts memory (Graphiti, agent / kb-gateway)
+# Facts memory (Graphiti, agent / api-gateway)
 
 Fact memory lives in Graphiti (Neo4j). Agents reach it **only** through the
-`kb-gateway`, fronted by Caddy at **KB_HOST** under `/memory/*`. The gateway
+`api-gateway`, fronted by Caddy at **KB_HOST** under `/memory/*`. The gateway
 derives your identity + role from your `KB_API_KEY` via Open WebUI (tamper-proof
 — you cannot set your own identity). Authorization is server-side.
 

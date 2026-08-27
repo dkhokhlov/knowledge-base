@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# System integration test: gdrive indexing via kb-gateway (stateless, no sidecar).
+# System integration test: gdrive indexing via api-gateway (stateless, no sidecar).
 #
 # POSTs /index (admin key) to reconcile ./gdrive into the OWUI "gdrive" KB.
 # The gateway uploads via POST /files/ (process_in_background=True) and does NOT
@@ -67,7 +67,7 @@ ADM=(-H "Authorization: Bearer $AK")
 RD=(-H "Authorization: Bearer $UK")
 
 # --- POST /index (admin): reconcile ./gdrive into the KB ---------------------
-section "POST /index (kb-gateway)"
+section "POST /index (api-gateway)"
 idx_resp=$(curl -sS --max-time 1200 -X POST \
   "$O/index?source=gdrive&kb_id=${GDRIVE_KB_ID}" \
   "${ADM[@]}" -H 'Content-Type: application/json' -d '{}' 2>&1)

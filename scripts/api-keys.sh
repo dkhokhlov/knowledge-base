@@ -133,7 +133,7 @@ else:
 # Without a model access grant, a non-admin user sees 0 models and
 # /api/chat/completions returns "Model not found". Same '*' pattern as KB grants.
 # Grant the chat model the agent actually requests: OPENWEBUI_MODEL (inserted by
-# the kb-gateway for POST /memory/rag), then the built-in default. OPENWEBUI_MODEL
+# the api-gateway for POST /memory/rag), then the built-in default. OPENWEBUI_MODEL
 # (chat) is independent from GRAPHITI_MODEL (extraction); .env may set them
 # differently. The default must be a model `make pull-models` creates.
 CHAT_MODEL = os.environ.get("OPENWEBUI_MODEL") or "qwen2.5:14b-ctx8192"
@@ -161,7 +161,7 @@ else:
     # exists, but it can set a new account to 'pending' (unable to sign in) on
     # some builds. The signup path with DEFAULT_USER_ROLE=user is the proven
     # way to get a signable non-admin agent account here. Per-account provisioning
-    # via auths/add (with a signin + api_key flow) is done by the kb-gateway's
+    # via auths/add (with a signin + api_key flow) is done by the api-gateway's
     # admin endpoint (POST /admin/users) — see README "KB user provisioning".
     if not agent_pass:
         agent_pass = secrets.token_hex(16)
