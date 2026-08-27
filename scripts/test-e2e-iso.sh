@@ -102,6 +102,13 @@ export OWUI_CONTAINER=kb-e2e-openwebui
 # e2e exercises the real rclone path (the point of the at-scale run). The live
 # $SRC/gdrive mirror is untouched (the clone rclones from the gdrive remote,
 # not from $SRC).
+#
+# gdrive-exclude.conf is gitignored (PII: Drive file paths) so the clone has no
+# copy; without it rclone hits non-downloadable paths and aborts fail-fast. Copy
+# the live one so the clone's rclone uses the same exclusions as the live stack.
+# The clone is throwaway (clean-test wipes it), so the PII file is discarded
+# with it -- it is never committed and never leaves this host.
+[ -f "$SRC/gdrive-exclude.conf" ] && cp "$SRC/gdrive-exclude.conf" "$CLONE/gdrive-exclude.conf"
 
 # Seed admin creds (test-e2e REFUSES without .env.local). bootstrap creates
 # .env.local + a generated admin account; test-e2e stashes+restores the creds
