@@ -79,22 +79,12 @@ make api-keys
 make projects-bootstrap
 make rag-config
 make gdrive-index-bootstrap
-# GDRIVE_SKIP_RCLONE=1 (set by test-e2e-iso when it symlinks ./gdrive to the live
-# mirror to avoid re-downloading a large corpus): skip the rclone sync and run
-# POST /index only (the index/drain path is the point of e2e; the rclone tool
-# itself is covered by the live `make gdrive-sync`). ./gdrive must already
-# exist (the iso wrapper symlinks it to the live mirror).
-if [ "${GDRIVE_SKIP_RCLONE:-0}" = "1" ]; then
-  echo "==> GDRIVE_SKIP_RCLONE=1: skipping rclone sync, reusing the existing ./gdrive (POST /index only)"
-  make gdrive-index
-else
-  make gdrive-sync
-fi
+make gdrive-sync
 GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" make test
 # test_09 (full real-gdrive drain) is not in the `make test` glob (it is slow
 # and coupled to the live rclone-synced corpus); run it explicitly here, where
-# the gdrive KB is provisioned and the corpus is present (freshly synced, or
-# reused from the live mirror when GDRIVE_SKIP_RCLONE=1).
+# the gdrive KB is provisioned and the corpus is present (freshly synced by
+# `make gdrive-sync` above).
 echo "==> full real-gdrive drain (test_09)"
 GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" bash tests/test_09_gdrive_index.sh
 echo "==> test-e2e PASS"

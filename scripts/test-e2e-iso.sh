@@ -96,21 +96,12 @@ export COMPOSE_FILE=compose.yml:compose.e2e.override.yml
 export MARKITDOWN_CONTAINER=kb-e2e-markitdown-ocr
 export OWUI_CONTAINER=kb-e2e-openwebui
 
-# Reuse the live ./gdrive mirror to avoid re-rclone-downloading a large corpus
-# (./gdrive grows over time and is gitignored, so the clone has no copy).
-# Symlink the clone's ./gdrive to the live mirror and skip the rclone sync
-# (GDRIVE_SKIP_RCLONE=1) -- the e2e indexes the live files into the e2e KB
-# (separate DB) + drains them. ./gdrive is read-only here (only rclone writes
-# it, and we skip it), so the live mirror is untouched.
-# Fallback: if the live mirror is absent/empty, do a real rclone sync into the
-# clone's own ./gdrive (first run downloads the corpus).
-if [ -d "$SRC/gdrive" ] && [ -n "$(ls -A "$SRC/gdrive" 2>/dev/null)" ]; then
-  ln -s "$SRC/gdrive" "$CLONE/gdrive"
-  export GDRIVE_SKIP_RCLONE=1
-  echo "==> reuse live ./gdrive mirror ($SRC/gdrive -> $CLONE/gdrive); skipping rclone re-download"
-else
-  echo "==> no live ./gdrive mirror; e2e will rclone-sync a fresh corpus into $CLONE/gdrive"
-fi
+# ./gdrive: the clone has only the tracked .gitkeep + .tests fixture; the
+# standard `make test-e2e` runs a REAL rclone sync (make gdrive-sync) to
+# download the live corpus into ./gdrive/<drive>/. No symlink, no reuse -- the
+# e2e exercises the real rclone path (the point of the at-scale run). The live
+# $SRC/gdrive mirror is untouched (the clone rclones from the gdrive remote,
+# not from $SRC).
 
 # Seed admin creds (test-e2e REFUSES without .env.local). bootstrap creates
 # .env.local + a generated admin account; test-e2e stashes+restores the creds
