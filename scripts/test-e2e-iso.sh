@@ -70,11 +70,20 @@ echo "==> clone $SRC -> $CLONE"
 git clone --no-local "$SRC" "$CLONE"
 cd "$CLONE"
 
-# Bake port + OLLAMA_HOST into the clone's .env.template so they survive
-# test-e2e's clean-all (rm .env) -> bootstrap (recreates .env from .env.template).
-# OLLAMA_HOST is commented (#OLLAMA_HOST=) in the template; uncomment + set it.
+# Bake port + OLLAMA_HOST + KB_HOST into the clone's .env.template so they
+# survive test-e2e's clean-all (rm .env) -> bootstrap (recreates .env from
+# .env.template). All three are commented in the template; uncomment + set them.
 sed -i "s/^KB_HOST_PORT=3000/KB_HOST_PORT=$E2E_PORT/" .env.template
 sed -i "s|^#OLLAMA_HOST=|OLLAMA_HOST=$OLLAMA_HOST|" .env.template
+# Pin KB_HOST in .env (NOT via `export KB_HOST`). The operator's ~/.bash_env
+# (sourced by BASH_ENV in EVERY non-interactive child bash: make's recipe shell,
+# test-e2e.sh, admin-signup.sh, ...) re-exports KB_HOST=http://mini2:3000 (the
+# LIVE stack). A wrapper `export KB_HOST=...` is futile -- each child re-sources
+# ~/.bash_env and clobbers it. But every provision script does `set -a; . ./.env`
+# BEFORE reading KB_HOST, and ./.env is sourced AFTER ~/.bash_env in the same
+# shell, so an uncommented KB_HOST in .env wins. Without this, admin-signup hits
+# the LIVE stack (mini2:3000) where the admin already exists -> 403.
+sed -i "s|^#KB_HOST=http://localhost:3000|KB_HOST=http://localhost:$E2E_PORT|" .env.template
 
 # Separate compose project + override file (kb-e2e-* container names) so the
 # live kb-* stack is untouched. COMPOSE_FILE/COMPOSE_PROJECT_NAME are honored by
