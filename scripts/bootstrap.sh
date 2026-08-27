@@ -103,11 +103,13 @@ ensure_value .env.local OPENWEBUI_FIRST_USER "admin@${KB_DOMAIN}"
 ensure_secret .env.local OPENWEBUI_FIRST_PASSWORD
 
 # api-gateway run user: derive from the current user (id -u/id -g) so the
-# read-only ./gdrive bind mount (owner-only from rclone) is readable. Kept if
-# already set (operator override); clean-all wipes .env.local so a fresh
-# bootstrap re-derives from the current user.
-ensure_value .env.local HOST_UID "$(id -u)"
-ensure_value .env.local HOST_GID "$(id -g)"
+# read-only ./gdrive bind mount (owner-only from rclone) is readable. Written to
+# .env (compose requires it; .env is read by every `docker compose` command, so
+# `:?` holds for stop/clean/logs/ps too -- unlike .env.local, which only
+# reach-parse targets that source it). Kept if already set (operator override);
+# clean-all wipes .env so a fresh bootstrap re-derives from the current user.
+ensure_value .env HOST_UID "$(id -u)"
+ensure_value .env HOST_GID "$(id -g)"
 
 # markitdown-ocr service token (SECRET -> .env.local). Generated only when
 # OCR_ENABLED=true (default; read from the .env bootstrap just created, or a

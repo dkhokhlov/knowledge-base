@@ -246,7 +246,7 @@ emit() { printf '%s\n' "$*"; summary+="$*"$'\n'; }
 # Owner-only perms (files 600, dirs 700) on the synced tree + backup retention.
 # Drive content is business-sensitive; rclone v1.60 has no --umask, so normalize
 # after the sync. api-gateway reads ./gdrive read-only as the host owner uid
-# (HOST_UID, default 1000), so owner-only is readable by the container. Skip
+# (HOST_UID in .env), so owner-only is readable by the container. Skip
 # under --dry-run (no files are created). Run on every exit path (success +
 # fail-fast).
 normalize_perms() {

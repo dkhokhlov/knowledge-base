@@ -219,6 +219,7 @@ clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + backup-and-r
 	  rm -f .env .env.local
 	@rm -rf ./.gdrive-backup
 	@echo "Wiped containers, ./data, ./.gdrive-backup, .env, .env.local (backed up to ./.config-backup/<TS>). graphiti/config.yaml, caddy/Caddyfile, ./gdrive preserved."
+	@echo "Next: make provision  (.env is gone; compose needs it for every command)."
 
 clean-backup: ## Remove the retention trees (./.gdrive-backup + ./.config-backup). Non-destructive: does not touch the stack, ./data, .env, or .env.local.
 	@rm -rf ./.gdrive-backup ./.config-backup
