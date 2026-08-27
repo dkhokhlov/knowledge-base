@@ -100,7 +100,7 @@ test-output: ## Unit-test CLI JSON output schemas (no stack needed)
 test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch (incl. OCR engine + gdrive index) + full test suite + e2e
 	@./scripts/test-e2e.sh
 
-test-e2e-iso: ## Isolated e2e: clone to gitignored .test-e2e/ + run make test-e2e under a separate compose project (kb-e2e) so the LIVE stack keeps running. Reuses the live ./gdrive mirror (no re-download). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On failure run make clean-test.
+test-e2e-iso: ## Isolated e2e: clone to gitignored .test-e2e/ + run make test-e2e under a separate compose project (kb-e2e) so the LIVE stack keeps running. Runs a REAL rclone sync (re-downloads the gdrive corpus). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On failure run make clean-test.
 	@./scripts/test-e2e-iso.sh
 
 clean-test: ## Tear down the isolated e2e stack (compose project kb-e2e) + remove .test-e2e/. Safe anytime (no-op if absent); use after a failed make test-e2e-iso.
@@ -108,7 +108,7 @@ clean-test: ## Tear down the isolated e2e stack (compose project kb-e2e) + remov
 	  cd .test-e2e && OLLAMA_HOST=http://localhost:11434 COMPOSE_PROJECT_NAME=kb-e2e \
 	    COMPOSE_FILE=compose.yml:compose.e2e.override.yml docker compose down --remove-orphans 2>/dev/null || true; \
 	  cd ..; \
-	  docker run --rm -v "$$(pwd)/.test-e2e:/data" alpine sh -c "rm -rf /data/*" 2>/dev/null || true; \
+	  docker run --rm -v "$$(pwd)/.test-e2e:/data" alpine sh -c "rm -rf /data/* /data/.[!.]* /data/..?*" 2>/dev/null || true; \
 	  rm -rf .test-e2e && echo "Removed .test-e2e (e2e clone + stack)."; \
 	else echo "No .test-e2e to clean."; fi
 

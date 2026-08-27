@@ -51,8 +51,11 @@ if [ -z "${OLLAMA_HOST:-}" ]; then
   OLLAMA_HOST="$(grep -E '^OLLAMA_HOST=' "$SRC/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
 fi
 if [ -z "${OLLAMA_HOST:-}" ] && docker inspect kb-graphiti >/dev/null 2>&1; then
+  # strip the "OPENAI_BASE_URL=" prefix (sub, not awk -F= $2, so a URL containing
+  # '=' is not truncated), drop a trailing slash, then strip "/v1".
   base="$(docker inspect kb-graphiti --format '{{range .Config.Env}}{{println .}}{{end}}' \
-    | awk -F= '/^OPENAI_BASE_URL=/{print $2}')"
+    | awk '/^OPENAI_BASE_URL=/{sub(/^OPENAI_BASE_URL=/,""); print}')"
+  base="${base%/}"
   OLLAMA_HOST="${base%/v1}"
 fi
 [ -n "${OLLAMA_HOST:-}" ] || { echo "FAIL  OLLAMA_HOST not set (export it, set it in $SRC/.env, or run with the live stack up)" >&2; exit 1; }

@@ -52,7 +52,8 @@ if [ -z "${GDRIVE_KB_ID:-}" ]; then
   finish
   exit 0
 fi
-src_count=$(find gdrive -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
+# Exclude dot-dirs (.tests, .sync-reports) from the source count: gateway.walk_source prunes them from a full walk (gateway/app.py "Prune dot-dirs"), so counting them leaves the drain `accounted < src_count` -> a false timeout. `path` opts into a dot-subtree (test_11); this full walk does not.
+src_count=$(find gdrive -type f -not -path '*/.*' -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
 if [ "${src_count:-0}" -eq 0 ]; then
   section "gdrive index"
   pass "SKIP: ./gdrive has no allowlisted files to index (run: make gdrive-sync)"
