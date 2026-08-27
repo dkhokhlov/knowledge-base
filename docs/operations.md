@@ -576,8 +576,7 @@ dependency is down.
 | `config` | render effective compose config (secrets redacted) |
 | `health` | probe api-gateway `/health` (via Caddy) and Open Web UI `/health` |
 | `test` | run system integration tests against the running stack (see [testing.md](testing.md)) |
-| `test-e2e` | DESTRUCTIVE in-place clean-state run: wipe + re-provision + rclone + full suite + the `test_09` real-gdrive drain. Tears the live stack down — on a live host use `test-e2e-iso` instead (see [Isolated end-to-end test](#isolated-end-to-end-test-make-test-e2e-iso)) |
-| `test-e2e-iso` | isolated e2e: clone to gitignored `.test-e2e/` + run `make test-e2e` under a separate compose project (`kb-e2e`) so the live stack keeps running. REAL rclone (re-downloads the corpus). Set `E2E_PORT` (default 3010), `OCR_ENABLED`, `E2E_KEEP=1`. On failure: `make clean-test` |
+| `test-e2e-iso` | DESTRUCTIVE clean-state run isolated in a throwaway clone: wipe + re-provision + rclone + full suite + the `test_09` real-gdrive drain, under a separate compose project (`kb-e2e`) so the live stack keeps running. The destructive logic is inlined into `test-e2e-iso` (there is NO in-place `test-e2e` target — it would wipe the live stack). REAL rclone (re-downloads the corpus). Set `E2E_PORT` (default 3010), `OCR_ENABLED`, `E2E_KEEP=1`. On failure: `make clean-test` |
 | `clean-test` | tear down the `kb-e2e` compose project + remove `.test-e2e/`. Safe anytime (no-op if absent); use after a failed `make test-e2e-iso` |
 | `rag-config` | set the strict-grounding RAG template + sync `rag.ollama.base_url` to the translated `OLLAMA_HOST` (run after `make api-keys`; re-run after a DB reset or an `OLLAMA_HOST` change; see [Repointing OLLAMA_HOST](#repointing-ollama_host)) |
 | `ocr-config` | re-assert the OWUI external-extraction keys (engine + URL + API key); auto-set by `make api-keys` when `OCR_ENABLED=true`; re-run after a DB reset; no-ops (exit 0) when `OCR_ENABLED!=true` |
@@ -597,15 +596,16 @@ dependency is down.
 
 ## Isolated end-to-end test (`make test-e2e-iso`)
 
-`make test-e2e` is destructive: it wipes `./data` + `.env` + `.env.local` and
-re-provisions from scratch (real rclone + the full gdrive drain). Running it in
-the live tree tears the live stack down. `make test-e2e-iso` runs the same
-destructive `make test-e2e` in a throwaway, gitignored `.test-e2e/` clone under
-a **separate compose project** (`kb-e2e`), so the live `kb-*` stack on the same
-host keeps running (different container names, host port, project, volumes,
-networks). `compose.e2e.override.yml` overrides every `container_name` to
-`kb-e2e-*` (a new service added to `compose.yml` without a line there collides
-loudly on `up`).
+The destructive clean-state run wipes `./data` + `.env` + `.env.local` and
+re-provisions from scratch (real rclone + the full gdrive drain). There is **no
+in-place `make test-e2e` target** — running it in the live tree would tear the
+live stack down. `make test-e2e-iso` runs that same destructive body **inlined**
+into `scripts/test-e2e-iso.sh`, in a throwaway, gitignored `.test-e2e/` clone
+under a **separate compose project** (`kb-e2e`), so the live `kb-*` stack on the
+same host keeps running (different container names, host port, project,
+volumes, networks). `compose.e2e.override.yml` overrides every `container_name`
+to `kb-e2e-*` (a new service added to `compose.yml` without a line there
+collides loudly on `up`).
 
 ### Provisioning the clone (the standard way)
 
@@ -621,7 +621,7 @@ precedence](#variable-precedence)) — not by editing the tracked template:
 | 1. wrapper detects `OLLAMA_HOST` | shell env, else the live `.env`, else the running `kb-graphiti` container's `OPENAI_BASE_URL` (strip `/v1`) |
 | 2. wrapper `unset BASH_ENV KB_HOST` | isolate the e2e tree from the operator's `~/.bash_env` (see below) |
 | 3. `make bootstrap KB_HOST=... KB_HOST_PORT=... OLLAMA_HOST=...` | `bootstrap.sh` force-persists each non-empty tunable into `.env` (replace if present, append if commented/absent; idempotent — no tunable means no change, so the live operator is unaffected) |
-| 4. `test-e2e.sh` re-forwards the same tunables to its internal `make bootstrap` | the values survive the internal `make clean-all` (rm `.env`) -> bootstrap (recreates `.env` from `.env.template`) |
+| 4. the inlined destructive body re-forwards the same tunables to its internal `make bootstrap` | the values survive the internal `make clean-all` (rm `.env`) -> bootstrap (recreates `.env` from `.env.template`) |
 
 The clone's `.env.template` is **never mutated**. The e2e provisions exactly the
 way a live `make bootstrap KB_HOST=... KB_HOST_PORT=... OLLAMA_HOST=...` would.
@@ -629,7 +629,7 @@ way a live `make bootstrap KB_HOST=... KB_HOST_PORT=... OLLAMA_HOST=...` would.
 ### Why `unset BASH_ENV`
 
 `~/.bash_env` is sourced by `BASH_ENV` in every non-interactive bash child (make
-recipe shells, `bootstrap.sh`, `test-e2e.sh`, `admin-signup.sh`, ...) and
+recipe shells, `bootstrap.sh`, `test-e2e-iso.sh`, `admin-signup.sh`, ...) and
 re-exports `KB_HOST=http://mini2:3000` (the live stack) + `OLLAMA_HOST`. If it
 re-sources inside the e2e tree, it clobbers the `KB_HOST` make-tunable at
 **bootstrap-capture time**: `bootstrap.sh`'s bash sources `BASH_ENV` (setting

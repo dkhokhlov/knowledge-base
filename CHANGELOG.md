@@ -24,6 +24,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
   docs now suggest 10–20 for broader recall. The agent synthesizes from raw
   chunks, so more chunks serve it better than a one-shot `rag` when coverage
   matters. `kb_gateway retrieve` (facts) is unchanged (default 10).
+- **Removed the in-place `make test-e2e` target + `scripts/test-e2e.sh`
+  (breaking, footgun).** The target ran the destructive clean-state wipe +
+  re-provision in the live tree, tearing the live stack down. The destructive
+  body is now inlined into `scripts/test-e2e-iso.sh`, which runs it in a
+  throwaway `.test-e2e/` clone under a separate compose project (`kb-e2e`) so
+  the live stack keeps running. `make test-e2e-iso` is the only entry point;
+  `make clean-test` tears the clone down.
 
 ### Fixed
 

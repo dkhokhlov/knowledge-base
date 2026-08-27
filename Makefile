@@ -16,7 +16,7 @@ COMPOSE  := env -u COMPOSE_PROFILES docker compose
 DATA_DIR := ./data
 
 .PHONY: help provision bootstrap preflight pull pull-models start stop restart logs ps config \
-        health test test-output test-e2e test-e2e-iso api-keys admin-signup rag-config \
+        health test test-output test-e2e-iso api-keys admin-signup rag-config \
         users-create users-list users-search \
         ocr-config \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
@@ -90,17 +90,14 @@ test: ## Run unit tests (no stack) then system integration tests against the run
 	  python3 tests/test_output_json.py -v || status=1; \
 	  for t in tests/test_*.sh; do [ -e "$$t" ] || continue; \
 	  case "$$t" in *test_09_gdrive_index.sh) \
-	    echo "==> skip $$t (full real-gdrive drain; run via: make test-e2e)"; continue;; esac; \
+	    echo "==> skip $$t (full real-gdrive drain; run via: make test-e2e-iso)"; continue;; esac; \
 	  echo; echo "=== $$t ==="; bash "$$t" || status=1; \
 	done; exit $$status
 
 test-output: ## Unit-test CLI JSON output schemas (no stack needed)
 	@python3 tests/test_output_json.py -v
 
-test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch (incl. OCR engine + gdrive index) + full test suite + e2e
-	@./scripts/test-e2e.sh
-
-test-e2e-iso: ## Isolated e2e: clone to gitignored .test-e2e/ + run make test-e2e under a separate compose project (kb-e2e) so the LIVE stack keeps running. Runs a REAL rclone sync (re-downloads the gdrive corpus). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On failure run make clean-test.
+test-e2e-iso: ## Isolated e2e: clone to gitignored .test-e2e/ + run the destructive e2e (clean-state wipe + re-provision + rclone + full suite + test_09 drain) under a separate compose project (kb-e2e) so the LIVE stack keeps running. The destructive logic is inlined; there is NO in-place `make test-e2e` (it would wipe the live stack). REAL rclone (re-downloads the corpus). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On failure run make clean-test.
 	@./scripts/test-e2e-iso.sh
 
 clean-test: ## Tear down the isolated e2e stack (compose project kb-e2e) + remove .test-e2e/. Safe anytime (no-op if absent); use after a failed make test-e2e-iso.
