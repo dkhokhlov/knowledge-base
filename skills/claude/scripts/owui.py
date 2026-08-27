@@ -107,6 +107,45 @@ def flatten_chroma(d):
     return out
 
 
+def _file_gdrive(base, key, file_id):
+    """Read File.meta.data.gdrive for one file — the Drive record (description,
+    labels, grounded flag, approval, comments) the gateway stored at upload from
+    the <file>.meta.json sidecar. The chunk carries only file_id (gdrive is
+    file-level, not in chunk metadata), so retrieve joins it here per file_id.
+    Defensive: any non-200 / missing gdrive -> None (a chunk with no gdrive meta
+    still returns, never aborts the retrieve). One GET per unique file_id."""
+    if not file_id:
+        return None
+    code, txt = call(base, key, "GET", "/api/v1/files/%s?content=false" % file_id)
+    if code != 200:
+        return None
+    try:
+        d = json.loads(txt)
+    except Exception:
+        return None
+    return ((d.get("meta") or {}).get("data") or {}).get("gdrive")
+
+
+def _gdrive_view(g):
+    """Curate the file-level gdrive record into the per-chunk fields a retrieval
+    result (and a future grounding rerank) consumes: the strong signals (grounded,
+    approval status + complete_time), the weak-signal text (description) +
+    time-conditioning (modified_time), and label/comment counts. Returns None
+    when the file has no gdrive meta."""
+    if not g:
+        return None
+    ap = g.get("approval") or {}
+    return {
+        "grounded": g.get("grounded"),
+        "labels": g.get("labels") or [],
+        "approval_status": ap.get("status"),
+        "approval_complete_time": ap.get("complete_time"),
+        "comment_count": len(g.get("comments") or []),
+        "description": g.get("description") or "",
+        "modified_time": g.get("modified_time"),
+    }
+
+
 # --- subcommands -------------------------------------------------------------
 
 def cmd_whoami(base, key, a):
@@ -181,6 +220,15 @@ def cmd_retrieve(base, key, a):
     body = {"collection_names": [kb_id], "query": a.query, "k": a.k, "hybrid": not a.no_hybrid}
     d = jget(base, key, "POST", "/api/v1/retrieval/query/collection", body)
     hits = flatten_chroma(d)
+    # Join File.meta.data.gdrive per unique file_id so the file-level Drive record
+    # (grounded/labels/approval/comments/description/modified_time) travels with
+    # each chunk at retrieval time. gdrive is file-level (not in chunk metadata),
+    # so one GET per unique file_id; missing gdrive -> None (never aborts).
+    gcache = {}
+    for fid in {h.get("file_id") for h in hits if h.get("file_id")}:
+        gcache[fid] = _gdrive_view(_file_gdrive(base, key, fid))
+    for h in hits:
+        h["gdrive"] = gcache.get(h.get("file_id"))
     print(json.dumps({"kb_id": kb_id, "kb_name": kb_name, "hits": hits}))
 
 
