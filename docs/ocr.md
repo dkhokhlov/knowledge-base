@@ -4,8 +4,8 @@ The `markitdown-ocr` sidecar is an **external extraction engine** for Open WebUI
 It runs [markitdown-ocr][markitdown-ocr] with the OCR service replaced by an
 Ollama-native `/api/chat` client (`markitdown/oursvc.py`), so embedded figures
 and image-only pages are OCR'd by `deepseek-ocr` and become searchable KB
-members. Off when `OCR_ENABLED=false` (default `true`); profile-gated
-(`--profile ocr`); no fallback.
+members. Off when `OCR_ENABLED=false` (default `true`); compose-profile-gated
+(`COMPOSE_PROFILES=ocr` in `.env`, baked by `make bootstrap`); no fallback.
 
 This is the per-figure OCR path for the `gdrive` knowledge base: image-only
 PDFs (no text layer) and figure/diagram content in text+figure PDFs become
@@ -70,18 +70,20 @@ bytes straight to `OllamaNativeOCRService` and returns one document. (The gdrive
 set excludes standalone images via the gateway `DEFAULT_ALLOW` allowlist, so
 this branch matters for direct uploads, not the synced set.)
 
-## Provisioning (config flag, decided before `make bootstrap`)
+## Provisioning (config flag, decided at provision time)
 
-OCR is gated by `OCR_ENABLED` in `.env` (default `true`; overridable per make
-invocation: `make <target> OCR_ENABLED=false`). It is a config flag, not a
-runtime toggle: decide it before `make bootstrap`; a change after bootstrap
-needs `make clean-all && make bootstrap`. When enabled, OCR is a prereq
-provisioned by the standard chain — no separate step:
+OCR is gated by `OCR_ENABLED` in `.env` (default `true`). It is a config flag,
+not a runtime toggle: `make provision` bakes `COMPOSE_PROFILES=ocr` into `.env`
+from `OCR_ENABLED`, and `docker compose` reads that for every command, so the
+sidecar is governed by `.env` (no `--profile` flag, no per-run override). To
+disable: `make clean-all && make provision OCR_ENABLED=false` (bakes an empty
+`COMPOSE_PROFILES`; `preflight` asserts the two agree). When enabled, OCR is a
+prereq provisioned by the standard chain — no separate step:
 
 1. `make bootstrap` generates `OCR_SERVICE_TOKEN` into `.env.local` (secret);
 2. `make pull-models` pulls `deepseek-ocr` (a first-class prereq alongside the
    base LLM + embedder);
-3. `make start` builds + starts the `markitdown-ocr` sidecar (`--profile ocr`);
+3. `make start` builds + starts the `markitdown-ocr` sidecar (via `COMPOSE_PROFILES=ocr` in `.env`);
 4. `make api-keys` sets `CONTENT_EXTRACTION_ENGINE=external` +
    `EXTERNAL_DOCUMENT_LOADER_URL=http://markitdown-ocr:8080` + the API key in
    the OWUI DB (`/api/v1/retrieval/config/update`, merge semantics) and
@@ -146,13 +148,13 @@ fallback).
 
 ## Disabling (no runtime toggle; no KB reset)
 
-There is no runtime toggle — `make ocr-disable` is gone. To disable, set
-`OCR_ENABLED=false` in `.env` BEFORE `make bootstrap` (or for one run,
-`make <target> OCR_ENABLED=false`). A persistent change after bootstrap needs
-`make clean-all && make bootstrap` (wipes `.env.local` + `./data`): the token
-is no longer generated, `make start` no longer adds `--profile ocr`, and
-`make api-keys` no longer sets the OWUI routing — so new uploads use OWUI's
-default loaders. Existing OCR'd members keep their content until re-ingested;
+There is no runtime toggle — `make ocr-disable` is gone. To disable, run
+`make clean-all && make provision OCR_ENABLED=false` (wipes `.env.local` +
+`./data`; `make bootstrap` persists `OCR_ENABLED=false` + an empty
+`COMPOSE_PROFILES` into `.env`): the token is no longer generated, the ocr
+sidecar is no longer in the compose project, and `make api-keys` no longer
+sets the OWUI routing — so new uploads use OWUI's default loaders. Existing
+OCR'd members keep their content until re-ingested;
 re-ingested image-only files return to orphans (the pre-OCR state). No full KB
 reset.
 

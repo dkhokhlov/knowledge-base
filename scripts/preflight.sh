@@ -35,6 +35,13 @@ ok "./data tree exists"
 # restored so the OCR block below honors the override.
 _OCR_ENABLED_OVR="${OCR_ENABLED:-}"
 set -a; . ./.env; set +a
+# .env's OCR_ENABLED (post-source, before the override is restored) for the
+# COMPOSE_PROFILES consistency guard below. The guard asserts .env internal
+# consistency (bootstrap drift/migration), independent of a transient
+# `make preflight OCR_ENABLED=<val>` override, so it must compare the persisted
+# .env value against COMPOSE_PROFILES -- not the override (which does not, and
+# must not, rewrite COMPOSE_PROFILES).
+_ENV_OCR_ENABLED="${OCR_ENABLED:-true}"
 if [ -n "$_OCR_ENABLED_OVR" ]; then export OCR_ENABLED="$_OCR_ENABLED_OVR"; fi
 
 : "${OLLAMA_HOST:?OLLAMA_HOST is required (set in shell env or uncomment in .env; see .env.template)}"
@@ -122,6 +129,23 @@ fi
 # is not pulled (a half-provisioned engine silently orphans image docs), and
 # WARN on rag.content_extraction_engine drift (OWUI not routed to the engine).
 # When disabled, skip (the sidecar is not part of the stack).
+#
+# COMPOSE_PROFILES (the ocr sidecar compose profile) is derived from OCR_ENABLED
+# by `make bootstrap` and read by `docker compose` from .env for EVERY command.
+# Assert the two agree so a stale/migrated .env (an existing deployment that
+# pulled this commit without re-running `make bootstrap`) or a hand-edit cannot
+# silently drop the sidecar or start it with no token/routing. The old start.sh
+# re-derived --profile ocr every run; this guard is the replacement self-heal --
+# it fails loud instead of starting a broken stack.
+case ",${COMPOSE_PROFILES:-}," in
+  *,ocr,*) _cp_ocr=1 ;; *) _cp_ocr=0 ;;
+esac
+if [ "$_ENV_OCR_ENABLED" = "true" ] && [ "$_cp_ocr" -ne 1 ]; then
+  fail "OCR_ENABLED=true but COMPOSE_PROFILES lacks 'ocr' (markitdown-ocr would be dropped on start). Run: make bootstrap"
+elif [ "$_ENV_OCR_ENABLED" != "true" ] && [ "$_cp_ocr" -eq 1 ]; then
+  fail "OCR_ENABLED!=true but COMPOSE_PROFILES=ocr (markitdown-ocr would start with no token/routing). Run: make bootstrap"
+fi
+ok "COMPOSE_PROFILES matches OCR_ENABLED (${_ENV_OCR_ENABLED} -> ${COMPOSE_PROFILES:-<empty>})"
 if [ "${OCR_ENABLED:-true}" = "true" ]; then
   OCR_MODEL="${OCR_MODEL:-deepseek-ocr}"
   # Match "deepseek-ocr" or "deepseek-ocr:latest" (ollama pull appends :latest;

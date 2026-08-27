@@ -4,7 +4,15 @@
 
 .DEFAULT_GOAL := help
 
-COMPOSE  := docker compose
+# COMPOSE_PROFILES (the ocr sidecar profile) is read by `docker compose` from
+# .env for EVERY command, so stop/down/clean/pull/ps/config target the same
+# service set as `make start` -- the markitdown-ocr sidecar is always in the
+# project when OCR_ENABLED=true. `env -u COMPOSE_PROFILES` shields lifecycle
+# calls from a stale COMPOSE_PROFILES in the operator's shell, so .env is
+# strictly the source. To disable OCR: `make clean-all && make provision
+# OCR_ENABLED=false` (make bootstrap bakes OCR_ENABLED=false + an empty
+# COMPOSE_PROFILES into .env). No --profile flag, no shell export.
+COMPOSE  := env -u COMPOSE_PROFILES docker compose
 DATA_DIR := ./data
 
 .PHONY: help provision bootstrap preflight pull pull-models start stop restart logs ps config \
@@ -22,7 +30,7 @@ provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + adm
 	@set -e; \
 	  echo "==> 1/8 bootstrap (creates .env/.env.local + secrets + ./data dirs)"; make bootstrap; \
 	  echo "==> 2/8 pull-models (BLOCKING: pulls base LLM + ctx variant + embedder + deepseek-ocr from Ollama)"; make pull-models; \
-	  echo "==> 3/8 start (preflight + docker compose up -d, + --profile ocr when OCR_ENABLED=true)"; make start; \
+	  echo "==> 3/8 start (preflight + docker compose up -d; ocr sidecar via COMPOSE_PROFILES=ocr in .env)"; make start; \
 	  echo "==> waiting for stack /health (OWUI has a 40s start period)..."; \
 	  _KB_DOMAIN_OVR=$${KB_DOMAIN:-}; _OCR_ENABLED_OVR=$${OCR_ENABLED:-}; \
 	  set -a; . ./.env; set +a; \
@@ -56,21 +64,20 @@ pull-models: ## Pull base LLM, create the ctx-baked variant (GRAPHITI_MODEL), pu
 start: ## Start the stack detached (run `make bootstrap` first)
 	@./scripts/start.sh
 
-stop: ## Stop the stack (keeps containers + data; stops the --profile ocr sidecar too)
-	@$(COMPOSE) $$(./scripts/compose-profiles.sh) stop
+stop: ## Stop the stack (keeps containers + data; stops the ocr sidecar too via COMPOSE_PROFILES=ocr in .env)
+	@$(COMPOSE) stop
 
 restart: stop start ## Restart (stop then start)
 
-logs: ## Tail all service logs incl. the --profile ocr sidecar (Ctrl-C to detach)
-	@$(COMPOSE) $$(./scripts/compose-profiles.sh) logs -f
+logs: ## Tail all service logs incl. the ocr sidecar (Ctrl-C to detach; via COMPOSE_PROFILES=ocr in .env)
+	@$(COMPOSE) logs -f
 
 ps: ## Show container status (with health)
 	@$(COMPOSE) ps
 
-config: ## Render effective compose config incl. the --profile ocr sidecar (secrets redacted)
-	@_OVR="$${OCR_ENABLED:-}"; set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
-	  [ -n "$$_OVR" ] && export OCR_ENABLED="$$_OVR"; \
-	  $(COMPOSE) $$(./scripts/compose-profiles.sh) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_FIRST_PASSWORD): .*/\1: <redacted>/'
+config: ## Render effective compose config incl. the ocr sidecar (COMPOSE_PROFILES=ocr in .env; secrets redacted)
+	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
+	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_FIRST_PASSWORD): .*/\1: <redacted>/'
 
 health: ## Probe the stack /health (Caddy -> api-gateway aggregated, reflects OWUI)
 	@set -a; . ./.env; set +a; \

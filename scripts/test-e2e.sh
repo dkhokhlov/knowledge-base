@@ -59,7 +59,9 @@ make preflight
 # `docker compose build openwebui`).
 docker compose build api-gateway
 if [ "${OCR_ENABLED:-true}" = "true" ]; then
-  docker compose --profile ocr build markitdown-ocr
+  # markitdown-ocr is addressable because COMPOSE_PROFILES=ocr is baked into
+  # .env by the make bootstrap above (compose reads it for every command).
+  docker compose build markitdown-ocr
 fi
 make start
 

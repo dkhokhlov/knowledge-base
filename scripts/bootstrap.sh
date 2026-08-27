@@ -122,6 +122,31 @@ else
   printf '  OCR_ENABLED=%s — not generating OCR_SERVICE_TOKEN (markitdown-ocr disabled)\n' "$OCR_ENABLED_VAL"
 fi
 
+# COMPOSE_PROFILES (the ocr sidecar compose profile) is DERIVED from OCR_ENABLED
+# and force-synced into .env every bootstrap (non-editable; re-synced so manual
+# drift is repaired). `docker compose` reads COMPOSE_PROFILES from .env for EVERY
+# command, so the sidecar is always in the project when enabled -- no --profile
+# flag, no shell export. To disable OCR: `make clean-all && make provision
+# OCR_ENABLED=false` (this persists OCR_ENABLED=false + an empty COMPOSE_PROFILES).
+_CP=""; [ "$OCR_ENABLED_VAL" = "true" ] && _CP="ocr"
+if grep -qE '^COMPOSE_PROFILES=' .env; then
+  sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${_CP}|" .env
+else
+  printf 'COMPOSE_PROFILES=%s\n' "$_CP" >> .env
+fi
+# Persist a `make bootstrap OCR_ENABLED=<val>` override into .env so the whole
+# chain (pull-models, api-keys, start) and lifecycle read it durably -- the
+# override DEFINES the profile, it is not transient. Without an override the
+# existing .env OCR_ENABLED is the source of truth (idempotent, not rewritten).
+if [ -n "${OCR_ENABLED:-}" ]; then
+  if grep -qE '^OCR_ENABLED=' .env; then
+    sed -i "s|^OCR_ENABLED=.*|OCR_ENABLED=${OCR_ENABLED}|" .env
+  else
+    printf 'OCR_ENABLED=%s\n' "$OCR_ENABLED" >> .env
+  fi
+  printf '  persisted OCR_ENABLED=%s into .env (defines the compose profile)\n' "$OCR_ENABLED"
+fi
+
 chmod 600 .env.local
 printf '  set .env.local permissions to 0600\n'
 

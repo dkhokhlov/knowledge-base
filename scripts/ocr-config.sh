@@ -10,7 +10,7 @@
 #
 # Preconditions:
 #   - Stack running and healthy (`make start`).
-#   - markitdown-ocr service up (started by `make start` with --profile ocr).
+#   - markitdown-ocr service up (started by `make start` via COMPOSE_PROFILES=ocr in .env).
 #   - OPENWEBUI_ADMIN_API_KEY + OCR_SERVICE_TOKEN in .env.local.
 #
 # Why this exists: OWUI's external extraction engine is global + all-or-nothing.
