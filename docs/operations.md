@@ -651,9 +651,11 @@ startup source of `~/.bash_env` left in its env.)
   The wrapper copies the live one into the throwaway clone so rclone uses the
   same exclusions; `make clean-test` discards it with the clone — it is never
   committed and never leaves the host.
-- The e2e rclone yields **151 indexable** (`allowed − excluded − dups`; the live
-  mirror yields 157 — the e2e excludes 6 more). `test_09` counts 151: it excludes
-  dot-dirs (`.tests`, `.sync-reports`) from the source count, matching
+- The e2e rclone yields the indexable set a **fresh sync** produces
+  (`allowed − excluded − dups`). `gdrive-exclude.conf` `[*]` excludes `*.json`,
+  so a mirror synced before that rule holds stale `*.json` on disk and counts
+  higher than a fresh sync — a re-sync reconciles it. `test_09` counts the fresh
+  source, excluding dot-dirs (`.tests`, `.sync-reports`), matching
   `gateway.walk_source` which prunes them from a full walk.
 
 On success the e2e stack is torn down and `.test-e2e` removed (unless

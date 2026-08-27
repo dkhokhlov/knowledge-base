@@ -80,7 +80,7 @@ path=""
 
 # KB-indexable document filter — MUST match DEFAULT_ALLOW in gateway/app.py
 # (the gdrive index documents-only set: docx,pdf,pptx,xlsx,txt,md,html,json,log,
-# tex). Used to count local files the KB will index (the 157), distinct from the
+# tex). Used to count local files the KB will index (the indexable set), distinct from the
 # raw local count (all extensions). Case-insensitive (-iname) matches the
 # gateway's ext.lower(); -not -path '*/.*' prunes dot-names like walk_source
 # (gateway/app.py:806). KB_ALLOW env override is NOT honored here (the host sync

@@ -181,7 +181,7 @@ G=~/.codex/skills/kb/scripts/kb_gateway.py
 python3 "$G" whoami                              # verify identity (from the key, via the gateway)
 python3 "$G" groups                              # list all groups that have data
 python3 "$G" add "Project Atlas uses a QPU scheduler" --name atlas
-python3 "$G" retrieve "QPU scheduling" --k 5       # facts across ALL groups (read-only)
+python3 "$G" retrieve "QPU scheduling" --k 5       # facts across ALL groups (read-only; --k default 10)
 python3 "$G" episodes --max 20                   # episodes across ALL groups (read-only)
 python3 "$G" status                              # graphiti server + DB status
 python3 "$G" forget user:alice@example.com       # clear YOUR group's memory (owner/admin)

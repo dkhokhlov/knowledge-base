@@ -27,6 +27,7 @@
 *.pyc
 *.py
 *.csv
+*.json
 *.s
 *.c
 *.h
