@@ -19,6 +19,11 @@ set -u
 load_env
 require_stack_up
 
+# Container name (overridable for the isolated e2e clone, which renames it to
+# kb-e2e-markitdown-ocr via compose.e2e.override.yml; mirrors test_04's
+# OWUI_CONTAINER).
+CTN="${MARKITDOWN_CONTAINER:-kb-markitdown-ocr}"
+
 # --- skip condition ----------------------------------------------------------
 if [ "${OCR_ENABLED:-true}" != "true" ]; then
   section "ocr auth"
@@ -31,20 +36,20 @@ section "kb-markitdown-ocr holds the token (stale-recreate guard)"
 # A recreate that bypassed .env.local leaves OCR_SERVICE_TOKEN empty in the
 # container env -> oursvc.py _token=None -> /process skips the auth check. This
 # catches that regression (the gap this test locks in).
-toklen=$(docker inspect kb-markitdown-ocr \
+toklen=$(docker inspect "$CTN" \
   --format '{{range .Config.Env}}{{println .}}{{end}}' \
   | awk -F= '/^OCR_SERVICE_TOKEN=/{print length($2)}')
 if [ "${toklen:-0}" -gt 0 ]; then
-  pass "kb-markitdown-ocr OCR_SERVICE_TOKEN is set (len=$toklen)"
+  pass "$CTN OCR_SERVICE_TOKEN is set (len=$toklen)"
 else
-  fail "kb-markitdown-ocr OCR_SERVICE_TOKEN is EMPTY (stale recreate? rerun: make start to recreate from .env.local, or make bootstrap to regenerate the token)"
+  fail "$CTN OCR_SERVICE_TOKEN is EMPTY (stale recreate? rerun: make start to recreate from .env.local, or make bootstrap to regenerate the token)"
 fi
 
 section "/process auth gate (401 without Bearer, 200 with)"
 # /process is internal (no published port; owui_net only). Probe it inside the
 # container via python3 + stdlib urllib. The token comes from the container env
 # (os.environ), not the host, so it never appears in the command line or output.
-out=$(docker exec -i kb-markitdown-ocr python3 <<'PY'
+out=$(docker exec -i "$CTN" python3 <<'PY'
 import os, urllib.request, urllib.error
 tok = os.environ.get("OCR_SERVICE_TOKEN", "")
 def put(auth):
@@ -64,7 +69,7 @@ PY
 noauth=$(printf '%s\n' "$out" | sed -n 's/^NOAUTH=//p')
 auth=$(printf '%s\n' "$out" | sed -n 's/^AUTH=//p')
 if [ -z "${noauth:-}" ]; then
-  fail "/process probe returned no result (kb-markitdown-ocr not running? out=$out)"
+  fail "/process probe returned no result ($CTN not running? out=$out)"
 else
   [ "$noauth" = "401" ] \
     && pass "/process without Bearer -> 401 (auth enforced)" \

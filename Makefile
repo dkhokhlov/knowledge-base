@@ -16,12 +16,12 @@ COMPOSE  := env -u COMPOSE_PROFILES docker compose
 DATA_DIR := ./data
 
 .PHONY: help provision bootstrap preflight pull pull-models start stop restart logs ps config \
-        health test test-output test-e2e api-keys admin-signup rag-config \
+        health test test-output test-e2e test-e2e-iso api-keys admin-signup rag-config \
         users-create users-list users-search \
         ocr-config \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
         projects-bootstrap \
-        shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-backup backup
+        shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-test clean-backup backup
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -99,6 +99,18 @@ test-output: ## Unit-test CLI JSON output schemas (no stack needed)
 
 test-e2e: ## DESTRUCTIVE: wipe + re-provision from scratch (incl. OCR engine + gdrive index) + full test suite + e2e
 	@./scripts/test-e2e.sh
+
+test-e2e-iso: ## Isolated e2e: clone to gitignored .test-e2e/ + run make test-e2e under a separate compose project (kb-e2e) so the LIVE stack keeps running. Reuses the live ./gdrive mirror (no re-download). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On failure run make clean-test.
+	@./scripts/test-e2e-iso.sh
+
+clean-test: ## Tear down the isolated e2e stack (compose project kb-e2e) + remove .test-e2e/. Safe anytime (no-op if absent); use after a failed make test-e2e-iso.
+	@if [ -d .test-e2e ]; then \
+	  cd .test-e2e && OLLAMA_HOST=http://localhost:11434 COMPOSE_PROJECT_NAME=kb-e2e \
+	    COMPOSE_FILE=compose.yml:compose.e2e.override.yml docker compose down --remove-orphans 2>/dev/null || true; \
+	  cd ..; \
+	  docker run --rm -v "$$(pwd)/.test-e2e:/data" alpine sh -c "rm -rf /data/*" 2>/dev/null || true; \
+	  rm -rf .test-e2e && echo "Removed .test-e2e (e2e clone + stack)."; \
+	else echo "No .test-e2e to clean."; fi
 
 api-keys: ## Provision admin + agent-user API keys into .env.local (run after `make start` + admin signup)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }

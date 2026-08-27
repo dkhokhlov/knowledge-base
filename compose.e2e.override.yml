@@ -1,0 +1,28 @@
+# E2e isolation override: rename every container so a second stack (compose
+# project `kb-e2e`, applied via COMPOSE_FILE=compose.yml:compose.e2e.override.yml
+# in scripts/test-e2e-iso.sh) does NOT collide with the live `kb-*` containers.
+#
+# Why: compose.yml hardcodes `container_name: kb-*` on every service. Those names
+# are project-name-independent, so a bare COMPOSE_PROJECT_NAME is NOT enough --
+# `up -d` would try to create `kb-graphiti` which the live stack already owns
+# (name collision -> compose refuses to start). This file overrides each name to
+# `kb-e2e-*`; it is merged on top of compose.yml only when named in COMPOSE_FILE,
+# so the live stack (which does NOT set COMPOSE_FILE) keeps the `kb-*` names.
+#
+# Maintenance: a service added to compose.yml MUST be added here too, or
+# `make test-e2e-iso` fails loud on `up` (container name already in use by the
+# live stack). Keep this list in sync with the `container_name:` entries in
+# compose.yml.
+services:
+  neo4j:
+    container_name: kb-e2e-neo4j
+  graphiti:
+    container_name: kb-e2e-graphiti
+  proxy:
+    container_name: kb-e2e-proxy
+  api-gateway:
+    container_name: kb-e2e-api-gateway
+  openwebui:
+    container_name: kb-e2e-openwebui
+  markitdown-ocr:
+    container_name: kb-e2e-markitdown-ocr
