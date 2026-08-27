@@ -159,6 +159,9 @@ ocr-config: ## Re-assert OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-o
 gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup), then POST /index to reconcile into the OWUI gdrive KB. Use --index-all for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
 	@./scripts/gdrive-sync $${SCOPE_PATH:+--path "$$SCOPE_PATH"}
 
+gdrive-meta: ## Generate per-file .meta YAML sidecars (Drive description, [labels], file attributes, approval) next to each synced gdrive file (read-only; reuses rclone token; never prints credentials). Set FILE=<id> for one file, DRIVE=<name> for one drive, DRY_RUN=1 to preview. .meta sidecars are excluded from indexing and protected from sync deletion (gdrive-exclude.conf [*] *.meta).
+	@./scripts/gdrive-meta.py $${FILE:+--file "$$FILE"} $${DRIVE:+--drive "$$DRIVE"} $${DRY_RUN:+--dry-run}
+
 gdrive-index: ## Reconcile ./gdrive into the OWUI gdrive KB via api-gateway POST /index (admin; incremental). Self-heals FAILED files (delete + re-upload) by default. Set RETRY_PENDING=1 to also retry stalled PENDING files. Set INDEX_ALL=1 for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \

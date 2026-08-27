@@ -27,6 +27,9 @@
 *.pyc
 *.py
 *.csv
+# gdrive-meta sidecars: local-only, protected from sync deletion + never downloaded.
+# *.meta (YAML) here; *.meta.json (JSON, the gateway-read copy) is covered by *.json below.
+*.meta
 *.json
 *.s
 *.c

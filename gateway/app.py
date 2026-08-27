@@ -511,8 +511,10 @@ class Handler(BaseHTTPRequestHandler):
                                "error": "source read failed: %s" % e})
                 continue
             try:
+                gmeta = _gdrive_meta_for(info["abspath"])
                 fm = owui.upload_file(admin_key, kb_id, info["checksum"],
-                                      dir_id, fn, data_bytes, info.get("mtime"))
+                                      dir_id, fn, data_bytes, info.get("mtime"),
+                                      gdrive_meta=gmeta)
             except (owui.OwuiError, OSError) as e:
                 # socket.timeout (OSError) is not always wrapped as OwuiError.
                 # One slow/timed-out upload is a per-file error, not a run abort.
@@ -627,8 +629,10 @@ class Handler(BaseHTTPRequestHandler):
                 dir_id = directory_map.get(src["path"]) or ""
                 try:
                     data_bytes = open(src["abspath"], "rb").read()
+                    gmeta = _gdrive_meta_for(src["abspath"])
                     owui.upload_file(admin_key, kb_id, src["checksum"],
-                                     dir_id, src["filename"], data_bytes, src.get("mtime"))
+                                     dir_id, src["filename"], data_bytes, src.get("mtime"),
+                                     gdrive_meta=gmeta)
                 except (owui.OwuiError, OSError) as e:
                     log.warning("/index retry re-upload failed kb=%s file=%s: %s", kb_id, fn, e)
                     errors.append({"filename": fn, "status": "error",
@@ -769,6 +773,25 @@ def _normalize_path(path):
     return "/".join(parts)
 
 
+def _gdrive_meta_for(abspath):
+    """Read the `<abspath>.meta.json` sidecar (scripts/gdrive-meta.py output) and
+    return its parsed dict for OWUI File.meta.data, or None when no sidecar exists.
+    The sidecar carries the Drive description, labels, grounded flag, approval,
+    and comments. Read-only + defensive: a missing or malformed sidecar is logged
+    and treated as None (the source file still indexes; its sidecar never blocks
+    the upload). Stdlib json only (the gateway is zero-dependency)."""
+    sidecar = abspath + ".meta.json"
+    try:
+        if not os.path.isfile(sidecar):
+            return None
+        with open(sidecar, "r", encoding="utf-8") as fh:
+            m = json.load(fh)
+    except (OSError, ValueError) as e:
+        log.warning("/index .meta.json read failed file=%s: %s", abspath, e)
+        return None
+    return m if isinstance(m, dict) else None
+
+
 def _entry_for(abspath, root, allow, max_size):
     """Build one walk_source entry for `abspath`, or return None when the file is
     skipped (symlink, non-regular, wrong extension, over size). `path` is the
@@ -776,6 +799,11 @@ def _entry_for(abspath, root, allow, max_size):
     uses. Raise GatewayError(500) on a stat or hash OSError (fail closed). Do not
     apply the dot-name skip here: a single-file `path` opts into a dot-file."""
     fn = os.path.basename(abspath)
+    # gdrive-meta sidecars sit next to source files but are never indexed.
+    # `.meta` (YAML) is already dropped by the ext allowlist below (meta ∉ allow);
+    # `.meta.json` (JSON) has ext `json`, which IS allowed, so skip it by name here.
+    if fn.endswith(".meta") or fn.endswith(".meta.json"):
+        return None
     ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
     if ext not in allow:
         return None

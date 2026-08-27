@@ -71,6 +71,64 @@ class EntryMtimeTests(unittest.TestCase):
             import shutil
             shutil.rmtree(root)
 
+    def test_walk_source_skips_meta_sidecar(self):
+        # gdrive-meta sidecars must NOT be indexed. `.meta` (YAML) is dropped by
+        # the ext allowlist (meta ∉ DEFAULT_ALLOW); `.meta.json` (JSON, ext `json`
+        # which IS allowed) is dropped by the name skip in _entry_for. Guards the
+        # "exclude sidecars from indexing" claim (gdrive-exclude.conf [*] protects
+        # the local sidecars from sync deletion; the walk excludes them from the
+        # index).
+        root = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(root, "a.pdf"), "wb") as f:
+                f.write(b"pdf-bytes")
+            with open(os.path.join(root, "a.pdf.meta"), "wb") as f:
+                f.write(b"id: x\nname: a.pdf\n")
+            with open(os.path.join(root, "a.pdf.meta.json"), "wb") as f:
+                f.write(b'{"id":"x","grounded":true}')
+            with open(os.path.join(root, "notes.txt"), "wb") as f:
+                f.write(b"notes")
+            entries = app.walk_source(root, app.DEFAULT_ALLOW, 100 << 20)
+            names = sorted(e["filename"] for e in entries)
+            self.assertEqual(names, ["a.pdf", "notes.txt"])
+            self.assertNotIn("a.pdf.meta", names)
+            self.assertNotIn("a.pdf.meta.json", names)
+        finally:
+            import shutil
+            shutil.rmtree(root)
+
+    def test_gdrive_meta_for_reads_sidecar(self):
+        # _gdrive_meta_for parses the <file>.meta.json sidecar into a dict; a
+        # missing sidecar returns None (the upload proceeds without gdrive meta).
+        root = tempfile.mkdtemp()
+        try:
+            src = os.path.join(root, "a.pdf")
+            with open(src, "wb") as f:
+                f.write(b"x")
+            with open(src + ".meta.json", "w", encoding="utf-8") as f:
+                f.write('{"grounded": true, "labels": ["grounded"]}')
+            self.assertEqual(app._gdrive_meta_for(src),
+                             {"grounded": True, "labels": ["grounded"]})
+            os.unlink(src + ".meta.json")
+            self.assertIsNone(app._gdrive_meta_for(src))
+        finally:
+            import shutil
+            shutil.rmtree(root)
+
+    def test_gdrive_meta_for_malformed_returns_none(self):
+        # A malformed sidecar never blocks the upload: logged + None.
+        root = tempfile.mkdtemp()
+        try:
+            src = os.path.join(root, "a.pdf")
+            with open(src, "wb") as f:
+                f.write(b"x")
+            with open(src + ".meta.json", "w", encoding="utf-8") as f:
+                f.write("{not valid json")
+            self.assertIsNone(app._gdrive_meta_for(src))
+        finally:
+            import shutil
+            shutil.rmtree(root)
+
 
 class _Resp:
     """Fake urllib urlopen context manager returning a fixed JSON body."""
@@ -140,6 +198,31 @@ class UploadFileMtimeTests(unittest.TestCase):
         meta = json.loads(_multipart_fields(body)["metadata"].decode())
         self.assertNotIn("mtime", meta)
         self.assertEqual(set(meta), {"knowledge_id", "file_hash", "directory_id"})
+
+    def test_includes_gdrive_meta_when_provided(self):
+        # gdrive_meta (the parsed .meta.json sidecar) is stored under metadata.gdrive
+        # so OWUI persists it into File.meta.data.gdrive.
+        captured = {}
+
+        def _urlopen(req, timeout=None):
+            captured["data"] = req.data
+            return _Resp(b'{"id":"fid-new"}')
+
+        gmeta = {"grounded": True, "labels": ["grounded"],
+                 "description": "[grounded]"}
+        with mock.patch.object(owui.urllib.request, "urlopen", _urlopen):
+            owui.upload_file("admin-key", "kb1", "sha-abc", "dir-1", "doc.pdf",
+                             b"file-bytes", mtime="2025-10-30T16:50:57Z",
+                             gdrive_meta=gmeta)
+        meta = json.loads(_multipart_fields(captured["data"])["metadata"].decode())
+        self.assertEqual(meta["gdrive"], gmeta)
+        self.assertEqual(meta["mtime"], "2025-10-30T16:50:57Z")
+
+    def test_omits_gdrive_meta_when_none(self):
+        # Backward-compatible: no gdrive_meta -> no gdrive key in metadata.
+        body = self._capture_upload(None)
+        meta = json.loads(_multipart_fields(body)["metadata"].decode())
+        self.assertNotIn("gdrive", meta)
 
 
 if __name__ == "__main__":
