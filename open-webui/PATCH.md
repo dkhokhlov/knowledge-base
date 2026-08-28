@@ -1,11 +1,14 @@
-# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete
+# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete + offset-aware chunking
 
-This directory builds a thin-overlay custom Open WebUI image that applies four
+This directory builds a thin-overlay custom Open WebUI image that applies five
 build-time patches to the backend. Patches 1–2 target the **2b churn**: the
 gdrive-indexer (oikb) re-uploading files every sync cycle. Patch 3 propagates
 the source file mtime into chunk metadata so a retrieve hit can report it.
 Patch 4 makes file-delete clean failed-link orphan vectors from the KB
 collection, closing the root cause of the stuck `DUPLICATE_CONTENT` re-triggers.
+Patch 5 makes each chunk's `start_index` a character offset into the full
+document text (served by `/data/content`) so a retrieved chunk is sliceable by
+offset, via a span-preserving chunker that does not mutate content.
 
 - **Patch 1 — path-aware dedup hash** (`retrieval.py`): OWUI rejected same-content
   files at different paths as `DUPLICATE_CONTENT`; oikb re-uploaded them every cycle.
@@ -118,7 +121,7 @@ The `:0.11.0` release tag is a **separate build artifact** (manifest-list
 digest `sha256:72c0ba64…`), same 0.11.0 content. This pin keeps the `:main`
 build the three patches were validated against; switching to the `:0.11.0`
 release digest would change the base artifact and require re-validating all
-three apply scripts against its source (see Rebase procedure).
+five apply scripts against its source (see Rebase procedure).
 
 ## Rebase procedure (when bumping the base image)
 
@@ -126,10 +129,12 @@ three apply scripts against its source (see Rebase procedure).
    `docker image inspect ghcr.io/open-webui/open-webui:<tag> --format '{{index .RepoDigests 0}}'`
 2. Extract both patched router files:
    `docker create --name x <new-ref> && docker cp x:/app/backend/open_webui/routers/retrieval.py /tmp/r.py && docker cp x:/app/backend/open_webui/routers/files.py /tmp/f.py && docker rm x`
-3. Test all three apply scripts against the extracted files:
+3. Test all five apply scripts against the extracted files:
    `OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_path_hash.py`
    `OWUI_FILES_PY=/tmp/f.py python3 open-webui/apply_upload_idempotency.py`
    `OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_mtime_to_chunks.py`
+   `OWUI_FILES_PY=/tmp/f.py python3 open-webui/apply_vector_cleanup_on_delete.py`
+   `OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_offset_aware_chunking.py`
    - If all print `OK ...` and `python3 -m py_compile /tmp/r.py /tmp/f.py`
      passes → the anchors still match; bump `OPENWEBUI_BASE_DIGEST` in
      `Dockerfile`, rebuild.
@@ -491,3 +496,272 @@ vectors and memberships are untouched. It takes effect on the next
 `docker compose build openwebui` + restart, and prevents **future** orphan
 accumulation. Legacy orphans (if any remain) are unaffected and require the
 one-time API purge, not a re-index.
+
+---
+
+# Patch 5 — offset-aware chunking (`retrieval.py`)
+
+## Problem (patch 5)
+
+Every chunk in Chroma has `start_index = 0`, so a retrieved chunk cannot be
+located inside the full document text served by
+`GET /api/v1/files/{id}/data/content` — the chunk is not "sliceable by offset".
+Goal:
+
+  base_text[start_index : start_index + len(chunk_text)] == chunk_text
+
+so `base_text[start_index - W : start_index + W]` gives surrounding context.
+
+Root cause:
+
+1. `process_file` joins the per-page loader docs into `text_content` and stores
+   it as `file.data['content']` (served by `/data/content`), but `save_docs`'s
+   split pipeline runs on the per-page `docs` and `MarkdownHeaderTextSplitter`
+   rebuilds each section as a fresh `Document(metadata={**doc.metadata})` —
+   discarding any offset.
+2. `RecursiveCharacterTextSplitter(add_start_index=True)` then computes
+   `start_index` section-relative (sections are shorter than `CHUNK_SIZE`, so
+   each section yields one chunk at offset 0).
+3. The KB collection users query is embedded in a **second phase**
+   (`process_file` elif `collection_name`): the KB-add path queries the
+   `file-{id}` collection for already-split chunks (text + metadata, no vectors)
+   and re-splits + re-embeds them. So a join of the Phase-2 chunks is not the
+   text `/data/content` serves.
+
+## Two approaches that failed (verified)
+
+1. **In-`save_docs` rebase** (`full_text = " ".join(docs)` + `str.find` per
+   chunk): the Phase-2 `docs` are already-split chunks, so the join !=
+   `/data/content`; and `MarkdownHeaderTextSplitter` mutates (joins section
+   lines with `"  \n"`), so header chunks are not substrings of the raw text.
+   Live verify: 1/12 slice-correct.
+2. **Keep `MarkdownHeaderTextSplitter` and return its concat as the base**: MDS
+   `.strip()`s every line (including inside fenced code blocks) and removes all
+   blank lines (verified in-container). The corpus is `markitdown-ocr` fenced
+   markdown, so `/data/content` would serve code/tables with indentation gone
+   and no paragraph breaks — degrading the context window that is the feature's
+   whole point. (MDS does **not** leak `Header 1..6` into Chroma metadata in
+   0.11.0 — `save_docs` rebuilds `metadata={**doc.metadata}`, discarding the
+   splitter's metadata — but the mutation + non-substring arguments stand alone.)
+
+## Fix (patch 5): a span-preserving chunker
+
+A new module-level function `split_docs_with_base(page_docs, config)` returns
+`base_text` (the verbatim sanitized extracted text, pages joined with a single
+space) plus chunks that are verbatim substrings of it. It does **not** use
+`MarkdownHeaderTextSplitter`:
+
+1. `_atx_header_spans(page_text)` scans line-by-line, toggling a ` ``` `/`~~~` fence
+   flag, and records a section boundary at each ATX header line (`^#{1,6}`
+   then a space/tab or EOL, outside a fence). CommonMark limits both ATX
+   headers and fenced code blocks to ≤3 leading spaces, so lines indented ≥4
+   spaces are skipped (an indented code block's ` ``` ` line is content, not a
+   fence opener). Spans are consecutive and cover the whole page, so
+   `base_text` is the page text verbatim.
+2. Each `page_text[start_i:start_{i+1}]` slice is split by
+   `RecursiveCharacterTextSplitter(add_start_index=True)`.
+3. The splitter's section-relative `rel` is rebased to an absolute offset:
+   `abs_si = page_base + start_i + rel`.
+4. Chunk metadata is built from the page doc's metadata plus `start_index` only
+   (never the splitter's `Document` metadata) — no `Header 1..6` leak;
+   `page`/`source`/`created_by`/`file_id`/`name` preserved when present.
+
+`process_file` computes `(base_text, chunks)` and writes `base_text` to
+`file.data['content']` (one write, one hash, both from `base_text`) **before**
+the embedding step, then calls `save_docs_to_vector_db` with `split=False`
+(the chunks are pre-split; `save_docs` persists them as supplied). This
+separates document provenance (`process_file` owns offsets + `/data/content`)
+from vector persistence (`save_docs` persists exactly what it is given). The
+dead `full_text`/`_cursor` rebase is not re-injected, so `save_docs_to_vector_db`
+reverts to pristine 0.11.0.
+
+### All five callers use the chunker; the mutating MDS path is removed
+
+The same chunker is wired into **every** `save_docs_to_vector_db` caller
+(`process_file`, `process_files_batch`, `process_text`, `process_web`,
+`process_web_search`), each gated on `_offset_aware`. With every caller
+producing non-mutating header-semantic chunks, the
+`MarkdownHeaderTextSplitter` branch in `save_docs`'s `if split:` block is
+redundant and is **physically removed** (root fix, not a flag-disable): the
+branch, the orphaned `merge_docs_to_target_size` + `can_merge_chunks`
+helpers (used only inside that branch), and the `MarkdownHeaderTextSplitter`
+import. What stays in `if split:` is the `RecursiveCharacterTextSplitter` /
+`TokenTextSplitter` fallback for token mode (the gate's `_offset_aware=False`
+path). `ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER` remains as a **harmless no-op
+API field** (config plumbing + the retrieval config GET/POST expect it); it
+activates nothing because the code is gone — no `.env` or config-POST change
+is needed.
+
+### Config gate (degrade, never raise)
+
+The chunker is used when `TEXT_SPLITTER in ('', 'character')`. Otherwise the
+caller falls back to the legacy `save_docs(split=True)` path (section-relative
+offsets, not sliceable) — no outage. `TokenTextSplitter` chunks are
+`decode(encode)` roundtrips, not verbatim substrings, so token mode is
+incompatible with sliceability; the gate degrades instead of raising so an
+admin config flip cannot trigger an indexing outage + re-fail loop. (The gate
+previously also required `CHUNK_MIN_SIZE_TARGET == 0`; that conjunct was
+dropped because the chunk-level merge it gated was nested inside the removed
+MDS branch. Min-size merging is now done at the caller — see "Span coalescing"
+below — so `CHUNK_MIN_SIZE_TARGET` is a live knob again, not a fallback guard.)
+
+### Span coalescing (min-size merge at the caller)
+
+Splitting at every ATX header with no merge produces tiny chunks for
+header-heavy docs (a 50-line TOC of `### Item N` → 50 ten-char chunks that crowd
+out the `retrieve` top-k budget). The removed MDS branch carried
+`merge_docs_to_target_size` as its mitigation; removing it deleted that
+mitigation. `_coalesce_spans(spans, config)` restores it at the caller,
+span-level + verbatim: merge adjacent spans forward while a span is smaller than
+`CHUNK_MIN_SIZE_TARGET` and the combined span fits in `CHUNK_SIZE`. Because
+spans are contiguous substrings, a merged span is still a verbatim substring —
+offsets stay exact, nothing is mutated. With `CHUNK_MIN_SIZE_TARGET <= 0` this
+is a no-op (header-strict, matching the legacy `=0` behavior); setting it > 0
+activates the coalesce. This is the "min-size merging reimplemented at the
+caller (`split_docs_with_base`), not in `save_docs`" placement the design calls
+for — chunking at the caller, storage in `save_docs`.
+
+### Branch handling
+
+- **Branch C** (primary upload, the gdrive path): loader docs → chunker →
+  `base_text` + chunks; `save_docs(split=False, add=False, overwrite=False)`
+  (keeping the idempotent-reuse early-return; `overwrite=True` would re-embed
+  every reuse AND `delete_collection` before embedding → a data-loss window).
+- **Branch B** (KB-add, Phase 2): queries `file-{id}` and **copies** the
+  Phase-1 chunks verbatim (`split=False`, no re-split) so their absolute
+  `start_index` carries through; `/data/content` stays the Phase-1 base. The
+  `file-{id}`-empty fallback rechunks `file.data['content']` (span-preserving
+  is verbatim → `base_text` == the input → no desync, no write-back).
+- **Branch A** (content-update / audio): rechunks `form_data.content` (with
+  `<br/>` → `\n`) → `/data/content` serves the `\n` form (fixes a pre-existing
+  `<br/>` divergence). `overwrite` stays default `False` (Branch A may target a
+  KB `collection_name`; `overwrite=True` would `delete_collection(<kb_id>)` and
+  destroy every other file's vectors).
+- **`process_files_batch`**: per-file rechunk + one `save_docs(all_chunks,
+  split=False, add=True, overwrite=False)`.
+- **`process_text`**: rechunks `form_data.content`; the response `content`
+  becomes the sanitized `base_text`. No `file-{id}` collection, so
+  `start_index` is set but not served via `/data/content` (the collection is
+  keyed by a content hash or a KB id).
+- **`process_web`**: rechunks the fetched page (`content, docs =
+  split_docs_with_base(...)`); the response `file.data.content` becomes
+  `base_text`.
+- **`process_web_search`**: rechunks the loaded results (`_, docs = ...`,
+  discarding `base_text` — not stored); the `web-search-<user>-<hash>`
+  collection is ephemeral. `start_index` is set but `base_text` is not served.
+
+## Retrieval semantics change
+
+Chunk text **changes**: Phase-1 chunks become raw section substrings (no MDS
+normalization), and Phase-2 KB chunks become the Phase-1 form (today Branch B
+re-splits, collapsing `"  \n"` → `"\n"`; `split=False` removes that second
+pass). So **KB embeddings change and a full re-embed is required** (not
+optional) — covered by the forced re-index. Embedding *quality* is unaffected
+(raw-vs-normalized is negligible for `nomic-embed-text`). `/data/content` now
+serves the sanitized raw extracted text — indentation, blank lines, and code
+fences intact.
+
+Removing the MDS branch also changes the **non-file callers**
+(`process_text`, `process_web`, `process_web_search`): their chunks were
+MDS-sectioned + mutated (strip / `isprintable` filter / blank-drop); they are
+now header-span-sectioned verbatim substrings (non-mutating). Their
+collections are transient/regenerated (content-hash, web, or
+`web-search-<user>-<hash>`), so this is a chunk-boundary + embedding change on
+ephemeral data, not on the durable KB. `make test` retrieval output for these
+paths may differ.
+
+## Deployment model: greenfield + forced re-index
+
+Clean upgrade, no backward compatibility, no version marker. Every chunk gets
+correct offsets after the re-index; there is no mixed-generation window to
+discriminate. `start_index` is consumed (`flatten_chroma` in the `/kb` skill
+uses `file_id + start_index` as chunk identity) — it is the feature, not a
+write-only field.
+
+## What patch 5 changes (12 sites + 4 deletions in `retrieval.py`)
+
+`apply_offset_aware_chunking.py` does 12 targeted replacements + 4 deletions,
+each asserting its anchor occurs exactly once (fail loud on drift). The script
+runs last in the build, so the `process_file`/`process_files_batch` anchors
+target the post-patch text (after `apply_path_hash`, `apply_mtime_to_chunks`);
+the three new caller sites + the four deletions anchor on spans those earlier
+patches never touch. After applying, the script asserts structurally:
+`MarkdownHeaderTextSplitter` == 0, `merge_docs_to_target_size` == 0,
+`can_merge_chunks` == 0, and `split_docs_with_base(docs, config)` called
+exactly 5 times.
+
+- Insert `_atx_header_spans` + `_coalesce_spans` + `split_docs_with_base` above
+  `save_docs_to_vector_db`.
+- `process_file`: config gate (`_offset_aware`, `_copy_phase1`) before the branch
+  dispatch; Branch B copy flag; unified transform after the branch chain;
+  `split` flag at the call site.
+- `process_files_batch`: config gate; per-file rechunk; `split` flag.
+- `process_text` / `process_web` / `process_web_search`: each gets the config
+  gate + a rechunk + `split=not _offset_aware` at its `save_docs` call.
+- **Deletions**: the `MarkdownHeaderTextSplitter` branch in `if split:`; the
+  `merge_docs_to_target_size` + `can_merge_chunks` defs; the
+  `MarkdownHeaderTextSplitter` import line.
+
+## Re-index needed on cutover (patch 5)
+
+`start_index` only reaches **new** chunks. The forced-rechunk mechanism is
+`reindex_all` (drains the KB, then re-uploads every file fresh, bypassing the
+idem skip and re-running the loader → chunker → Branch B copy):
+
+- Trigger: `make gdrive-index INDEX_ALL=1` (Makefile maps `INDEX_ALL=1` →
+  `&reindex_all=1`; walks the local `./gdrive` mirror, no Drive re-pull).
+- Run during a maintenance window: the KB is incomplete during the drain +
+  extract + embed.
+- Poll `make gdrive-status` until pending + processing == 0. Re-run
+  `make gdrive-index` (self-heals FAILED files) until `failed == 0`.
+
+New uploads after the patch get correct offsets automatically; project KBs are
+out of scope (not re-indexed here).
+
+## markitdown-ocr compatibility
+
+OCR is synchronous and serialized (`threading._lock`, `temperature=0` /
+`seed=0`); the chunker and `/data/content` derive from the same per-page
+`page_content` in one `process_file` call, so they stay aligned per-index. OCR
+is non-deterministic across runs, so re-indexing regenerates different text and
+offsets — expected; `/data/content` and chunks regenerate together.
+
+## Risks / edge cases (patch 5)
+
+- **KB chunk text + embeddings change**: re-embed required (forced re-index);
+  embedding quality unchanged.
+- **Non-file caller chunking change**: `process_text` / `process_web` /
+  `process_web_search` chunks change from MDS-sectioned+mutated to
+  header-span-sectioned verbatim. Their collections are ephemeral, so this is a
+  transient-regeneration change, not durable KB data loss. `make test` may
+  reflect it.
+- **`/data/content` content change**: now sanitized raw extracted text (was raw
+  unsanitized). Differs only by null/surrogate removal — cleaner.
+- **Token-mode `TEXT_SPLITTER`**: incompatible with sliceability
+  (`TokenTextSplitter` chunks are `decode(encode)`, not substrings); the gate
+  falls back to the legacy `split=True` path (not sliceable).
+- **`CHUNK_MIN_SIZE_TARGET` reactivated**: it now gates `_coalesce_spans`
+  (span-level min-size merge at the caller). At `=0` (current live value) the
+  chunker is header-strict and tiny chunks on header-heavy docs (TOC, changelog)
+  remain — a pre-existing pathology, not a regression (legacy `=0` did not merge
+  either). Setting it > 0 activates coalescing and fixes it; that is a rag-config
+  change (persisted in `webui.db`, not just `.env`) + a re-embed.
+- **`ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER` is a no-op**: the flag stays in the
+  config API (plumbing + GET/POST expect it) but activates nothing. Setting it
+  has no effect.
+- **Double-apply guard**: the chunker is non-idempotent — applying it to its own
+  chunk output corrupts `base_text` (duplicated overlap regions + joiners) while
+  the slice invariant still holds against the corrupted base. Each caller
+  applies it exactly once; the build asserts `split_docs_with_base(docs,
+  config)` is called exactly 5 times, and `test_transform_is_not_idempotent`
+  pins the failure mode.
+- **`save_docs` early-return desync** (Branch C, `file-{id}` exists):
+  pre-existing, benign (idem prevents reuse reaching here; re-index deletes
+  `file-{id}` first). Not made worse — `overwrite=False` kept.
+- **`page` absent in production**: the external loader returns one
+  `Document` per file (no `page` metadata across the live `file-*` collections).
+  The per-page loop is correct but dead code in prod; multi-page is covered by
+  unit fixtures only.
+- **`_atx_header_spans` correctness**: the one new piece of logic; covered by
+  fence-aware + multi-section fixtures and a fuzz loop in
+  `tests/test_offset_aware_chunking.py`.

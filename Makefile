@@ -89,6 +89,8 @@ health: ## Probe the stack /health (Caddy -> api-gateway aggregated, reflects OW
 test: ## Run unit tests (no stack) then system integration tests against the running stack (run: make start)
 	@status=0; echo "=== unit: test_output_json ==="; \
 	  python3 tests/test_output_json.py -v || status=1; \
+	  echo "=== unit: test_offset_aware_chunking ==="; \
+	  python3 tests/test_offset_aware_chunking.py -v || status=1; \
 	  for t in tests/test_*.sh; do [ -e "$$t" ] || continue; \
 	  case "$$t" in *test_09_gdrive_index.sh) \
 	    echo "==> skip $$t (full real-gdrive drain; run via: make test-e2e-iso)"; continue;; esac; \

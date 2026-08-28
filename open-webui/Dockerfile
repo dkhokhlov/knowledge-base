@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1.9
 #
-# Thin overlay on the pinned official Open WebUI image that applies four build-time
+# Thin overlay on the pinned official Open WebUI image that applies five build-time
 # patches to the backend: the path-aware dedup-hash patch (retrieval.py), the
 # upload-idempotency patch (files.py), the source-mtime chunk-metadata patch
-# (retrieval.py), and the orphan-vector-cleanup-on-delete patch (files.py). See
-# open-webui/PATCH.md for the why, the anchors, and the rebase steps.
+# (retrieval.py), the orphan-vector-cleanup-on-delete patch (files.py), and the
+# offset-aware span-preserving chunking + MDS-path removal patch (retrieval.py).
+# See open-webui/PATCH.md for the why, the anchors, and the rebase steps.
 #
 # No frontend rebuild: the patches touch two backend router files in place.
 # Build seconds, not minutes. Each apply script fails loud (exit 1) if its anchor
@@ -27,4 +28,5 @@ COPY apply_path_hash.py /tmp/apply_path_hash.py
 COPY apply_upload_idempotency.py /tmp/apply_upload_idempotency.py
 COPY apply_mtime_to_chunks.py /tmp/apply_mtime_to_chunks.py
 COPY apply_vector_cleanup_on_delete.py /tmp/apply_vector_cleanup_on_delete.py
-RUN python3 /tmp/apply_path_hash.py && python3 /tmp/apply_upload_idempotency.py && python3 /tmp/apply_mtime_to_chunks.py && python3 /tmp/apply_vector_cleanup_on_delete.py && rm /tmp/apply_path_hash.py /tmp/apply_upload_idempotency.py /tmp/apply_mtime_to_chunks.py /tmp/apply_vector_cleanup_on_delete.py
+COPY apply_offset_aware_chunking.py /tmp/apply_offset_aware_chunking.py
+RUN python3 /tmp/apply_path_hash.py && python3 /tmp/apply_upload_idempotency.py && python3 /tmp/apply_mtime_to_chunks.py && python3 /tmp/apply_vector_cleanup_on_delete.py && python3 /tmp/apply_offset_aware_chunking.py && rm /tmp/apply_path_hash.py /tmp/apply_upload_idempotency.py /tmp/apply_mtime_to_chunks.py /tmp/apply_vector_cleanup_on_delete.py /tmp/apply_offset_aware_chunking.py
