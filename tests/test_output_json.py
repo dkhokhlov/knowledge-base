@@ -182,10 +182,20 @@ class OwuiTests(_Assertions):
                                   "mtime": "2025-10-30T16:50:57Z"},
                                  {"file_name": "f2"}]]}
         ns = mock.Mock(kb="k1", query="q", k=4, no_hybrid=False)
+        # Canned File.meta.data.gdrive record for fid1, so the gdrive-join in
+        # cmd_retrieve (one GET per unique file_id) is exercised without network.
+        # hits[1] has file_id="" -> no GET -> gdrive stays None.
+        gdrive = {"grounded": True, "labels": ["spec"],
+                  "approval": {"status": "approved",
+                               "complete_time": "2026-01-01T00:00:00Z"},
+                  "comments": ["c1"], "description": "desc",
+                  "modified_time": "2026-01-02T00:00:00Z"}
         # _resolve_kb supplies the provenance (kb_id, kb_name); jget serves the
-        # Chroma collection query. retrieve no longer trusts a hand-copied id.
+        # Chroma collection query; _file_gdrive serves the per-file gdrive meta.
+        # retrieve no longer trusts a hand-copied id.
         out = _run([(owui, "_resolve_kb", ("k1", "KB1")),
-                   (owui, "jget", chroma)], owui.cmd_retrieve, ns)
+                   (owui, "jget", chroma),
+                   (owui, "_file_gdrive", gdrive)], owui.cmd_retrieve, ns)
         d = self.assert_json(out); self.assert_compact(out)
         # top-level provenance (#3): resolved kb_id + kb_name echo, plus hits.
         self.assertEqual(set(d), {"kb_id", "kb_name", "hits"})
@@ -199,13 +209,18 @@ class OwuiTests(_Assertions):
         # returns no `ids` array, so it was always "" and non-actionable.
         self.assertEqual(set(d["hits"][0]),
                          {"distance", "file", "file_id", "page",
-                          "start_index", "source", "mtime", "text"})
+                          "start_index", "source", "mtime", "text", "gdrive"})
         self.assertEqual(d["hits"][0]["file"], "f1")
         self.assertEqual(d["hits"][0]["file_id"], "fid1")
         self.assertEqual(d["hits"][0]["page"], 3)
         self.assertEqual(d["hits"][0]["mtime"], "2025-10-30T16:50:57Z")
+        # gdrive-join: fid1 has gdrive meta -> curated view (grounded carries
+        # through); hits[1] has no file_id -> gdrive None.
+        self.assertEqual(d["hits"][0]["gdrive"]["grounded"], True)
+        self.assertEqual(d["hits"][0]["gdrive"]["approval_status"], "approved")
         self.assertIsNone(d["hits"][1]["page"])
         self.assertIsNone(d["hits"][1]["mtime"])
+        self.assertIsNone(d["hits"][1]["gdrive"])
         self.assertEqual(d["hits"][1]["file_id"], "")
 
     def test_resolve_kb(self):
