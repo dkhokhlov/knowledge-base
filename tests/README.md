@@ -54,9 +54,10 @@ Two kinds of test, both collected natively by pytest:
 runner's functions are. `tests/lib.sh` is the shared bash helpers (`pass`/`fail`/
 `section`/`finish`/`load_env`/`require_env`/`require_stack_up`/`kb_host`); not a
 test. `scripts/e2e-env.sh` is the reusable e2e isolation lib; not a test.
-`tests/fixtures_chunkq_gen.py` is the deterministic fixture generator test_13
-runs (not a test itself); it writes the per-type fixtures into the gitignored
-`gdrive/.tests/chunkq/` and prints the manifest JSON that drives the audit.
+`tests/fixtures_chunkq_gen.py` is the deterministic generator that produced the
+committed chunk-quality fixtures at `gdrive/.tests/chunkq/` (not a test itself;
+regenerate with `--out gdrive/.tests/chunkq`). test_13 runs it with
+`--manifest-only` to re-derive the manifest JSON oracle without writing files.
 
 ## Inventory
 
@@ -108,7 +109,8 @@ A test passes iff it exits 0. Add the marker on the test, in-file.
    - long-running (minutes: real-corpus drain, at-scale) → ALSO stack
      `@pytest.mark.long` on the runner function.
 2. Pick a port for an isolated e2e that does not collide: live `3000`, e2e
-   `3010`, kbcheck `3020`, test08 `3030`. Add yours to the next free port.
+   `3010`, kbcheck `3020`, test08 `3030`, chunkq `3040`. Add yours to the next
+   free port.
 3. Run it: `python3 -m pytest -m <marker>` or the matching make target.
 
 ## The `owui` name clash (why two UTs evict `sys.modules["owui"]`)

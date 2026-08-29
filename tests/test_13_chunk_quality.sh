@@ -5,9 +5,10 @@
 # sliceability (base[si:si+len]==chunk), span/page correctness, coalescing,
 # distinct offsets, and content fidelity.
 #
-# Fixtures: tests/fixtures_chunkq_gen.py generates deterministic files under
-# gdrive/.tests/chunkq/ (gitignored runtime dir; removed on EXIT so the tree
-# stays clean for the e2e-iso clean-tree guard). Every section carries a
+# Fixtures: COMMITTED (tracked in git) under gdrive/.tests/chunkq/, produced
+# by tests/fixtures_chunkq_gen.py (rerun it with --out gdrive/.tests/chunkq
+# to regenerate). The test re-derives only the manifest oracle via
+# --manifest-only; it writes no file. Every section carries a
 # unique marker (chunkq-<type>-s<N>), so the audit can find its chunks
 # without depending on embedding RANKING: ONE whole-KB retrieval query with
 # k=2000 returns the entire collection (hybrid:true in the body is a no-op
@@ -17,15 +18,16 @@
 # Pipeline mirrors test_11: index gdrive/.tests/ (a dot-dir the full gdrive
 # walk skips) into a throwaway temp KB via POST /index?path=.tests, poll the
 # real async drain via GET /status, then audit. The committed fixture files
-# (fixture-*) and the Google-native trio (google_native.{docx,xlsx,pptx},
-# when committed) ride along and get the universal checks too.
+# (fixture-*, chunkq-*) and the Google-native trio (google_native.{docx,xlsx,
+# pptx}, when committed) ride along and get the universal checks too.
 #
-# OCR gate: OCR_ENABLED=true (default) -> all 10 types. Off -> only the
-# text types (txt,md,json,log,tex) are generated (the binary types need the
+# OCR gate: OCR_ENABLED=true (default) -> all 10 types audited. Off -> only
+# the text types (txt,md,json,log,tex) are audited (the binary types need the
 # markitdown-ocr sidecar; OWUI default loaders have different shapes for
-# html/docx/pdf/pptx/xlsx), and the committed binary fixtures surface as
-# genuine-failure notices (not hard fails) -- the iso env runs OCR=true, so
-# all 10 types are covered where it counts.
+# html/docx/pdf/pptx/xlsx); the committed binary chunkq fixtures still ride
+# along through the default loaders, and their failures surface as notices
+# (not hard fails) -- the iso env runs OCR=true, so all 10 types are covered
+# where it counts.
 set -u
 . "$(dirname "$0")/lib.sh"
 load_env
@@ -74,7 +76,7 @@ RD=(-H "Authorization: Bearer $UK")
 KB_ID=""
 MANIFEST="$(mktemp)"
 
-# --- cleanup: temp KB + files, generated fixtures, manifest ------------------
+# --- cleanup: temp KB + files, manifest ----------------------------------------
 cleanup() {
   local fid
   if [ -n "$KB_ID" ]; then
@@ -98,33 +100,35 @@ for it in (d.get("items") or []):
     curl -sf -X DELETE "$O/api/v1/knowledge/${KB_ID}/delete" "${ADM[@]}" >/dev/null 2>&1 \
       || echo "  cleanup: DELETE kb ${KB_ID} failed" >&2
   fi
-  rm -rf "$OUTDIR"
   rm -f "$MANIFEST"
 }
 trap cleanup EXIT
 
-# --- generate fixtures -------------------------------------------------------
-section "generate chunk-quality fixtures ($(echo "$TYPES" | tr ',' ' '))"
-# Pre-clean: a kill -9'd prior run leaves no EXIT trap behind.
-rm -rf "$OUTDIR"
-if ! python3 "$GEN" --out "$OUTDIR" --types "$TYPES" > "$MANIFEST"; then
-  fail "fixture generator failed (tests/fixtures_chunkq_gen.py)"
+# --- committed fixture set + manifest oracle ---------------------------------
+section "chunk-quality fixture set ($(echo "$TYPES" | tr ',' ' '))"
+if ! python3 "$GEN" --manifest-only --types "$TYPES" > "$MANIFEST"; then
+  fail "manifest oracle failed (tests/fixtures_chunkq_gen.py --manifest-only)"
   finish
   exit 1
 fi
-gen_count=$(python3 -c 'import sys,json;d=json.load(open(sys.argv[1]));print(len(d["files"]))' "$MANIFEST" 2>/dev/null || echo 0)
-on_disk=$(find "$OUTDIR" -type f | wc -l)
-if [ "${gen_count:-0}" -gt 0 ] && [ "$on_disk" = "$gen_count" ]; then
-  pass "generated ${on_disk} fixture file(s)"
-else
-  fail "generator manifest lists ${gen_count} file(s) but ${on_disk} on disk"
-fi
-if [ "${gen_count:-0}" -eq 0 ] || [ ! -s "$MANIFEST" ]; then
-  fail "generator produced an empty manifest"
+miss_out=$(python3 -c 'import sys, json, os
+man = json.load(open(sys.argv[1]))["files"]
+missing = [e["file"] for e in man.values()
+           if not os.path.isfile(os.path.join(sys.argv[2], e["file"]))]
+print(len(missing))
+for m in missing:
+    print(m)' "$MANIFEST" "$OUTDIR")
+if [ "$(printf '%s' "$miss_out" | head -1)" != "0" ]; then
+  fail "committed chunkq fixture(s) missing: $(printf '%s\n' "$miss_out" | tail -n +2 | tr '\n' ' ')"
   finish
   exit 1
 fi
-pass "manifest: $(python3 -c 'import sys,json;print(",".join(sorted(json.load(open(sys.argv[1]))["files"])))' "$MANIFEST")"
+if [ ! -s "$MANIFEST" ] || [ "$(python3 -c 'import sys,json;print(len(json.load(open(sys.argv[1]))["files"]))' "$MANIFEST" 2>/dev/null || echo 0)" -eq 0 ]; then
+  fail "manifest oracle is empty"
+  finish
+  exit 1
+fi
+pass "committed fixture set present: $(python3 -c 'import sys,json;print(",".join(sorted(json.load(open(sys.argv[1]))["files"])))' "$MANIFEST")"
 
 # --- source count (all allowlisted files under .tests) -----------------------
 src_count=$(find gdrive/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
@@ -209,11 +213,11 @@ else
 fi
 
 # --- failure scoping ----------------------------------------------------------
-# "Failed to link" = double-link race (hard fail, same as test_11). Any FAILED
-# file from the generated chunkq set is a hard fail (the fixtures are built
-# to extract). google_native.* fails are hard fails only with OCR on (they
-# are Office files needing the sidecar); with OCR off they are notices.
-# Committed fixture-* failures are notices (test_11 semantics).
+# "Failed to link" = double-link race (hard fail, same as test_11). FAILED
+# text-type chunkq fixtures are hard fails (they extract everywhere). Binary
+# chunkq types + google_native.* are hard fails only with OCR on (they need
+# the markitdown-ocr sidecar); with OCR off they are notices. Committed
+# fixture-* failures are notices (test_11 semantics).
 section "failure audit + scoping"
 scope_out=$(printf '%s' "$status_json" | python3 -c '
 import sys, json
@@ -230,7 +234,14 @@ chunkq_failed=0; google_failed=0; other_failed=0
 while read -r tag name err; do
   [ "$tag" = "FAILED" ] || continue
   case "$name" in
-    chunkq*)  chunkq_failed=$((chunkq_failed + 1)); fail "generated fixture FAILED extraction: ${name}: ${err}" ;;
+    chunkq-*.txt|chunkq-*.md|chunkq-*.json|chunkq-*.log|chunkq-*.tex)
+      chunkq_failed=$((chunkq_failed + 1)); fail "chunkq fixture FAILED extraction: ${name}: ${err}" ;;
+    chunkq*)
+      if [ "$OCR_ON" = "1" ]; then
+        chunkq_failed=$((chunkq_failed + 1)); fail "chunkq fixture FAILED extraction: ${name}: ${err}"
+      else
+        printf '  NOTICE  %s failed (OCR off; expected for binary types): %s\n' "$name" "$err"
+      fi ;;
     google_native*)
       if [ "$OCR_ON" = "1" ]; then
         google_failed=$((google_failed + 1)); fail "google-native fixture FAILED extraction: ${name}: ${err}"

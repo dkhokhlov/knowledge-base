@@ -27,10 +27,16 @@ tests/test_13_chunk_quality.sh and docs/ocr.md):
   row plus data rows.
 
 Determinism: no timestamps, no RNG, fixed zip member mtimes -- two runs must
-produce byte-identical trees (sha256 check in the test).
+produce byte-identical trees.
+
+The generated files are COMMITTED (tracked in git) at gdrive/.tests/chunkq/
+alongside the test_11 fixture set. Regenerate them with:
+  python3 tests/fixtures_chunkq_gen.py --out gdrive/.tests/chunkq
+tests/test_13_chunk_quality.sh runs the generator with --manifest-only: it
+re-derives the manifest oracle without writing any file.
 
 Usage:
-  python3 tests/fixtures_chunkq_gen.py [--out DIR] [--types md,html,...]
+  python3 tests/fixtures_chunkq_gen.py [--out DIR] [--types md,html,...] [--manifest-only]
 """
 
 import argparse
@@ -398,13 +404,16 @@ ALL_TYPES = ["md", "html", "docx", "pdf", "pptx", "xlsx", "txt", "json", "log", 
 
 
 def build(out_dir, types):
-    """Write the fixtures into out_dir; return the manifest dict."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    """Write the fixtures into out_dir (None = manifest only); return the manifest dict."""
+    out_dir = Path(out_dir) if out_dir is not None else None
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
     sec = _sections()
     manifest = {}
 
     def write(name, blob):
+        if out_dir is None:
+            return
         (out_dir / name).write_bytes(blob if isinstance(blob, bytes) else blob.encode("ascii"))
 
     if "md" in types:
@@ -517,12 +526,17 @@ def main(argv=None):
         default=",".join(ALL_TYPES),
         help="comma-separated subset of: %s" % ",".join(ALL_TYPES),
     )
+    parser.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help="print the manifest without writing any file (the fixtures are committed)",
+    )
     args = parser.parse_args(argv)
     types = [t.strip() for t in args.types.split(",") if t.strip()]
     unknown = [t for t in types if t not in ALL_TYPES]
     if unknown:
         parser.error("unknown type(s): %s" % ",".join(unknown))
-    manifest = build(args.out, types)
+    manifest = build(None if args.manifest_only else args.out, types)
     json.dump({"out": args.out, "types": types, "files": manifest}, sys.stdout, indent=1)
     sys.stdout.write("\n")
     return 0
