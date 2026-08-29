@@ -18,6 +18,72 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 - Nothing yet.
 
+## [v1.7.0] — 2026-08-28
+
+### Added
+
+- **Public-read access model for all knowledge bases.** Every authenticated
+  user can read every KB (retrieve/RAG) via a `user:*` read grant. Open WebUI
+  has no read-all role, so this is enforced at each KB-creation path and
+  re-asserted by `make kb-public-read` (a safety net). `sharing.public_knowledge`
+  gates whether a user key self-grants; the admin bootstrap grants `user:*` on
+  the gdrive KB. Write/delete stay owner-scoped; reads are how knowledge is
+  shared across accounts.
+- **`owui.py file <id> --raw` escape hatch.** `file` defaults to the EXTRACTED
+  text (GET /files/{id}/data/content); `--raw` saves the original bytes (GET
+  /files/{id}/content) to /tmp for binary types. Backward-compatible (default
+  unchanged).
+- **gdrive document metadata into `File.meta.data.gdrive`.** The gateway reads
+  a per-file `.meta.json` sidecar (zero-dependency) and passes it as
+  `gdrive_meta` into `upload_file`, stored in `File.meta.data.gdrive`. A dual
+  sidecar: `.meta` (YAML, human-editable) + `.meta.json` (gateway-read); the
+  `.meta.json` is excluded from indexing by name. Existing files backfill via
+  `reindex_all`. (Grounding-score rerank is a later phase; this only stores the
+  raw material.)
+- **kb skill `retrieve`/`retrieve-projects` join `File.meta.data.gdrive` per
+  chunk.** gdrive document fields ride in each hit's metadata, so retrieval
+  surfaces the source-doc context alongside the chunk text.
+- **Open WebUI custom-image patch 5: offset-aware span-preserving chunking +
+  MarkdownSemanticChunker (MDS) path removal.** Replaces the MDS path (which
+  lost semantic chunking when disabled) with offset-aware span-preserving
+  chunking upstream of the vector store. New build-time patch
+  `open-webui/apply_offset_aware_chunking.py` (see `open-webui/PATCH.md` patch
+  5); `tests/test_offset_aware_chunking.py` covers it. Image tag bumped to
+  `ghcr.io/dkhokhlov/open-webui:0.11.0-pathdedup-idem-mtime-orphanclean-offsetchunks`
+  (the prior `…-orphanclean` tag held patches 1–4). Rebuild + re-index to
+  populate the new chunk boundaries.
+- **Reusable e2e isolation library + `kb-check` fsck tool.** `scripts/e2e-env.sh`
+  (sourced) provides clone + compose-project + container-rename override +
+  provision + teardown for isolated e2e; `test_08_e2e.sh` + `test_12_kb_check.sh`
+  migrated to throwaway stacks (the agent `forget` / orphan purge no longer
+  touches the live agent or stack). `make kb-check` detects file-{id} leaks;
+  `PURGE=1` exports then purges orphans.
+- **pytest test driver + uv Python 3.12 venv.** `tests/test_runner.py` is one
+  runner with one test function per bash script, each carrying an in-file
+  `@pytest.mark.<group>` (unit/integration/e2e; `long` cross-cutting) + a
+  docstring. `tests/conftest.py` auto-marks `unittest.TestCase` items `unit`
+  and provides the `run_sh` fixture. `make test`/`test-unit`/`test-e2e`/
+  `test-e2e-long` select by marker. `make ci` = `uv sync` (Python 3.12 from
+  `.python-version` + locked deps from `uv.lock`), a prereq of every test
+  target. The `owui` module-name clash (gateway/owui.py vs
+  skills/claude/scripts/owui.py) is fixed natively so all UTs collect in one
+  process.
+
+### Changed
+
+- **OWUI image tag bumped to
+  `0.11.0-pathdedup-idem-mtime-orphanclean-offsetchunks`** (patch 5; the prior
+  `…-orphanclean` tag held patches 1–4 only). Rebuild required.
+- **Test selection moved from a Makefile shell-glob + hardcoded skip-case
+  block to pytest markers.** `make test` is now `pytest -m "not e2e and not
+  long"`; the fast set (UTs + live-stack integration) is unchanged. Bare
+  `pytest` runs everything (incl. long + e2e).
+
+### Fixed
+
+- **`test_output_json.py` now mocks `_file_gdrive` in `test_retrieve`** — a gap
+  left by the gdrive-meta join. Test-only; no runtime change.
+
 ## [v1.6.0] — 2026-08-26
 
 ### Changed
