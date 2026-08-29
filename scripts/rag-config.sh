@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Set the Open WebUI RAG template to a strict-grounding version: answer only
-# from the retrieved context; refuse ("The indexed documents do not contain
-# this information.") when the answer is not in the context; do not use outside
-# knowledge; do not invent names, terms, file names, or artifacts.
+# Set the Open WebUI RAG config from this repo (the same template for every
+# environment -- live main stack and e2e iso clones alike):
+#   - RAG_TEMPLATE: strict grounding -- answer only from the retrieved context;
+#     refuse ("The indexed documents do not contain this information.") when
+#     the answer is not in the context; do not use outside knowledge; do not
+#     invent names, terms, file names, or artifacts.
+#   - CHUNK_MIN_SIZE_TARGET=200: activates _coalesce_spans (patch 5) -- spans
+#     under 200 chars merge forward into the next while the combined span fits
+#     in CHUNK_SIZE. The image default is 0 (header-strict, no coalescing).
 #
-# Idempotent: re-running just re-asserts the same template.
+# Idempotent: re-running just re-asserts the same values.
 #
 # Preconditions:
 #   - Stack running and healthy (`make start`).
@@ -81,16 +86,20 @@ def parse_json(text, label):
     except (TypeError, ValueError) as e:
         sys.exit("FAIL  %s returned invalid JSON: %s" % (label, e))
 
-st, txt = call("POST", "/api/v1/retrieval/config/update", {"RAG_TEMPLATE": NEW})
+st, txt = call("POST", "/api/v1/retrieval/config/update",
+               {"RAG_TEMPLATE": NEW, "CHUNK_MIN_SIZE_TARGET": 200})
 if st != 200:
-    sys.exit("FAIL  update RAG_TEMPLATE -> HTTP %s: %s" % (st, txt[:200]))
+    sys.exit("FAIL  update RAG_TEMPLATE/CHUNK_MIN_SIZE_TARGET -> HTTP %s: %s" % (st, txt[:200]))
 
 st, txt = call("GET", "/api/v1/retrieval/config")
 d = parse_json(txt, "GET /api/v1/retrieval/config")
 if d.get("RAG_TEMPLATE") != NEW:
     sys.exit("FAIL  RAG_TEMPLATE did not stick")
+if d.get("CHUNK_MIN_SIZE_TARGET") != 200:
+    sys.exit("FAIL  CHUNK_MIN_SIZE_TARGET did not stick (got %s)" % d.get("CHUNK_MIN_SIZE_TARGET"))
 print("OK    strict-grounding RAG_TEMPLATE set (len=%d)" % len(d["RAG_TEMPLATE"]))
-print("      merge sanity: TOP_K=%s CHUNK_SIZE=%s" % (d.get("TOP_K"), d.get("CHUNK_SIZE")))
+print("      merge sanity: TOP_K=%s CHUNK_SIZE=%s CHUNK_MIN_SIZE_TARGET=%s"
+      % (d.get("TOP_K"), d.get("CHUNK_SIZE"), d.get("CHUNK_MIN_SIZE_TARGET")))
 
 # --- sync rag.ollama.base_url to OLLAMA_HOST ---------------------------------
 # Open WebUI persists rag.ollama.base_url in webui.db on first boot and ignores
