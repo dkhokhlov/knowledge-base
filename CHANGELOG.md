@@ -12,6 +12,46 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Nothing yet.
+
+### Fixed
+
+- Nothing yet.
+
+## [v2.0.0] — 2026-08-29
+
+### Added
+
+- **Open WebUI custom-image patch 6: resilient terminal file-status.** New
+  build-time patch `open-webui/apply_terminal_status.py` (see
+  `open-webui/PATCH.md` patch 6). `retrieval.py` persists the terminal
+  `status='completed'` with a bounded retry (fresh session per attempt) and
+  **aborts before the knowledge link** on exhaust — the file ends unlinked +
+  failed/processing (reconcile-retryable), never linked-but-stuck. The three
+  `models/files.py` `update_file_{data,hash,metadata}_by_id` swallow blocks now
+  `log.exception` before returning `None` (behavior-preserving). No commit
+  serialization across files (151 stay concurrent through shared Ollama).
+- **`make kb-check --repair` (`REPAIR=1`).** Safety-net repair for the residual
+  linked-but-stuck case: a strong gate (status=processing + linked + content +
+  vectors>0 + stale>60s) flips `status` to `completed`; `File.hash` is left
+  as-is. `Stores.invalidate()` drops the read cache before the post-repair
+  re-audit. Bug fix: `_webui_rw` was missing `row_factory=sqlite3.Row` (the RW
+  connection), so `repair_file_status` failed on a real DB; pinned by
+  `TestRealStoresRepair` (real temp sqlite), closing the FakeStores coverage
+  gap.
+- **`CHUNK_SIZE` + `TOP_K` operator-tunable, reprovision-stable.** `CHUNK_SIZE`
+  (chunk ceiling) and `TOP_K` (RAG retrieval top-k) are declared in
+  `.env.template`; `scripts/rag-config.sh` re-reads + re-asserts both over
+  `webui.db` on every `make rag-config` (strict-read + fail-loud, no literal
+  default in the script). A reprovision keeps the operator's values.
+- **Chunk-quality e2e (`test_13`).** Per-chunk sliceability, span/page,
+  coalescing, distinct offsets, and content fidelity over committed synthetic
+  fixtures (`gdrive/.tests/chunkq/`) for all 10 allowlisted types;
+  `tests/fixtures_chunkq_gen.py` generates them. The automated counterpart of
+  the manual patch-5 audit.
+
+### Changed
+
 - **`KB_HOST` is the single source; `KB_HOST_PORT` is derived from it.** `KB_HOST`
   (the public URL agents/clients point at) is now **mandatory** — the `localhost:3000`
   fallback is removed from the 8 helper scripts, the 4 Makefile recipes, and
@@ -41,10 +81,38 @@ project adheres to [Semantic Versioning](https://semver.org/).
   HEAD + unmerged commits before removing). The host port stays serial. Teardown
   sweeps use the compose project label, never a container-name prefix, so the
   live stack (`kb-api-gateway`, `kb-markitdown-ocr`) is never touched.
+- **OWUI image tag bumped to
+  `0.11.0-pathdedup-idem-mtime-orphanclean-offsetchunks-termstatus`** (patch 6;
+  the prior `…-offsetchunks` tag held patches 1–5). Rebuild required.
+- **rag-config fail-loud env reads.** `scripts/rag-config.sh` and the
+  bootstrap/admin scripts read `OLLAMA_HOST`, `RAG_EMBEDDING_MODEL`, `KB_DOMAIN`,
+  `OPENWEBUI_MODEL`, and `CHUNK_MIN_SIZE_TARGET` strictly — `.env.template` is
+  the single source, no literal default duplicated in the script, `${VAR:?}`
+  on unset. Generalizes the tests-no-fallbacks discipline to provision scripts.
+- **README technical-review pass.** Precision, terminology, and structure; the
+  intro + component list de-prosed; service names as backticked compose
+  identifiers.
 
 ### Fixed
 
-- Nothing yet.
+- **Flaky OWUI stuck-status: a file linked + indexed + with content but `status`
+  stuck at `processing`** (blocks the drain; no reconcile retries a linked
+  processing file). Root cause: the three `update_file_*_by_id` silently swallow
+  commit failures (`except Exception: return None`) and callers ignore the
+  `None`; under concurrent contention the `status='completed'` commit failed
+  silently while the link committed. Fixed by patch-6 (above). Verified:
+  `make test-e2e-iso` gate green, 151/151 drain, 0 stuck. Upstream check: the
+  swallow blocks + `DATABASE_ENABLE_SESSION_SHARING=False` + the unchecked
+  terminal status are all still present in OWUI `main` (2026-08-29), so the
+  patch is not redundant.
+- **`kb-check` maint purge crashed on Chroma 1.5.x.** `delete_kb_vectors_by_file`
+  used `Collection.delete(filter=...)` (absent in 1.5.9); fixed to `where=` (the
+  metadata filter). The `DeleteResult.deleted` count is now recorded in the purge
+  manifest so a wrong filter key/type (a silent 0-delete) surfaces inline, not
+  just the post-purge re-audit.
+- **`CHUNK_MIN_SIZE_TARGET` hardcoded default dropped; pinned at provision.**
+  `.env.template` (value 200) is the single source; `rag-config.sh` reads
+  strictly + fails loud.
 
 ## [v1.7.0] — 2026-08-28
 
