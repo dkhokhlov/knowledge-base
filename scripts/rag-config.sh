@@ -13,6 +13,10 @@
 #     this script re-asserts the same value over the DB. No literal default
 #     here -- the value is declared in .env.template and this fails loudly if
 #     it is missing (same discipline as compose ${VAR:?}).
+#   - CHUNK_SIZE (chunk ceiling) and TOP_K (RAG-chat retrieval top-k; a
+#     per-request k on /retrieval/query/collection overrides it): same .env
+#     single source + strict read + re-assert-over-DB discipline as
+#     CHUNK_MIN_SIZE_TARGET.
 #
 # Idempotent: re-running just re-asserts the same values.
 #
@@ -98,13 +102,23 @@ _min = os.environ.get("CHUNK_MIN_SIZE_TARGET")
 if not _min:
     sys.exit("FAIL  CHUNK_MIN_SIZE_TARGET not set -- declare it in .env.template")
 MIN_SIZE = int(_min)
+_sz = os.environ.get("CHUNK_SIZE")
+if not _sz:
+    sys.exit("FAIL  CHUNK_SIZE not set -- declare it in .env.template")
+CHUNK_SZ = int(_sz)
+_tk = os.environ.get("TOP_K")
+if not _tk:
+    sys.exit("FAIL  TOP_K not set -- declare it in .env.template")
+TOP_K = int(_tk)
 _emb_model = os.environ.get("RAG_EMBEDDING_MODEL")
 if not _emb_model:
     sys.exit("FAIL  RAG_EMBEDDING_MODEL not set -- declare it in .env.template")
 st, txt = call("POST", "/api/v1/retrieval/config/update",
-               {"RAG_TEMPLATE": NEW, "CHUNK_MIN_SIZE_TARGET": MIN_SIZE})
+               {"RAG_TEMPLATE": NEW, "CHUNK_MIN_SIZE_TARGET": MIN_SIZE,
+                "CHUNK_SIZE": CHUNK_SZ, "TOP_K": TOP_K})
 if st != 200:
-    sys.exit("FAIL  update RAG_TEMPLATE/CHUNK_MIN_SIZE_TARGET -> HTTP %s: %s" % (st, txt[:200]))
+    sys.exit("FAIL  update RAG_TEMPLATE/CHUNK_MIN_SIZE_TARGET/CHUNK_SIZE/TOP_K -> HTTP %s: %s"
+             % (st, txt[:200]))
 
 st, txt = call("GET", "/api/v1/retrieval/config")
 d = parse_json(txt, "GET /api/v1/retrieval/config")
@@ -113,6 +127,12 @@ if d.get("RAG_TEMPLATE") != NEW:
 if d.get("CHUNK_MIN_SIZE_TARGET") != MIN_SIZE:
     sys.exit("FAIL  CHUNK_MIN_SIZE_TARGET did not stick (got %s, want %s)"
              % (d.get("CHUNK_MIN_SIZE_TARGET"), MIN_SIZE))
+if d.get("CHUNK_SIZE") != CHUNK_SZ:
+    sys.exit("FAIL  CHUNK_SIZE did not stick (got %s, want %s)"
+             % (d.get("CHUNK_SIZE"), CHUNK_SZ))
+if d.get("TOP_K") != TOP_K:
+    sys.exit("FAIL  TOP_K did not stick (got %s, want %s)"
+             % (d.get("TOP_K"), TOP_K))
 print("OK    strict-grounding RAG_TEMPLATE set (len=%d)" % len(d["RAG_TEMPLATE"]))
 print("      merge sanity: TOP_K=%s CHUNK_SIZE=%s CHUNK_MIN_SIZE_TARGET=%s"
       % (d.get("TOP_K"), d.get("CHUNK_SIZE"), d.get("CHUNK_MIN_SIZE_TARGET")))
