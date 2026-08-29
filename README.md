@@ -92,9 +92,9 @@ Sub-documents:
 - An agent holds only `KB_API_KEY` + `KB_HOST` (no Graphiti token, no repo files) — it works on any host. Its CLI (`kb_gateway.py` / `owui.py`) is a thin client that reads ONLY those two env vars (no `.env` files) and hits `KB_HOST`: OWUI REST at `/api/*` (KBs, retrieve, files, projects memory), API Gateway at `/memory/*` (memory + RAG; the gateway inserts the chat model server-side).
 - **API Gateway** is the sole bridge to the graph. It resolves the caller's identity + role from `KB_API_KEY` via Open WebUI (tamper-proof), enforces ownership-bounded writes + owner/admin destructive gating, discovers all existing groups live from [Neo4j][neo4j], calls the internal [Graphiti][graphiti] REST server, and provisions new KB users for admins.
 - **Graphiti client injection.** The `ghcr.io/dkhokhlov/graphiti-rest` server defaults to `OpenAIClient` (OpenAI Responses API), which [Ollama][ollama] cannot satisfy — entity/fact extraction silently stores nothing. `graphiti/bootstrap.py` is mounted into the container and run as the command; it overrides the FastAPI dependency to inject the stock `OpenAIGenericClient` (graphiti_core >= 0.29 defaults to **`json_schema` structured outputs**, which Ollama enforces server-side; set at `temperature=0`) + `OpenAIEmbedder` (`nomic-embed-text`, 768-dim), so extraction works with Ollama. There is no config switch for this; the injection is required. See `graphiti/bootstrap.py`.
-- **Network split**: `graph_internal` (neo4j + graphiti + api-gateway), `edge` (caddy + api-gateway), `owui_net` (caddy + api-gateway + openwebui). graphiti and Neo4j are **internal-only** — no host ports, reachable only through the gateway. Open WebUI is internal-only too (fronted by Caddy).
+- **Network split**: `graph_internal` (`neo4j` + `graphiti` + `api-gateway`), `edge` (`caddy` + `api-gateway`), `owui_net` (`caddy` + `api-gateway` + `openwebui`). The `graphiti` and `neo4j` services are **internal-only** — no host ports, reachable only through the API Gateway. Open WebUI is internal-only too (fronted by Caddy).
 - Only `KB_HOST_PORT` (default `3000`) → Caddy `:3000` binds to the host. Caddy's `depends_on` uses `service_started` (not `service_healthy`) so the OWUI root stays reachable even if the gateway is broken.
-- [Ollama][ollama] is external on the Docker host (reached via host-gateway); not published by this stack. [Open WebUI][open-webui] (RAG + chat) and graphiti (extraction LLM + embedder) both reach it.
+- [Ollama][ollama] is external on the Docker host (reached via host-gateway); not published by this stack. The `openwebui` (RAG + chat) and `graphiti` (extraction LLM + embedder) services both reach it.
 - **TLS**: the Caddyfile is plain HTTP on the port. For a non-local `KB_HOST` you MUST either front Caddy with an upstream TLS reverse proxy, or switch the `:3000` site block to a hostname block so Caddy auto-terminates TLS and publishes `:443`. For a local deployment (`http://localhost:3000`) no TLS is needed.
 
 ## Quick start
@@ -165,7 +165,7 @@ All endpoints are on one URL, **`KB_HOST`** (`http://<host>:3000` by default). C
 | `KB_HOST/admin/users` | `Authorization: Bearer <KB_API_KEY>` (admin, POST) | API Gateway: create a new KB user (returns temp password + `KB_API_KEY`); GET falls through to the OWUI SPA |
 | `KB_HOST/health` | none (read-only) | health probe (Caddy → API Gateway → OWUI, aggregated) |
 
-`KB_HOST` is set in `.env` (default `http://localhost:3000`); `KB_HOST_PORT` (default `3000`) is the only host-published port. [Neo4j][neo4j] (`:7474`, `:7687`) and graphiti (`:8000` internal) are not published — reachable only through the API Gateway over `graph_internal`.
+`KB_HOST` is set in `.env` (default `http://localhost:3000`); `KB_HOST_PORT` (default `3000`) is the only host-published port. The `neo4j` (`:7474`, `:7687`) and `graphiti` (`:8000` internal) services are not published — reachable only through the API Gateway over `graph_internal`.
 
 ### Environment variable precedence
 
@@ -270,7 +270,7 @@ For lockdown defaults, phone-home hardening, container caps, secrets handling, N
 
 ### API Gateway
 
-- graphiti and Neo4j have no agent-facing auth and are **internal-only** on `graph_internal`. The API Gateway is the sole bridge; [Caddy][caddy] (`KB_HOST`) fronts it. The Graphiti REST server has no native auth — the gateway is the gate. (Full route set: [`caddy/Caddyfile`](caddy/Caddyfile).)
+- The `graphiti` and `neo4j` compose services have no agent-facing auth and are **internal-only** on `graph_internal`. The API Gateway is the sole bridge; [Caddy][caddy] (`KB_HOST`) fronts it. The Graphiti REST server has no native auth — the gateway is the gate. (Full route set: [`caddy/Caddyfile`](caddy/Caddyfile).)
 - Every gateway endpoint (except `/health`) requires `Authorization: Bearer <KB_API_KEY>`. No key → `401`; bad key → `401`; Open WebUI unreachable → `503` (fail closed).
 - `/health` is ungated on purpose: non-sensitive probe, carries no data or credentials. It also probes Open WebUI so `make health` catches an identity-broken stack rather than reporting healthy while auth is down.
 - `KB_API_KEY` is a bearer — `KB_HOST` MUST be HTTPS or VPN/tunnel for any non-local agent. Plain HTTP is safe only on a trusted local interface.
@@ -282,7 +282,7 @@ For lockdown defaults, phone-home hardening, container caps, secrets handling, N
 |---|---|
 | `compose.yml` | services + networks (`graph_internal`, `edge`, `owui_net`); api-gateway internal env |
 | `gateway/` | API Gateway source: `app.py`, `authorize.py`, `graphiti.py`, `neo4j.py`, `owui.py`, `Dockerfile` (zero-dependency stdlib, non-root) |
-| `caddy/Caddyfile` | public edge `KB_HOST`; routes `/memory/*`, `POST /admin/users`, `/health` → api-gateway:8010, catch-all → openwebui:8080 |
+| `caddy/Caddyfile` | public edge `KB_HOST`; routes `/memory/*`, `POST /admin/users`, `/health` → `api-gateway:8010`, catch-all → `openwebui:8080` |
 | `graphiti/bootstrap.py` | mounted into the `graphiti` container and run as the command; injects `OpenAIGenericClient` + `nomic` embedder (768) so Ollama extraction works, runs a robust `/messages` worker, owns the app lifespan |
 | `graphiti/config.yaml` | UNUSED — config for the retired MCP image; kept for reference (not mounted) |
 | `Modelfile_qwen2_5` | reference Modelfile for the custom ctx-baked `GRAPHITI_MODEL` (`FROM qwen2.5:14b` + `PARAMETER num_ctx 8192`); see [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant) |
