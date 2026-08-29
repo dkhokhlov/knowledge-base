@@ -20,7 +20,7 @@ DATA_DIR := ./data
         users-create users-list users-search \
         ocr-config \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
-        kb-public-read \
+        kb-public-read kb-check \
         projects-bootstrap \
         shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-test clean-backup backup
 
@@ -91,9 +91,15 @@ test: ## Run unit tests (no stack) then system integration tests against the run
 	  python3 tests/test_output_json.py -v || status=1; \
 	  echo "=== unit: test_offset_aware_chunking ==="; \
 	  python3 tests/test_offset_aware_chunking.py -v || status=1; \
+	  echo "=== unit: test_kb_check ==="; \
+	  python3 tests/test_kb_check.py -v || status=1; \
 	  for t in tests/test_*.sh; do [ -e "$$t" ] || continue; \
-	  case "$$t" in *test_09_gdrive_index.sh) \
-	    echo "==> skip $$t (full real-gdrive drain; run via: make test-e2e-iso)"; continue;; esac; \
+	  case "$$t" in *test_08_e2e.sh) \
+	    echo "==> skip $$t (isolated e2e: forget deletes the agent Graphiti group; run via: bash tests/test_08_e2e.sh)"; continue;; \
+	    *test_09_gdrive_index.sh) \
+	    echo "==> skip $$t (full real-gdrive drain; run via: make test-e2e-iso)"; continue;; \
+	    *test_12_kb_check.sh) \
+	    echo "==> skip $$t (isolated e2e: starts its own throwaway stack; run via: bash tests/test_12_kb_check.sh)"; continue;; esac; \
 	  echo; echo "=== $$t ==="; bash "$$t" || status=1; \
 	done; exit $$status
 
@@ -103,14 +109,8 @@ test-output: ## Unit-test CLI JSON output schemas (no stack needed)
 test-e2e-iso: ## Isolated e2e: clone to gitignored .test-e2e/ + run the destructive e2e (clean-state wipe + re-provision + rclone + full suite + test_09 drain) under a separate compose project (kb-e2e) so the LIVE stack keeps running. The destructive logic is inlined; there is NO in-place `make test-e2e` (it would wipe the live stack). REAL rclone (re-downloads the corpus). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On failure run make clean-test.
 	@./scripts/test-e2e-iso.sh
 
-clean-test: ## Tear down the isolated e2e stack (compose project kb-e2e) + remove .test-e2e/. Safe anytime (no-op if absent); use after a failed make test-e2e-iso.
-	@if [ -d .test-e2e ]; then \
-	  cd .test-e2e && OLLAMA_HOST=http://localhost:11434 COMPOSE_PROJECT_NAME=kb-e2e \
-	    COMPOSE_FILE=compose.yml:compose.e2e.override.yml docker compose down --remove-orphans 2>/dev/null || true; \
-	  cd ..; \
-	  docker run --rm -v "$$(pwd)/.test-e2e:/data" alpine sh -c "rm -rf /data/* /data/.[!.]* /data/..?*" 2>/dev/null || true; \
-	  rm -rf .test-e2e && echo "Removed .test-e2e (e2e clone + stack)."; \
-	else echo "No .test-e2e to clean."; fi
+clean-test: ## Tear down an isolated e2e stack + remove its .test-<NAME>/ clone (default NAME=e2e -> .test-e2e/ + compose project kb-e2e). Safe anytime (no-op if absent); use after a failed isolated run. NAME=kbcheck targets .test-kbcheck/ + kb-kbcheck. Delegates to scripts/e2e-env.sh (shared with make test-e2e-iso + tests/test_12_kb_check.sh).
+	@bash -c '. scripts/e2e-env.sh; e2e_down "$${NAME:-e2e}"'
 
 api-keys: ## Provision admin + agent-user API keys into .env.local (run after `make start` + admin signup)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
@@ -188,6 +188,30 @@ kb-public-read: ## Grant public read (user:*) on EVERY knowledge base + enable s
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
 	@./scripts/kb-public-read.sh
+
+kb-check: ## Cross-DB health check (OWUI SQLite + Chroma): audit both DBs, report 12 inconsistency classes, advise purge. PURGE=1 to purge safe classes (1 ghosts, 3 orphan file-{id}, 11 dangling dirs; BACKUP=1 default exports first). PURGE=1 MAINT=1 stops OWUI to also purge maint classes (5b leaked KB vectors, 7 orphan junction, 8 dead-KB junction). KB=<id> scopes the KB-tagged classes; JSON=1 machine-readable; SHOW_NAMES=1 prints filenames (default ids-only).
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
+	  OWUI="$${OWUI_CONTAINER:-kb-openwebui}"; \
+	  if [ "$${MAINT:-0}" = "1" ]; then \
+	    echo "==> maintenance window: stopping $$OWUI (direct Chroma/SQLite writes)"; \
+	    docker stop $$OWUI >/dev/null; \
+	    trap 'echo "==> restarting $$OWUI"; docker start $$OWUI >/dev/null' EXIT; \
+	    docker run --rm --entrypoint /usr/local/bin/python3 \
+	      -v "$$(readlink -f "$${DATA_ROOT:-./data}")/openwebui:/app/backend/data" \
+	      -v "$(CURDIR)/scripts/kb_check.py:/app/kb_check.py:ro" \
+	      ghcr.io/dkhokhlov/open-webui:"$${OPENWEBUI_IMAGE_TAG:?OPENWEBUI_IMAGE_TAG required in .env}" \
+	      /app/kb_check.py $${KB:+--kb $$KB} $${JSON:+--json} $${SHOW_NAMES:+--show-names} \
+	        $${PURGE:+--purge} --maint \
+	        $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
+	  else \
+	    KEY_ENV=; if [ "$${PURGE:-0}" = "1" ]; then \
+	      [ -n "$${OPENWEBUI_ADMIN_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (PURGE=1 ghost delete needs it)"; exit 1; }; \
+	      KEY_ENV="-e OPENWEBUI_ADMIN_API_KEY"; fi; \
+	    docker exec -i $$KEY_ENV $$OWUI python3 - < scripts/kb_check.py \
+	      $${KB:+--kb $$KB} $${JSON:+--json} $${SHOW_NAMES:+--show-names} \
+	      $${PURGE:+--purge} $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
+	  fi
 
 gdrive-status: ## Show gdrive index status via api-gateway GET /status (completed/pending/processing/failed), pretty JSON. Set SCOPE_PATH=<relpath> to scope source_count to a subpath (file counts are KB-wide; accurate when the KB's whole scope is that path).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
@@ -272,7 +296,8 @@ backup: ## DR snapshot: if running, stop stack; tar resolved DATA_ROOT + .env + 
 	  -v "$$REALDATA:/staging/data:ro" \
 	  -v "$(CURDIR)/.env:/staging/.env:ro" \
 	  -v "$(CURDIR)/.env.local:/staging/.env.local:ro" \
-	  alpine tar -cf - -C /staging data .env .env.local > "$$TMP"; \
+	  alpine tar -cf - -C /staging --exclude=data/openwebui/check-exports \
+	    data .env .env.local > "$$TMP"; \
 	tar -tf "$$TMP" >/dev/null || { echo "FAIL: tarball validation (tar -tf) failed"; exit 1; }; \
 	mv "$$TMP" "$$TARBALL"; \
 	SHA=$$(sha256sum "$$TARBALL" | cut -d' ' -f1); SIZE=$$(du -h "$$TARBALL" | cut -f1); \

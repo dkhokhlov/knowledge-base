@@ -608,7 +608,7 @@ dependency is down.
 - `clean-all` keeps `graphiti/config.yaml`, `caddy/Caddyfile`, and the `./gdrive` mirror.
 - `clean-backup` removes `./.gdrive-backup/` + `./.config-backup/` (retention); it does not tear down the stack.
 
-## Isolated end-to-end test (`make test-e2e-iso`)
+## Isolated end-to-end tests (`make test-e2e-iso`, `tests/test_12_kb_check.sh`)
 
 The destructive clean-state run wipes `./data` + `.env` + `.env.local` and
 re-provisions from scratch (real rclone + the full gdrive drain). There is **no
@@ -617,9 +617,18 @@ live stack down. `make test-e2e-iso` runs that same destructive body **inlined**
 into `scripts/test-e2e-iso.sh`, in a throwaway, gitignored `.test-e2e/` clone
 under a **separate compose project** (`kb-e2e`), so the live `kb-*` stack on the
 same host keeps running (different container names, host port, project,
-volumes, networks). `compose.e2e.override.yml` overrides every `container_name`
-to `kb-e2e-*` (a new service added to `compose.yml` without a line there
-collides loudly on `up`).
+volumes, networks). `tests/test_12_kb_check.sh` does the same for the
+`make kb-check` cross-DB tool (project `kb-kbcheck`, synthetic fixtures only —
+no gdrive, no PII).
+
+The isolation (clone + compose project + container-rename override +
+`OLLAMA_HOST` resolve + `make bootstrap` + teardown) is the **reusable
+`scripts/e2e-env.sh` library**, sourced by both tests so the isolation logic is
+not duplicated. `e2e_isolate` **generates** the container-rename override from
+`compose.yml`'s service list (every `container_name` → `kb-<NAME>-*`), merged via
+`COMPOSE_FILE` — so a new service added to `compose.yml` is covered
+automatically (no per-name override file to keep in sync). The live stack does
+NOT set `COMPOSE_FILE`, so it keeps the `kb-*` names.
 
 ### Provisioning the clone (the standard way)
 
@@ -628,14 +637,18 @@ e2e Caddy port, default `E2E_PORT=3010`), `KB_HOST`
 (`http://localhost:<E2E_PORT>`), and `OLLAMA_HOST` (the shared external Ollama).
 They are pinned through the **standard make-tunable override mechanism** — the
 same one `bootstrap.sh` uses for `OCR_ENABLED` / `KB_DOMAIN` (see [Variable
-precedence](#variable-precedence)) — not by editing the tracked template:
+precedence](#variable-precedence)) — not by editing the tracked template. The
+`e2e_*` functions in `scripts/e2e-env.sh` apply it:
 
-| Step | Mechanism |
-|---|---|
-| 1. wrapper detects `OLLAMA_HOST` | shell env, else the live `.env`, else the running `kb-graphiti` container's `OPENAI_BASE_URL` (strip `/v1`) |
-| 2. wrapper `unset BASH_ENV KB_HOST` | isolate the e2e tree from the operator's `~/.bash_env` (see below) |
-| 3. `make bootstrap KB_HOST=... KB_HOST_PORT=... OLLAMA_HOST=...` | `bootstrap.sh` force-persists each non-empty tunable into `.env` (replace if present, append if commented/absent; idempotent — no tunable means no change, so the live operator is unaffected) |
-| 4. the inlined destructive body re-forwards the same tunables to its internal `make bootstrap` | the values survive the internal `make clean-all` (rm `.env`) -> bootstrap (recreates `.env` from `.env.template`) |
+| Step | Function | Mechanism |
+|---|---|---|
+| 1. resolve `OLLAMA_HOST` | `e2e_resolve_ollama` | shell env, else the live `.env`, else the running `kb-graphiti` container's `OPENAI_BASE_URL` (strip `/v1`) |
+| 2. isolate from the operator's shell profile | `e2e_isolate` | `unset BASH_ENV KB_HOST` (see below) |
+| 3. clone + generated override + compose env | `e2e_isolate` | `git clone --no-local` to `.test-<NAME>/`; sets `COMPOSE_PROJECT_NAME=kb-<NAME>`, `COMPOSE_FILE`, `OWUI_CONTAINER`, `MARKITDOWN_CONTAINER`, `KB_HOST`, `KB_HOST_PORT` |
+| 4. `make bootstrap KB_HOST=... KB_HOST_PORT=... OLLAMA_HOST=... [OCR_ENABLED=...]` | `e2e_isolate` | `bootstrap.sh` force-persists each non-empty tunable into `.env` (replace if present, append if commented/absent; idempotent — no tunable means no change, so the live operator is unaffected) |
+| 5. start + wait healthy + admin-signup + api-keys | `e2e_provision` (non-destructive) | `make test-e2e-iso` uses its own destructive body instead (clean-all + re-bootstrap + preflight + gdrive + full suite) |
+| 6. teardown | `e2e_down` / `e2e_keep_or_down` | `docker compose down --remove-orphans` + root-rm the clone (OWUI/Neo4j write root-owned files) |
+| 7. the inlined destructive body re-forwards the same tunables to its internal `make bootstrap` | `scripts/test-e2e-iso.sh` | the values survive the internal `make clean-all` (rm `.env`) -> bootstrap (recreates `.env` from `.env.template`) |
 
 The clone's `.env.template` is **never mutated**. The e2e provisions exactly the
 way a live `make bootstrap KB_HOST=... KB_HOST_PORT=... OLLAMA_HOST=...` would.
@@ -649,11 +662,11 @@ re-sources inside the e2e tree, it clobbers the `KB_HOST` make-tunable at
 **bootstrap-capture time**: `bootstrap.sh`'s bash sources `BASH_ENV` (setting
 `KB_HOST=mini2:3000`) *before* it reads `${KB_HOST:-}`, so it would persist
 `mini2:3000` to `.env` -> `admin-signup` hits the live stack -> `403` (the admin
-already exists there). `unset BASH_ENV` stops the re-source; `OLLAMA_HOST`
-reaches children via the wrapper's export + normal inheritance, and `KB_HOST` via
-`.env` (sourced after any residual profile in every script, so `.env` wins
-regardless). This is isolation from the operator's shell profile, not a
-workaround. (`unset KB_HOST` drops the live-stack value the wrapper's own
+already exists there). `unset BASH_ENV` (in `e2e_isolate`) stops the re-source;
+`OLLAMA_HOST` reaches children via the wrapper's export + normal inheritance, and
+`KB_HOST` via `.env` (sourced after any residual profile in every script, so
+`.env` wins regardless). This is isolation from the operator's shell profile,
+not a workaround. (`unset KB_HOST` drops the live-stack value the wrapper's own
 startup source of `~/.bash_env` left in its env.)
 
 ### Real rclone + gdrive excludes
@@ -662,9 +675,10 @@ startup source of `~/.bash_env` left in its env.)
   symlink, no reuse. The live `./gdrive` mirror is untouched (the clone rclones
   from the `gdrive` remote, not from the live mirror).
 - `gdrive-exclude.conf` is gitignored (Drive file paths are business-sensitive).
-  The wrapper copies the live one into the throwaway clone so rclone uses the
-  same exclusions; `make clean-test` discards it with the clone — it is never
-  committed and never leaves the host.
+  `test-e2e-iso.sh` copies the live one into the throwaway clone so rclone uses
+  the same exclusions; `make clean-test` discards it with the clone — it is never
+  committed and never leaves the host. (`test_12_kb_check.sh` does NOT use gdrive
+  — it uploads synthetic fixtures directly, so it needs no exclude copy.)
 - The e2e rclone yields the indexable set a **fresh sync** produces
   (`allowed − excluded − dups`). `gdrive-exclude.conf` `[*]` excludes `*.json`,
   so a mirror synced before that rule holds stale `*.json` on disk and counts
@@ -673,7 +687,9 @@ startup source of `~/.bash_env` left in its env.)
   `gateway.walk_source` which prunes them from a full walk.
 
 On success the e2e stack is torn down and `.test-e2e` removed (unless
-`E2E_KEEP=1`); on failure both are left for debugging (`make clean-test`).
+`E2E_KEEP=1`); on failure both are left for debugging
+(`make clean-test NAME=e2e`; `make clean-test NAME=kbcheck` for the kb_check
+clone — default `NAME=e2e`).
 
 ## Repointing OLLAMA_HOST
 

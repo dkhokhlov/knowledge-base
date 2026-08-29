@@ -20,8 +20,8 @@ load_env
 require_stack_up
 
 # Container name (overridable for the isolated e2e clone, which renames it to
-# kb-e2e-markitdown-ocr via compose.e2e.override.yml; mirrors test_04's
-# OWUI_CONTAINER).
+# kb-e2e-markitdown-ocr via the generated override from scripts/e2e-env.sh
+# e2e_isolate; mirrors test_04's OWUI_CONTAINER).
 CTN="${MARKITDOWN_CONTAINER:-kb-markitdown-ocr}"
 
 # --- skip condition ----------------------------------------------------------

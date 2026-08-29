@@ -7,135 +7,79 @@
 # test_09 drain) is inlined below -- there is NO standalone `make test-e2e`
 # target that would wipe the live stack; this wrapper is the only entry point.
 #
+# The isolation (clone + compose project + generated container-rename override
+# + OLLAMA_HOST resolve + bootstrap + teardown) is the REUSABLE
+# scripts/e2e-env.sh library, shared with tests/test_12_kb_check.sh. This file
+# holds only the gdrive-specific setup (gdrive-exclude.conf copy) + the
+# destructive body. See e2e-env.sh for the isolation mechanics.
+#
 # Why a clone is not enough on its own: compose.yml hardcodes
 # `container_name: kb-*` (project-name-independent), so a second stack would
-# collide with the live `kb-*` containers. compose.e2e.override.yml overrides
-# every name to `kb-e2e-*` and is merged only via COMPOSE_FILE. KB_HOST /
-# KB_HOST_PORT / OLLAMA_HOST are pinned the STANDARD way: `make bootstrap`
-# make-tunables (bootstrap.sh force-persists them into .env, the same mechanism
-# it uses for OCR_ENABLED), and the inlined destructive body re-forwards them
-# across its own clean-all (rm .env) -> bootstrap. The clone's .env.template is
-# NEVER mutated.
+# collide with the live `kb-*` containers. e2e_isolate GENERATES an override
+# that renames every container to `kb-e2e-*` (merged via COMPOSE_FILE), so the
+# live stack (which does NOT set COMPOSE_FILE) keeps the `kb-*` names. A new
+# service added to compose.yml is covered automatically (the override is
+# generated from compose.yml's service list).
 #
 # The clone lives in .test-e2e/ (on disk, NOT /tmp shmem -- the e2e ./data +
-# ./gdrive corpus are too large for tmpfs). It is gitignored; `make clean-test`
-# tears the stack down + removes the dir.
+# ./gdrive corpus are too large for tmpfs). It is gitignored (`/.test-*/`);
+# `make clean-test` (or e2e_down) tears the stack down + removes the dir.
 #
 # Costs vs an in-place (un-isolated) clean-state run:
 #  - a second full stack runs alongside the live one (RAM + GPU contention on
-#    the shared external Ollama, mini4);
-#  - ./gdrive is gitignored, so the clone re-rclone-downloads the corpus;
-#  - compose.e2e.override.yml must list every service (a new service added to
-#    compose.yml without a line there collides loudly on `up`).
+#    the shared external Ollama);
+#  - ./gdrive is gitignored, so the clone re-rclone-downloads the corpus.
 #
-# On success: the e2e stack is torn down (`make clean`) and .test-e2e removed.
-# On failure: the stack + clone are LEFT for debugging (run `make clean-test`).
+# On success: the e2e stack is torn down and .test-e2e removed (unless
+# E2E_KEEP=1). On failure: the stack + clone are LEFT for debugging
+# (`make clean-test`).
 #
 # Usage: make test-e2e-iso [E2E_PORT=3010] [OCR_ENABLED=false] [E2E_KEEP=1]
 #   E2E_PORT  - host port for the e2e Caddy (default 3010; must not collide with
 #               the live KB_HOST_PORT, default 3000).
-#   E2E_KEEP - 1 = leave the e2e stack running + .test-e2e on success too.
-# Requires: OLLAMA_HOST set (shell env or the live .env), rclone `gdrive`
-# remote configured, and the locally-built openwebui overlay image present.
+#   E2E_KEEP  - 1 = leave the e2e stack running + .test-e2e on success too.
+# Requires: OLLAMA_HOST resolvable (shell env, live .env, or live stack up),
+# rclone `gdrive` remote configured, and the locally-built openwebui overlay
+# image present.
 set -euo pipefail
 
-SRC="$(cd "$(dirname "$0")/.." && pwd)"
 E2E_PORT="${E2E_PORT:-3010}"
 E2E_KEEP="${E2E_KEEP:-0}"
-CLONE="$SRC/.test-e2e"
+NAME="e2e"
+# OCR is honored by e2e_isolate (passed to `make bootstrap`, which persists it
+# into .env). Default unset -> the clone uses .env.template's OCR_ENABLED.
+OCR_OVR="${OCR_ENABLED:-}"
 
-# OLLAMA_HOST: prefer shell env, else the live .env, else derive from the
-# running kb-graphiti container (its OPENAI_BASE_URL = $OLLAMA_HOST/v1, already
-# translated by the shim; strip /v1). The clone needs it (compose :? fails
-# without it); it is passed to `make bootstrap` below as a make-tunable that
-# bootstrap.sh persists into .env. The live .env usually has it commented (the
-# operator keeps it in the shell env), so the container fallback makes this work
-# from any shell as long as the live stack is up.
-if [ -z "${OLLAMA_HOST:-}" ]; then
-  OLLAMA_HOST="$(grep -E '^OLLAMA_HOST=' "$SRC/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+# Reusable isolation lib (sets E2E_SRC + the e2e_* functions; sourced, not run).
+. "$(cd "$(dirname "$0")" && pwd)/e2e-env.sh"
+
+# --- 1. isolate + bootstrap the throwaway clone ------------------------------
+e2e_resolve_ollama || { echo "FAIL  OLLAMA_HOST resolution failed" >&2; exit 1; }
+# e2e_isolate: clone -> generated container-rename override -> COMPOSE_* env ->
+# `make bootstrap` (seeds .env/.env.local + admin account). Refuses to clobber a
+# leftover .test-e2e. Leaves cwd inside the clone for the destructive body.
+if [ -n "$OCR_OVR" ]; then
+  e2e_isolate "$NAME" "$E2E_PORT" "$OCR_OVR"
+else
+  e2e_isolate "$NAME" "$E2E_PORT"
 fi
-if [ -z "${OLLAMA_HOST:-}" ] && docker inspect kb-graphiti >/dev/null 2>&1; then
-  # strip the "OPENAI_BASE_URL=" prefix (sub, not awk -F= $2, so a URL containing
-  # '=' is not truncated), drop a trailing slash, then strip "/v1".
-  base="$(docker inspect kb-graphiti --format '{{range .Config.Env}}{{println .}}{{end}}' \
-    | awk '/^OPENAI_BASE_URL=/{sub(/^OPENAI_BASE_URL=/,""); print}')"
-  base="${base%/}"
-  OLLAMA_HOST="${base%/v1}"
-fi
-[ -n "${OLLAMA_HOST:-}" ] || { echo "FAIL  OLLAMA_HOST not set (export it, set it in $SRC/.env, or run with the live stack up)" >&2; exit 1; }
-
-# Isolate the e2e tree from the operator's shell profile. The operator's
-# ~/.bash_env (sourced by BASH_ENV in EVERY non-interactive child bash: make
-# recipe shells, bootstrap.sh, admin-signup.sh, ...) re-exports
-# KB_HOST=http://mini2:3000 (the LIVE stack) + OLLAMA_HOST for the live
-# deployment. Re-sourcing it in the e2e tree clobbers the KB_HOST make-tunable at
-# bootstrap-CAPTURE time: bootstrap's bash sources BASH_ENV (KB_HOST=mini2:3000)
-# BEFORE it reads ${KB_HOST:-}, so it would persist mini2:3000 to .env ->
-# admin-signup hits the live stack -> 403. Unsetting BASH_ENV stops the re-source;
-# OLLAMA_HOST reaches children via this export + normal inheritance, and KB_HOST
-# via the make-tunable persisted to .env (sourced after any residual profile in
-# every script, so .env wins regardless). unset KB_HOST drops the live-stack
-# value inherited from the wrapper's own startup source of ~/.bash_env.
-export OLLAMA_HOST
-unset BASH_ENV KB_HOST
-
-# Refuse to clobber a leftover .test-e2e (a prior failed run left it for
-# debugging). Tear it down first.
-if [ -e "$CLONE" ]; then
-  echo "FAIL  $CLONE already exists (a prior run left it for debugging). Run: make clean-test" >&2
-  exit 1
-fi
-
-# Clone from the LOCAL repo (origin may be behind; this repo's HEAD is current).
-# --no-local forces the transport (no hardlinks) so it works across filesystems.
-echo "==> clone $SRC -> $CLONE"
-git clone --no-local "$SRC" "$CLONE"
-cd "$CLONE"
-
-# Provision the e2e values the STANDARD way: `make bootstrap` make-tunables
-# (KB_HOST / KB_HOST_PORT / OLLAMA_HOST), which bootstrap.sh force-persists into
-# .env (the same mechanism it uses for OCR_ENABLED; see operations.md "Variable
-# precedence"). The clone's .env.template is NEVER mutated -- it stays the
-# tracked default, so the e2e provisions exactly the way a live `make bootstrap
-# KB_HOST=... KB_HOST_PORT=...` would. The inlined destructive body re-forwards
-# these same tunables to its internal `make bootstrap` across its own clean-all
-# (which wipes .env then re-bootstraps), so the values survive.
-E2E_KB_HOST="http://localhost:$E2E_PORT"
-
-# Separate compose project + override file (kb-e2e-* container names) so the
-# live kb-* stack is untouched. COMPOSE_FILE/COMPOSE_PROJECT_NAME are honored by
-# every bare `docker compose` in the Makefile + scripts (start.sh, clean-all).
-export COMPOSE_PROJECT_NAME=kb-e2e
-export COMPOSE_FILE=compose.yml:compose.e2e.override.yml
-# test_10 docker-inspects/execs the OCR container; test_04 already honors
-# OWUI_CONTAINER. Point both at the e2e-prefixed names so `make test` (run by
-# test-e2e) targets the e2e stack, not the live one.
-export MARKITDOWN_CONTAINER=kb-e2e-markitdown-ocr
-export OWUI_CONTAINER=kb-e2e-openwebui
 
 # ./gdrive: the clone has only the tracked .gitkeep + .tests fixture; the
 # standard `make test-e2e-iso` runs a REAL rclone sync (make gdrive-sync) to
 # download the live corpus into ./gdrive/<drive>/. No symlink, no reuse -- the
 # e2e exercises the real rclone path (the point of the at-scale run). The live
-# $SRC/gdrive mirror is untouched (the clone rclones from the gdrive remote,
-# not from $SRC).
+# $E2E_SRC/gdrive mirror is untouched (the clone rclones from the gdrive
+# remote, not from $E2E_SRC).
 #
 # gdrive-exclude.conf is gitignored (PII: Drive file paths) so the clone has no
 # copy; without it rclone hits non-downloadable paths and aborts fail-fast. Copy
 # the live one so the clone's rclone uses the same exclusions as the live stack.
 # The clone is throwaway (clean-test wipes it), so the PII file is discarded
 # with it -- it is never committed and never leaves this host.
-[ -f "$SRC/gdrive-exclude.conf" ] && cp "$SRC/gdrive-exclude.conf" "$CLONE/gdrive-exclude.conf"
-
-# Seed admin creds (test-e2e REFUSES without .env.local). bootstrap creates
-# .env.local + a generated admin account; test-e2e stashes+restores the creds
-# across its own clean-all. Pass the e2e values as make-tunables so bootstrap
-# persists them into .env (standard provision; .env.template untouched).
-echo "==> make bootstrap (seed .env/.env.local for $CLONE, port $E2E_PORT)"
-make bootstrap KB_HOST="$E2E_KB_HOST" KB_HOST_PORT="$E2E_PORT" OLLAMA_HOST="$OLLAMA_HOST"
+[ -f "$E2E_SRC/gdrive-exclude.conf" ] && cp "$E2E_SRC/gdrive-exclude.conf" "$E2E_CLONE/gdrive-exclude.conf"
 
 rc=0
-echo "==> destructive e2e (in $CLONE, project $COMPOSE_PROJECT_NAME, port $E2E_PORT)"
+echo "==> destructive e2e (in $E2E_CLONE, project $COMPOSE_PROJECT_NAME, port $E2E_PORT)"
 # Inlined from the former scripts/test-e2e.sh (removed: the destructive logic
 # lives ONLY in this isolated wrapper now -- there is no standalone `make
 # test-e2e` footgun that wipes the live stack). Run it in a subshell with its
@@ -232,18 +176,10 @@ rc=$?
 set -e
 
 if [ "$rc" -eq 0 ]; then
-  if [ "$E2E_KEEP" = "1" ]; then
-    echo "==> test-e2e-iso PASS (stack left running on port $E2E_PORT; clone at $CLONE; tear down with: make clean-test)"
-  else
-    echo "==> test-e2e-iso PASS -> tearing down the e2e stack + removing $CLONE"
-    # clean-test downs the kb-e2e project + removes .test-e2e (as root via an
-    # alpine container, since OWUI/Neo4j write root/neo4j-owned files that a host
-    # rm -rf cannot delete -- the same pattern clean-all uses for ./data).
-    cd "$SRC" && make clean-test
-  fi
+  e2e_keep_or_down "$NAME" "$E2E_KEEP"
 else
   echo "==> test-e2e-iso FAIL (rc=$rc). E2e stack + clone LEFT for debugging." >&2
-  echo "    port: $E2E_PORT   project: $COMPOSE_PROJECT_NAME" >&2
-  echo "    tear down + remove:  make clean-test" >&2
+  echo "    port: $E2E_PORT   project: kb-$NAME   clone: $E2E_CLONE" >&2
+  echo "    tear down + remove:  make clean-test NAME=$NAME" >&2
 fi
 exit "$rc"

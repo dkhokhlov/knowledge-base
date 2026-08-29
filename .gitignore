@@ -55,11 +55,12 @@ __pycache__/
 # wipe (recovery net). `make clean-backup` clears it.
 /.config-backup/
 
-# Isolated e2e clone (make test-e2e-iso): a throwaway copy of the repo run under
-# a separate compose project (kb-e2e) so the live stack keeps running. On a
-# successful run the wrapper removes it; `make clean-test` tears down the e2e
-# stack + removes it after a failed run.
-/.test-e2e/
+# Isolated e2e clones (make test-e2e-iso, tests/test_12_kb_check.sh, ...):
+# throwaway copies of the repo run under a separate compose project (kb-e2e,
+# kb-kbcheck, ...) so the live stack keeps running. On a successful run the
+# wrapper removes them; `make clean-test` (or e2e_down) tears down the isolated
+# stack + removes them after a failed run. Generic: any .test-*/ clone.
+/.test-*/
 
 # make backup DR snapshots: dated tarballs of ./data + .env + .env.local
 # (full stack state). Operator copies these off-host for disaster recovery.
