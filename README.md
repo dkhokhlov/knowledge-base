@@ -12,17 +12,17 @@
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED)](https://docs.docker.com/compose/)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
 
-Self-hosted, **agent-first** knowledge stack combining **two complementary knowledge bases** in one system. [Open WebUI][open-webui] provides a **document knowledge base**: ingest curated documents into **access-controlled collections**; query by **RAG** (LLM-grounded answer) or **precise text / raw chunk retrieval** (no LLM). [Graphiti][graphiti] provides a **temporal fact memory** over [Neo4j][neo4j]: each **episode** is **time-stamped**, and extracted facts and edges are **time-bound** — a fact is true over a **time window** and is **invalidated, not deleted**, when superseded. This preserves history so the graph represents **current truth**, **what was true when**, and **how knowledge changed** — beyond static vector retrieval of fixed text chunks.
+Self-hosted, **agent-first** knowledge stack combining **two complementary knowledge bases (KBs)** in one system. [Open WebUI][open-webui] provides a **document KB**: ingest curated documents — synced from **Google Drive** — into **access-controlled collections**; query by **RAG** (LLM-grounded answer) or **precise text / raw chunk retrieval** (no LLM). [Graphiti][graphiti] provides a **temporal fact memory** over [Neo4j][neo4j]: facts are **time-bound** and are **invalidated, not deleted**, when superseded, so the graph keeps history instead of only the latest snapshot. Model + motivation: [docs/memory.md](docs/memory.md).
 
-Documents provide **grounded answers** from a **curated reference corpus**. **Fact memory** replaces scattered, untrimmed README, notes, and tracker files across projects — where every context load pays a growing **token tax** and specific facts become hard to find — with one **searchable temporal graph**, so accumulated knowledge stays findable instead of bloating linearly with every addition. Agents use the stack through the stack-side `api-gateway`, which authorizes **per-account** `KB_API_KEY` credentials with **identity and role** derived server-side, plus a **thin zero-dependency CLI** and the `/kb` skill. Humans can also use the Open WebUI web interface.
+Documents provide **grounded answers** from a **curated reference corpus**. **Fact memory** replaces scattered, untrimmed README, notes, and tracker files across projects with one **searchable temporal graph**, so accumulated knowledge stays findable and stops paying a growing **token tax** on every context load (details: [docs/memory.md](docs/memory.md)). Agents use the stack through the stack-side `api-gateway`, which authorizes **per-account** `KB_API_KEY` credentials with **identity and role** derived server-side, plus a **thin zero-dependency CLI** and the `/kb` skill. Humans can also use the Open WebUI web interface.
 
-The document KB also indexes **Claude Code's project memory** — the **per-project auto-memory** Claude Code writes under `~/.claude/projects/*/memory/` — into **one Open WebUI KB per project**, so knowledge accumulated across **sessions and repositories** stays **searchable** instead of expiring with each session's context. The `/kb` skill drives this **host-side** with the caller's own **user key** (`index-projects` / `retrieve-projects` / `status-projects`); the caller **creates and owns** each project KB, and the **api-gateway is not involved** on this surface. See [Projects memory indexing](docs/operations.md#projects-memory-indexing-claude-project-memory--open-webui) in docs/operations.md, and the `/kb` skill ([docs/agents.md](docs/agents.md)).
+The document KB also indexes **[Claude Code's project memory][claude-code]** — the **per-project auto-memory** Claude Code writes under `~/.claude/projects/*/memory/` — into **one Open WebUI KB per project**, so knowledge accumulated across **sessions and repositories** stays **searchable** instead of expiring with each session's context. The `/kb` skill drives this **host-side** with the caller's own **user key** (`index-projects` / `retrieve-projects` / `status-projects`); the caller **creates and owns** each project KB, and the **api-gateway is not involved** on this surface. See [Projects memory indexing](docs/operations.md#projects-memory-indexing-claude-project-memory--open-webui) in docs/operations.md, and the `/kb` skill ([docs/agents.md](docs/agents.md)).
 
-- **[Graphiti][graphiti]** — temporal fact memory over [Neo4j][neo4j]; reached via an internal REST server.
 - **[Open WebUI][open-webui]** — document knowledge base with vector search, grounded RAG chat, and user/group access control; also the identity provider for the api-gateway.
+- **[Graphiti][graphiti]** — temporal fact memory over [Neo4j][neo4j]; reached via an internal REST server.
 - **[Neo4j][neo4j]** — graph store for [Graphiti][graphiti] (internal only).
 - **api-gateway** — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti REST bridge, live group discovery, and admin user provisioning (zero-dependency Python stdlib).
-- **[Caddy][caddy]** — the single public edge (`KB_HOST`): fronts Open WebUI at the root and proxies `/memory/*`, `POST /admin/users`, `/health` to the api-gateway.
+- **[Caddy][caddy]** — the single public edge (`KB_HOST`): fronts Open WebUI at the root (catch-all) and proxies `/memory/*`, `POST /admin/users`, `POST /index`, `GET /status`, `GET /openapi.json`, `/health` to the api-gateway (method-scoped routes fall through to Open WebUI for other methods, so browser deep-links keep working).
 
 [Ollama][ollama] supplies the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings; it is reached via `OLLAMA_HOST` (Ollama's native client env var) and can run on the [Docker][docker] host or a remote/LAN host.
 
@@ -44,6 +44,7 @@ Sub-documents:
 - [docs/ocr.md](docs/ocr.md) — markitdown-OCR external extraction engine: per-figure `deepseek-ocr` via native Ollama `/api/chat`, per-page/per-slide/per-sheet metadata, `OCR_ENABLED` config flag + scope + limits.
 - [docs/testing.md](docs/testing.md) — integration test suite + matrix.
 - [docs/agents.md](docs/agents.md) — agent integration per tool (Claude Code, Codex, OpenCode, Pi): install the `kb` skill, set `KB_HOST` + `KB_API_KEY`, example flows.
+- [docs/memory.md](docs/memory.md) — fact memory (Graphiti): temporal model (time-stamped episodes, time-bound facts, invalidation) + motivation.
 
 ## Architecture
 
@@ -114,7 +115,7 @@ export KB_HOST=http://<host>:3000
 make provision
 ```
 
-`make provision` chains the full first-time setup and leaves the stack running: `bootstrap` (creates `.env`/`.env.local` + the JWT key, `OCR_SERVICE_TOKEN`, first-user password, `./data` dirs; bakes `COMPOSE_PROFILES=ocr` into `.env` from `OCR_ENABLED`) → `pull-models` (BLOCKING: pulls the base LLM + ctx variant + embedder + `deepseek-ocr` from Ollama) → `start` (preflight + `docker compose up -d`; the ocr sidecar is included via `COMPOSE_PROFILES=ocr` in `.env`) → `admin-signup` (creates `admin@<KB_DOMAIN>`) → `api-keys` (admin + read-scoped agent keys; auto-configures OWUI → `markitdown-ocr` when `OCR_ENABLED=true`) → `rag-config` (strict-grounding RAG template + `rag.ollama.base_url` sync) → `gdrive-index-bootstrap` (creates the gdrive KB + grants public read + writes `GDRIVE_KB_ID`). The JWT key, API keys, and Neo4j auth are generated locally; `OCR_ENABLED` defaults to `true` (to skip OCR: `make clean-all && make provision OCR_ENABLED=false`). Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
+`make provision` chains the full first-time setup and leaves the stack running: `bootstrap` (creates `.env`/`.env.local` + the JWT key, `OCR_SERVICE_TOKEN`, first-user password, `./data` dirs; bakes `COMPOSE_PROFILES=ocr` into `.env` from `OCR_ENABLED`) → `pull-models` (BLOCKING: pulls the base LLM + ctx variant + embedder + `deepseek-ocr` from Ollama) → `start` (preflight + `docker compose up -d`; the ocr sidecar is included via `COMPOSE_PROFILES=ocr` in `.env`) → `admin-signup` (creates `admin@<KB_DOMAIN>`) → `api-keys` (admin + read-scoped agent keys; auto-configures OWUI → `markitdown-ocr` when `OCR_ENABLED=true`) → `rag-config` (strict-grounding RAG template + `rag.ollama.base_url` sync) → `gdrive-index-bootstrap` (creates the Google Drive KB + grants public read + writes `GDRIVE_KB_ID`). The JWT key, API keys, and Neo4j auth are generated locally; `OCR_ENABLED` defaults to `true` (to skip OCR: `make clean-all && make provision OCR_ENABLED=false`). Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
 
 > **PROMPT for Agent**
 >
@@ -126,14 +127,14 @@ make provision
 > update my KB_API_KEY in ~/.bashrc.
 > ```
 
-**Populate the gdrive KB** (one-time) — after `make provision`:
+**Populate the Google Drive KB** (one-time) — after `make provision`:
 
 ```
 make gdrive-sync   # rclone pull into ./gdrive + POST /index (reconcile into the KB)
 make gdrive-status # pretty JSON: completed/pending/processing/failed vs source (no ETA — no daemon)
 ```
 
-See [gdrive indexing (manual, via api-gateway)](#gdrive-indexing-manual-via-api-gateway). `make gdrive-sync` chains rclone → POST `/index`; indexing is manual/on-demand (no sidecar).
+See [Google Drive indexing (manual, via api-gateway)](#google-drive-indexing-manual-via-api-gateway). `make gdrive-sync` chains rclone → POST `/index`; indexing is manual/on-demand (no sidecar).
 
 **Everyday restart** (provision is done once): `make start`. Re-assert after a DB reset: `make rag-config` (+ `make ocr-config`). Rotate keys: `make api-keys FORCE=1`.
 
@@ -202,7 +203,7 @@ An admin runs **`make users-create EMAIL=alice@example.com NAME=Alice`** (an ope
 - To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds. The `/kb` skill reaches RAG via `POST /memory/rag` (the api-gateway inserts the chat model from `OPENWEBUI_MODEL`; send `messages` + `files`, no `model`); humans/admins RAG directly at `POST /api/chat/completions` with an explicit `model`.
 - `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
 
-### gdrive indexing (manual, via api-gateway)
+### Google Drive indexing (manual, via api-gateway)
 
 The `gdrive` knowledge base is indexed by **api-gateway** (stateless, no sidecar). `make gdrive-sync` runs rclone to sync `./gdrive` from the shared drives, then POSTs `/index` to api-gateway, which walks `./gdrive` read-only and drives OWUI's native sync/diff protocol to reconcile the tree into the KB. Indexing is **manual/on-demand only**: no daemon, no schedule, no hooks. **Prerequisite:** a configured + authenticated rclone `gdrive` remote — one-time `rclone config` (new `gdrive` remote, Google Drive storage, browser OAuth login); `make gdrive-sync` fail-fasts if no shared drives are visible. Full setup (headless auth, verify, re-auth): see [docs/gdrive.md](docs/gdrive.md).
 
@@ -213,7 +214,7 @@ The `gdrive` knowledge base is indexed by **api-gateway** (stateless, no sidecar
 - Indexed file types are the documents-only allowlist hardcoded in `gateway/app.py` `DEFAULT_ALLOW` (source code is handled by open-codebase-index; `.npy`, audio/video, images, archives, `.svg`/`.drawio` are excluded). Max size is `KB_MAX_SIZE` (default `100mb`, `.env`). `/index` does incremental SHA-256 diffing against the live KB and **fails closed on an empty source** (0 files + not `?force=1` → 422, no `cleanup`), so a bad/empty mount cannot mass-delete the KB.
 - api-gateway reaches OWUI internally (`openwebui:8080` on `owui_net`) with the admin key in its env (`OPENWEBUI_ADMIN_API_KEY`, injected from `.env.local`). The caller's `KB_API_KEY` is authorization only (identity via OWUI, role checked for `/index` admin). The gateway is stateless: no `history.db`, no `./data/oikb`. File bytes flow gateway → OWUI internally (not through Caddy); Caddy carries only the trigger + the results JSON.
 - Per-file transparency: `/index` returns `{added, modified, deleted, unmodified, retried, errors, ok}` where `errors` carries `{filename, status, error}` per failed upload/dir-create/re-trigger — the diagnosis surface (no opaque daemon aggregate). The gateway does NOT link files itself: `POST /files/` queues OWUI's per-upload background task (extract → embed → link), which is the sole linker. `/index` re-triggers `failed` files every run (delete + re-upload; `--retry-pending` / `?retry_pending=1` also re-triggers `pending`). `ok=false` means a real upload/extract error (the upload-idempotency + path-aware-dedup patches make duplicate-content 400s not occur).
-- Subpath reconcile: `/index` and `/status` accept `?path=<relpath>` (relative to the gdrive root; a directory or a single file) — exposed as `make gdrive-sync SCOPE_PATH=<relpath>` / `make gdrive-index SCOPE_PATH=<relpath>` / `make gdrive-status SCOPE_PATH=<relpath>` (the env var is `SCOPE_PATH`, not `PATH`, to avoid clobbering the shell's executable-search `PATH`). `path` is a SOURCE FILTER only: it scopes the walk to that subpath (entry keys stay root-relative, so a later full `/index` sees `unmodified`). The reconcile is a FULL reconcile of that subpath — files removed from the source under it ARE removed from the KB — so use a KB whose whole scope is that `path` (a dedicated/subpath KB; on a shared KB `path` deletes every KB file outside the subpath). `/status?path=` scopes `source_count` to the subpath (file counts are KB-wide). The full walk skips dot-dirs/dot-files (hidden metadata like `.sync-reports`/`.sync.lock` is never indexed); `path` opts into a dot-subtree.
+- Subpath reconcile: `/index` and `/status` accept `?path=<relpath>` (relative to the Google Drive root; a directory or a single file) — exposed as `make gdrive-sync SCOPE_PATH=<relpath>` / `make gdrive-index SCOPE_PATH=<relpath>` / `make gdrive-status SCOPE_PATH=<relpath>` (the env var is `SCOPE_PATH`, not `PATH`, to avoid clobbering the shell's executable-search `PATH`). `path` is a SOURCE FILTER only: it scopes the walk to that subpath (entry keys stay root-relative, so a later full `/index` sees `unmodified`). The reconcile is a FULL reconcile of that subpath — files removed from the source under it ARE removed from the KB — so use a KB whose whole scope is that `path` (a dedicated/subpath KB; on a shared KB `path` deletes every KB file outside the subpath). `/status?path=` scopes `source_count` to the subpath (file counts are KB-wide). The full walk skips dot-dirs/dot-files (hidden metadata like `.sync-reports`/`.sync.lock` is never indexed); `path` opts into a dot-subtree.
 
 ### OCR extraction (image-bearing documents)
 
@@ -303,3 +304,4 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 [ollama]: https://ollama.com/
 [docker]: https://www.docker.com/
 [nomic-embed-text]: https://huggingface.co/nomic-ai/nomic-embed-text
+[claude-code]: https://code.claude.com/docs/en/memory
