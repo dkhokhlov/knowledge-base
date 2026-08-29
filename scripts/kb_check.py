@@ -324,9 +324,10 @@ class Stores:
     # --- mutating: maintenance tier (OWUI stopped) ------------------------
 
     def delete_kb_vectors_by_file(self, kb_name, file_id):
-        """Direct Chroma delete(filter={'file_id': file_id}) on a KB collection.
-        Maintenance window only (OWUI stopped)."""
-        self._chroma().get_collection(kb_name).delete(filter={"file_id": file_id})
+        """Direct Chroma delete(where={'file_id': file_id}) on a KB collection.
+        Maintenance window only (OWUI stopped). Chroma 1.5.x Collection.delete
+        takes `where` (metadata filter), not `filter`."""
+        self._chroma().get_collection(kb_name).delete(where={"file_id": file_id})
         return True
 
     def _webui_rw(self):
