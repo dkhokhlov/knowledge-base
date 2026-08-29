@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 
@@ -36,7 +37,7 @@ class FakeStores(kc.Stores):
 
     def __init__(self, data_dir, files, junction, kb_ids, dir_ids, colls,
                  coll_meta, coll_docs, vsegs, seg_for_coll, disk, dir_sizes,
-                 admin_key="ADM"):
+                 content=None, updated_at=None, admin_key="ADM"):
         super().__init__(data_dir, "http://owui", admin_key)
         self._files = files
         self._junction = junction
@@ -49,6 +50,9 @@ class FakeStores(kc.Stores):
         self._seg_for_coll = seg_for_coll   # {coll_uuid: seg_id}
         self._disk = disk
         self._dir_sizes = dir_sizes
+        # repair-gate data (lazy reads in the real Stores; in-memory here)
+        self._content = content or {}       # {file_id: content str}
+        self._updated_at = updated_at or {}  # {file_id: epoch seconds}
         # mutation record
         self.owui_deletes = []
         self.deleted_collections = []
@@ -56,6 +60,7 @@ class FakeStores(kc.Stores):
         self.deleted_kb_vectors = []
         self.deleted_junction_files = []
         self.deleted_junction_kbs = []
+        self.repaired = []
 
     # reads
     def file_rows(self):
@@ -119,6 +124,24 @@ class FakeStores(kc.Stores):
     def delete_junction_by_knowledge(self, kb_id):
         self.deleted_junction_kbs.append(kb_id)
         return True
+
+    # repair-gate reads + the status flip (record, do not touch real stores)
+    def file_content(self, file_id):
+        return self._content.get(file_id)
+
+    def file_updated_at(self, file_id):
+        return self._updated_at.get(file_id)
+
+    def repair_file_status(self, file_id):
+        fr = self._files.get(file_id)
+        if not fr:
+            return False
+        fr.status = "completed"      # FileRow is slotted but mutable in place
+        self.repaired.append(file_id)
+        return True
+
+    def invalidate(self):
+        pass  # FakeStores holds no read cache
 
 
 def _fr(fid, kb="kb-1", directory_id="d1", status="completed", name=None, h="h"):
@@ -495,6 +518,188 @@ def _opts(purge, maint, backup):
     ns.backup = backup
     ns.ts = "20260828T000000Z"
     return ns
+
+
+class TestRepair(unittest.TestCase):
+    """Class-9 stuck-processing-while-linked detection + the --repair gate.
+
+    The canonical fixture's class-9 file (p1) is `pending` with 0 vectors in
+    kb-1, so it is NOT repairable. These tests build a dedicated stuck file and
+    exercise the strong gate (processing + linked + content + vectors + stale).
+    See [[no-implicit-workarounds-report-blockers]] -- the gate proves
+    completion; it does not blindly mark long-running files complete."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _stores(self, files=None, junction=None, coll_meta=None,
+                 content=None, updated_at=None):
+        fix = _build_fixture()
+        if files:
+            fix["files"] = {**fix["files"], **files}
+        if junction:
+            fix["junction"] = fix["junction"] + junction
+        if coll_meta:
+            fix["coll_meta"] = {**fix["coll_meta"],
+                                **{k: fix["coll_meta"].get(k, []) + v
+                                   for k, v in coll_meta.items()}}
+        fix["content"] = content or {}
+        fix["updated_at"] = updated_at or {}
+        return _make_stores(fix, self.tmp)
+
+    def _stuck_stores(self, status="processing", age=3600, content="extracted text",
+                      linked=True, vectors=True):
+        files = {"stuck1": _fr("stuck1", status=status, name="stuck.docx")}
+        junction = [kc.JunctionRow("jst", "kb-1", "stuck1", "d1")] if linked else []
+        coll_meta = {"kb-1": [{"file_id": "stuck1"}]} if vectors else {}
+        updated_at = {"stuck1": int(time.time()) - age} if age is not None else {}
+        return self._stores(files=files, junction=junction, coll_meta=coll_meta,
+                            content={"stuck1": content} if content is not None else {},
+                            updated_at=updated_at)
+
+    def test_detect_stuck_processing_linked(self):
+        s = self._stuck_stores()
+        c = kc.classify(s)
+        stuck = c["non_completed_leftovers"].detail["stuck_processing_linked"]
+        self.assertEqual([x["id"] for x in stuck], ["stuck1"])
+        self.assertEqual(stuck[0]["vectors"], 1)
+
+    def test_repair_flips_status_to_completed(self):
+        s = self._stuck_stores()
+        c = kc.classify(s)
+        manifest = kc.repair(s, c)
+        self.assertEqual(manifest["repaired"], [{"id": "stuck1", "filename": "stuck.docx"}])
+        self.assertEqual(s.repaired, ["stuck1"])
+        self.assertEqual(s.file_rows()["stuck1"].status, "completed")
+        self.assertEqual(manifest["skipped"], [])
+
+    def test_gate_skips_pending(self):
+        # pending (not processing) is reconcile-retryable; left alone.
+        s = self._stuck_stores(status="pending")
+        c = kc.classify(s)
+        self.assertEqual(c["non_completed_leftovers"].detail["stuck_processing_linked"], [])
+        manifest = kc.repair(s, c)
+        self.assertEqual(manifest["repaired"], [])
+
+    def test_gate_skips_unlinked(self):
+        # unlinked + processing is reconcile-retryable; not repaired here.
+        s = self._stuck_stores(linked=False)
+        c = kc.classify(s)
+        self.assertEqual(c["non_completed_leftovers"].detail["stuck_processing_linked"], [])
+        self.assertEqual(kc.repair(s, c)["repaired"], [])
+
+    def test_gate_skips_no_vectors(self):
+        # 0 vectors -> genuinely not embedded yet; must not be marked complete.
+        s = self._stuck_stores(vectors=False)
+        c = kc.classify(s)
+        self.assertEqual(c["non_completed_leftovers"].detail["stuck_processing_linked"], [])
+        self.assertEqual(kc.repair(s, c)["repaired"], [])
+
+    def test_gate_skips_no_content(self):
+        # no content -> extraction not done; not repaired.
+        s = self._stuck_stores(content=None)
+        c = kc.classify(s)
+        # detected as stuck (vectors + linked), but repair re-checks content.
+        manifest = kc.repair(s, c)
+        self.assertEqual(manifest["repaired"], [])
+        self.assertEqual(manifest["skipped"][0]["id"], "stuck1")
+
+    def test_gate_skips_not_stale(self):
+        # fresh updated_at (in-flight race window) -> not repaired.
+        s = self._stuck_stores(age=10)  # < REPAIR_STALE_SECS (60)
+        c = kc.classify(s)
+        manifest = kc.repair(s, c)
+        self.assertEqual(manifest["repaired"], [])
+        self.assertIn("not stale", manifest["skipped"][0]["reason"])
+
+    def test_advised_repair_command(self):
+        s = self._stuck_stores()
+        c = kc.classify(s)
+        cmds = kc.advised_commands(c)
+        self.assertTrue(any("REPAIR=1" in cmd for cmd in cmds))
+
+    def test_main_repair(self):
+        # end-to-end: main(["--repair"]) repairs + re-audits.
+        s = self._stuck_stores()
+        self._orig_stores = kc.Stores
+        kc.Stores = lambda *a, **k: s
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = kc.main(["--data-dir", self.tmp, "--repair"])
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertIn("Repair manifest", out)
+            self.assertIn("repaired: 1", out)
+        finally:
+            kc.Stores = self._orig_stores
+
+
+class TestRealStoresRepair(unittest.TestCase):
+    """Exercise the REAL Stores repair methods (file_content, file_updated_at,
+    repair_file_status) against a temp sqlite webui.db. FakeStores overrides
+    these, so they have no coverage otherwise -- this test exists because a
+    missing row_factory on the RW connection (tuple vs sqlite3.Row) slipped
+    past the FakeStores tests and only surfaced on a real DB."""
+
+    SCHEMA = ("CREATE TABLE file (id TEXT PRIMARY KEY, hash TEXT, filename TEXT, "
+              "data TEXT, meta TEXT, created_at INTEGER, updated_at INTEGER)")
+
+    def setUp(self):
+        import sqlite3
+        self.tmp = tempfile.mkdtemp()
+        self.dbpath = os.path.join(self.tmp, "webui.db")
+        con = sqlite3.connect(self.dbpath)
+        con.execute(self.SCHEMA)
+        con.commit()
+        con.close()
+        self.stores = kc.Stores(self.tmp, "http://owui", "ADM")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _insert(self, fid, status="processing", content="hello world",
+                fhash="abc123", updated_at=None):
+        import sqlite3, json
+        if updated_at is None:
+            updated_at = int(time.time()) - 3600
+        con = sqlite3.connect(self.dbpath)
+        con.execute(
+            "INSERT INTO file (id, hash, filename, data, meta, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (fid, fhash, "f.docx", json.dumps({"status": status, "content": content}),
+             json.dumps({"data": {"knowledge_id": "kb-1"}}), updated_at, updated_at))
+        con.commit()
+        con.close()
+
+    def _status(self, fid):
+        import sqlite3
+        return sqlite3.connect(self.dbpath).execute(
+            "SELECT json_extract(data,'$.status'), hash FROM file WHERE id=?", (fid,)
+        ).fetchone()
+
+    def test_file_content_and_updated_at(self):
+        self._insert("f1")
+        self.assertEqual(self.stores.file_content("f1"), "hello world")
+        self.assertAlmostEqual(self.stores.file_updated_at("f1"),
+                               int(time.time()) - 3600, delta=5)
+        self.assertIsNone(self.stores.file_content("missing"))
+        self.assertIsNone(self.stores.file_updated_at("missing"))
+
+    def test_repair_file_status_flips_status_keeps_hash(self):
+        self._insert("f1", status="processing", fhash="HH")
+        self.assertTrue(self.stores.repair_file_status("f1"))
+        st, h = self._status("f1")
+        self.assertEqual(st, "completed")
+        self.assertEqual(h, "HH")  # hash untouched (left as-is by design)
+
+    def test_repair_file_status_missing_row(self):
+        self.assertFalse(self.stores.repair_file_status("nope"))
 
 
 if __name__ == "__main__":

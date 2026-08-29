@@ -53,6 +53,13 @@ TIER_SAFE = "safe"        # safe while OWUI runs: class 1 (OWUI REST), 3, 11
 TIER_MAINT = "maint"      # maintenance window only: class 5b, 7, 8
 TIER_ADVISORY = "advisory"  # report + advise only, never auto-purged
 
+# Repair gate (class 9 stuck-processing-while-linked subset): a file is only
+# repaired to 'completed' if its last DB write is older than this. Excludes the
+# ms-wide race where a genuinely-in-flight process_file is between its last
+# pre-terminal write and the terminal status commit. 60s is safe -- a normal
+# terminal commit lands in ms; only a stuck file is older than this.
+REPAIR_STALE_SECS = 60
+
 log = logging.getLogger("kb-check")
 
 
@@ -132,6 +139,12 @@ class Stores:
         self._chroma_client = None
         self._webui_rw_db = None
         self._cache = {}
+
+    def invalidate(self):
+        """Drop the in-memory read cache so the next read re-queries the DB.
+        Call after any RW action (purge/repair) before a re-audit, else the
+        post-action report reflects the pre-action snapshot (stale)."""
+        self._cache.clear()
 
     # --- OWUI SQLite (read-only) -------------------------------------------
 
@@ -319,6 +332,7 @@ class Stores:
     def _webui_rw(self):
         if self._webui_rw_db is None:
             self._webui_rw_db = sqlite3.connect(self.webui_db_path)
+            self._webui_rw_db.row_factory = sqlite3.Row
         return self._webui_rw_db
 
     def delete_junction_by_file(self, file_id):
@@ -332,6 +346,45 @@ class Stores:
         """DELETE FROM knowledge_file WHERE knowledge_id=? (maintenance window)."""
         self._webui_rw().execute(
             "DELETE FROM knowledge_file WHERE knowledge_id=?", (kb_id,))
+        self._webui_rw().commit()
+        return True
+
+    # --- repair (class 9 stuck-processing-while-linked) --------------------
+
+    def file_content(self, file_id):
+        """data.content for one file (lazy read; None if absent). Used by the
+        repair gate to prove extraction finished (vectors alone could be a
+        mid-flight snapshot; content-present confirms the pre-embedding write
+        committed)."""
+        row = self._webui().execute(
+            "SELECT data FROM file WHERE id=?", (file_id,)).fetchone()
+        if not row or not row["data"]:
+            return None
+        data = json.loads(row["data"])
+        return data.get("content") if isinstance(data, dict) else None
+
+    def file_updated_at(self, file_id):
+        """updated_at (epoch seconds) for one file; None if the row is gone."""
+        row = self._webui().execute(
+            "SELECT updated_at FROM file WHERE id=?", (file_id,)).fetchone()
+        return row["updated_at"] if row else None
+
+    def repair_file_status(self, file_id):
+        """Set data.status='completed' for a stuck-processing-while-linked file.
+        Maintenance window (OWUI stopped). Flips only the status field; the row
+        keeps its existing content / collection_name / hash (a missing File.hash
+        is benign for a linked member -- the reconcile does not re-process linked
+        members, and patch-2 idempotency reuses meta.data.file_hash, not
+        File.hash). Returns True if updated, False if the row vanished."""
+        row = self._webui_rw().execute(
+            "SELECT data FROM file WHERE id=?", (file_id,)).fetchone()
+        if not row:
+            return False
+        data = json.loads(row["data"]) if row["data"] else {}
+        data["status"] = "completed"
+        self._webui_rw().execute(
+            "UPDATE file SET data=?, updated_at=? WHERE id=?",
+            (json.dumps(data), int(time.time()), file_id))
         self._webui_rw().commit()
         return True
 
@@ -459,7 +512,27 @@ def classify(stores, kb=None):
     # 9. non-completed leftovers: knowledge_id set, status != completed.
     c9_ids = [fid for fid, fr in kb_files.items()
               if fr.knowledge_id and fr.status and fr.status != "completed"]
-    classes["non_completed_leftovers"] = ClassResult(c9_ids, TIER_ADVISORY)
+    # 9a. stuck-processing-while-linked (the repairable subset of 9): status=
+    #     'processing' AND linked AND has vectors in its KB collection. The embed
+    #     + link finished but the terminal status write failed silently (patch 6
+    #     root cause: a swallowed commit in update_file_data_by_id). No reconcile
+    #     retries a LINKED processing file, so these stay "in progress" forever
+    #     and need `--repair`. Content + staleness are re-checked at repair time.
+    #     pending/failed files are reconcile-retryable and are left alone.
+    c9_stuck = []
+    for fid in c9_ids:
+        fr = kb_files[fid]
+        if fr.status != "processing" or fid not in kb_junction_file_ids:
+            continue
+        kb_id = next((j.knowledge_id for j in kb_junction if j.file_id == fid), None)
+        if not kb_id:
+            continue
+        counts = kb_vector_file_counts.get(kb_id)
+        nv = counts.get(fid, 0) if counts else 0
+        if nv > 0:
+            c9_stuck.append({"id": fid, "kb_id": kb_id, "vectors": nv})
+    classes["non_completed_leftovers"] = ClassResult(
+        c9_ids, TIER_ADVISORY, {"stuck_processing_linked": c9_stuck})
 
     # 10. idempotency-key duplicates: (knowledge_id, directory_id, filename, hash) >1.
     groups = {}
@@ -537,8 +610,11 @@ def advised_commands(classes):
         cmds.append("PURGE=1 BACKUP=0 make kb-check   # purge safe classes, no backup export")
     if maint:
         cmds.append("PURGE=1 MAINT=1 make kb-check    # maintenance window: stop OWUI, purge 5b,7,8")
-    if not safe and not maint:
-        cmds.append("# no purgeable classes found; nothing to do")
+    stuck = (classes["non_completed_leftovers"].detail or {}).get("stuck_processing_linked", [])
+    if stuck:
+        cmds.append("REPAIR=1 make kb-check          # stop OWUI, repair stuck-processing-while-linked -> completed")
+    if not safe and not maint and not stuck:
+        cmds.append("# no purgeable/repairable classes found; nothing to do")
     return cmds
 
 
@@ -572,6 +648,10 @@ def report_human(classes, show_names, names):
                 c.detail.get("ghost_link", 0), c.detail.get("leaked", 0)))
         if name == "dangling_segment_dirs" and c.detail:
             out.append("      total=%.1f MB" % (c.detail.get("total_bytes", 0) / 1048576.0))
+        if name == "non_completed_leftovers" and c.detail:
+            _stuck = c.detail.get("stuck_processing_linked", [])
+            if _stuck:
+                out.append("      stuck_processing_linked=%d (repairable: REPAIR=1)" % len(_stuck))
     out.append("")
     out.append("Advised commands:")
     for c in advised_commands(classes):
@@ -709,6 +789,57 @@ def _purge_maint(stores, classes, manifest):
         stores.delete_junction_by_knowledge(kb_id)
 
 
+# --- repair (class 9 stuck-processing-while-linked) -----------------------
+
+def repair(stores, classes):
+    """Repair stuck-processing-while-linked files: flip data.status to
+    'completed' for files that are linked + have content + have vectors in
+    their KB collection + are stale (last write older than REPAIR_STALE_SECS).
+
+    These are files whose embed + link finished but the terminal status write
+    failed silently (patch 6 root cause). No reconcile retries a LINKED
+    processing file, so they stay "in progress" forever. The gate proves
+    completion: vectors + link + content mean the only missing step was the
+    swallowed status commit. Status-only repair (File.hash is left as-is; a
+    missing hash is benign for a linked member). Maintenance window (OWUI
+    stopped). Returns a manifest {repaired, skipped}."""
+    manifest = {"repaired": [], "skipped": []}
+    c9 = classes["non_completed_leftovers"]
+    stuck = (c9.detail or {}).get("stuck_processing_linked", [])
+    if not stuck:
+        log.info("repair: no stuck-processing-while-linked files")
+        return manifest
+    now = int(time.time())
+    log.info("repair: %d stuck-processing-while-linked candidate(s)", len(stuck))
+    for item in stuck:
+        fid = item["id"]
+        fr = stores.file_rows().get(fid)
+        if not fr or fr.status != "processing":
+            manifest["skipped"].append({"id": fid, "reason": "status changed (not processing)"})
+            continue
+        content = stores.file_content(fid)
+        if not content:
+            manifest["skipped"].append({"id": fid, "reason": "no content (extraction not done)"})
+            continue
+        updated_at = stores.file_updated_at(fid)
+        age = (now - updated_at) if updated_at is not None else None
+        if age is not None and age < REPAIR_STALE_SECS:
+            manifest["skipped"].append(
+                {"id": fid, "reason": "not stale (age %ds < %ds)" % (age, REPAIR_STALE_SECS)})
+            continue
+        if stores.repair_file_status(fid):
+            log.info(
+                "repair: set status=completed for %s (was processing; linked, "
+                "%d vectors, content %d chars, age %ss)",
+                fid, item["vectors"], len(content), age if age is not None else -1)
+            manifest["repaired"].append({"id": fid, "filename": fr.filename})
+        else:
+            manifest["skipped"].append({"id": fid, "reason": "row vanished"})
+    log.info("repair done. repaired=%d skipped=%d",
+             len(manifest["repaired"]), len(manifest["skipped"]))
+    return manifest
+
+
 # --- main -----------------------------------------------------------------
 
 def main(argv=None):
@@ -726,6 +857,9 @@ def main(argv=None):
                     help="consent to purge (safe classes by default; --maint adds maint classes)")
     ap.add_argument("--maint", action="store_true",
                     help="maintenance window: purge classes 5b,7,8 (OWUI must be stopped)")
+    ap.add_argument("--repair", action="store_true",
+                    help="maintenance window: repair class-9 stuck-processing-while-linked "
+                         "files -> completed (OWUI must be stopped; may combine with --purge)")
     ap.add_argument("--no-backup", action="store_true",
                     help="skip the export (backup is ON by default when --purge)")
     args = ap.parse_args(argv)
@@ -748,39 +882,61 @@ def main(argv=None):
 
     names = {fid: fr.filename for fid, fr in stores.file_rows().items()}
 
-    if not args.purge:
+    if not args.purge and not args.repair:
         print(report_json(classes, args.show_names, names) if args.json
               else report_human(classes, args.show_names, names))
         return 0
 
-    export_dir = _export_dir(args.data_dir, args.ts) if args.backup else None
-    if export_dir:
-        log.info("export dir: %s", export_dir)
-    log.info("purging (tier=%s, backup=%s)...",
-             TIER_MAINT if args.maint else TIER_SAFE, args.backup)
-    manifest = purge(stores, classes, args, export_dir)
+    export_dir = None
+    purge_manifest = None
+    if args.purge:
+        export_dir = _export_dir(args.data_dir, args.ts) if args.backup else None
+        if export_dir:
+            log.info("export dir: %s", export_dir)
+        log.info("purging (tier=%s, backup=%s)...",
+                 TIER_MAINT if args.maint else TIER_SAFE, args.backup)
+        purge_manifest = purge(stores, classes, args, export_dir)
+        if export_dir:
+            with open(os.path.join(export_dir, "manifest.json"), "w", encoding="utf-8") as f:
+                json.dump(purge_manifest, f, indent=2, ensure_ascii=False)
+        log.info("purge done. purged_collections=%d dangling_dirs=%d kb_vectors=%d",
+                 len(purge_manifest["purged_collections"]),
+                 len(purge_manifest["dangling_dirs"]),
+                 len(purge_manifest["kb_vectors"]))
 
-    if export_dir:
-        with open(os.path.join(export_dir, "manifest.json"), "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2, ensure_ascii=False)
+    repair_manifest = None
+    if args.repair:
+        repair_manifest = repair(stores, classes)
 
-    # re-audit after purge for the post-purge report
+    # re-audit after any action; drop the read cache first so the post-action
+    # report reflects the writes (not the pre-action snapshot).
+    stores.invalidate()
     classes2 = classify(stores, args.kb)
-    log.info("purge done. purged_collections=%d dangling_dirs=%d kb_vectors=%d",
-             len(manifest["purged_collections"]), len(manifest["dangling_dirs"]),
-             len(manifest["kb_vectors"]))
     if args.json:
         out = json.loads(report_json(classes2, args.show_names, names))
-        out["manifest"] = manifest
+        if purge_manifest is not None:
+            out["purge_manifest"] = purge_manifest
+        if repair_manifest is not None:
+            out["repair_manifest"] = repair_manifest
         print(json.dumps(out, indent=2, ensure_ascii=False))
     else:
         print(report_human(classes2, args.show_names, names))
-        print("\nPurge manifest:")
-        print("  purged collections: %d" % len(manifest["purged_collections"]))
-        print("  dangling dirs rm'd: %d" % len(manifest["dangling_dirs"]))
-        print("  kb vector deletes:  %d" % len(manifest["kb_vectors"]))
-        if export_dir:
-            print("  export: %s/manifest.json" % export_dir)
+        if purge_manifest is not None:
+            print("\nPurge manifest:")
+            print("  purged collections: %d" % len(purge_manifest["purged_collections"]))
+            print("  dangling dirs rm'd: %d" % len(purge_manifest["dangling_dirs"]))
+            print("  kb vector deletes:  %d" % len(purge_manifest["kb_vectors"]))
+            if export_dir:
+                print("  export: %s/manifest.json" % export_dir)
+        if repair_manifest is not None:
+            print("\nRepair manifest:")
+            print("  repaired: %d" % len(repair_manifest["repaired"]))
+            for r in repair_manifest["repaired"]:
+                print("    %s  %s" % (r["id"], r["filename"]))
+            if repair_manifest["skipped"]:
+                print("  skipped:  %d" % len(repair_manifest["skipped"]))
+                for s in repair_manifest["skipped"]:
+                    print("    %s  %s" % (s["id"], s["reason"]))
     return 0
 
 

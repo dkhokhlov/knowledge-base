@@ -1,6 +1,6 @@
-# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete + offset-aware chunking
+# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete + offset-aware chunking + resilient terminal status
 
-This directory builds a thin-overlay custom Open WebUI image that applies five
+This directory builds a thin-overlay custom Open WebUI image that applies six
 build-time patches to the backend. Patches 1–2 target the **2b churn**: the
 gdrive-indexer (oikb) re-uploading files every sync cycle. Patch 3 propagates
 the source file mtime into chunk metadata so a retrieve hit can report it.
@@ -8,7 +8,9 @@ Patch 4 makes file-delete clean failed-link orphan vectors from the KB
 collection, closing the root cause of the stuck `DUPLICATE_CONTENT` re-triggers.
 Patch 5 makes each chunk's `start_index` a character offset into the full
 document text (served by `/data/content`) so a retrieved chunk is sliceable by
-offset, via a span-preserving chunker that does not mutate content.
+offset, via a span-preserving chunker that does not mutate content. Patch 6
+makes the terminal file-status write (`status='completed'`) resilient so a
+transient commit failure cannot leave a file linked-but-stuck-`processing`.
 
 - **Patch 1 — path-aware dedup hash** (`retrieval.py`): OWUI rejected same-content
   files at different paths as `DUPLICATE_CONTENT`; oikb re-uploaded them every cycle.
@@ -20,6 +22,12 @@ offset, via a span-preserving chunker that does not mutate content.
   before the link step, no membership row) left its vectors behind, so the next
   re-upload hit `DUPLICATE_CONTENT` and failed forever. Delete now also cleans the
   collection named by `meta.data.knowledge_id`.
+- **Patch 6 — resilient terminal status** (`retrieval.py` + `models/files.py`):
+  the terminal `status='completed'` + hash writes run in isolated throwaway
+  sessions whose commit failures are silently swallowed (`except: return None`),
+  so under concurrent contention a file can end up linked + indexed but stuck at
+  `processing` (a state no reconcile retries). The status write now retries with
+  fresh sessions and aborts the link on exhaust; the swallow blocks now log.
 
 ## Problem
 
@@ -765,3 +773,164 @@ offsets — expected; `/data/content` and chunks regenerate together.
 - **`_atx_header_spans` correctness**: the one new piece of logic; covered by
   fence-aware + multi-section fixtures and a fuzz loop in
   `tests/test_offset_aware_chunking.py`.
+
+---
+
+# Patch 6 — resilient terminal file status (`retrieval.py` + `models/files.py`)
+
+## Problem (patch 6)
+
+A knowledge-bearing file upload (`_process_handler` in `files.py`) runs the
+terminal DB writes for a file in **isolated throwaway sessions**. With
+`DATABASE_ENABLE_SESSION_SHARING=False` (the OWUI default),
+`get_async_db_context(db)` ignores the passed `db` and opens a **new** session
+per call (`internal_db.py`). So every `Files.update_file_*_by_id(...)` is an
+independent `select → mutate → commit → close` cycle; there is no shared
+identity map and no stale-session overwrite.
+
+The three update helpers (`models/files.py`) each wrap that cycle in:
+
+```python
+except Exception:
+    return None          # swallows EVERY commit/write failure
+```
+
+and their callers in `process_file` (`retrieval.py`) do
+`await Files.update_file_data_by_id(...)` and **ignore the `None` return**. A
+failed commit (or `file is None` → `AttributeError`) is silently lost.
+
+The write sequence for one knowledge file (`_process_handler`, KB path):
+
+| # | site | writes | fate under contention |
+|---|---|---|---|
+| 1 | `retrieval.py` content write | `data.content` | commits |
+| 2 | `files.py:229` | `data.status='processing'` | commits |
+| 3a | `retrieval.py:2045` `save_docs_to_vector_db` | Chroma vectors | commits (Chroma) |
+| 4 | `retrieval.py:2066` | `meta.collection_name` | commits |
+| 5 | `retrieval.py:2074` | `data.status='completed'` | **swallowed on failure** |
+| 6 | `retrieval.py:2079` | `File.hash` | **swallowed on failure** |
+| 7 | `files.py:236` `add_file_to_knowledge_by_id` | `knowledge_file` link | commits |
+
+Under a transient concurrent-contention storm (two other files errored in the
+same ~2 s window), writes #5 and #6 failed and were swallowed while #1–4 and #7
+committed. The file ended up **linked + indexed + with content, but
+`status='processing'` and `hash=None`** — an inconsistent state:
+
+- The drain poll (`pending=0 AND processing=0`) blocks forever on the stuck
+  `processing` row.
+- The gdrive reconcile retries **unlinked** pending/failed/processing files; a
+  **linked** `processing` file looks "in progress" forever and is never retried.
+- The file IS searchable (vectors + link present), so only its status field lies.
+
+This is flaky, not deterministic: the same corpus passed 151/151 on the prior
+gate (no storm). It is not a regression of the chunk knobs (chunking config
+was identical across both gates). Root-cause confirmed by reading the overlay
+source + querying the e2e `webui.db`.
+
+## Fix (patch 6)
+
+Two files; no commit serialization across files (the gdrive index runs 151
+files through a shared Ollama; each file's retry uses its own fresh sessions,
+files stay concurrent).
+
+**`retrieval.py` — the terminal block after `if result:` (vectors saved):**
+
+- `collection_name` is written once in its own session (unchanged; not retried —
+  a missing tag is non-fatal and the KB link does not depend on it).
+- `status='completed'` is persisted with a **bounded retry** (`_TERMINAL_RETRY=3`,
+  fresh session per attempt, `_TERMINAL_BACKOFF=0.2 * (attempt+1)`). A transient
+  commit failure self-heals. Each failed attempt logs
+  `terminal status completed did not persist for <id> (attempt N/3)` (WARNING).
+- If every attempt fails, **raise**. The raise propagates to `process_file`'s
+  failed-handler (`retrieval.py:2100`, sets `status='failed'` in a fresh
+  session) and re-raises; `_process_handler`'s inner `except` re-raises before
+  the link at `files.py:236` runs. So the file ends up **unlinked + failed**
+  (or `processing` if the failed-write also swallows) — both **retryable by the
+  reconcile**, never linked-but-stuck. This is the core invariant fix.
+- `File.hash` gets the same bounded retry; on exhaust, **log + continue**
+  (`completed` is already durable). A missing hash only causes a one-time
+  re-process on the next sync (now robust via the retry above); it does not
+  block the drain. Each failed attempt logs
+  `file hash did not persist for <id> (attempt N/3)` (WARNING); exhaust logs
+  `Failed to persist hash for <id> after 3 attempts ...` (ERROR).
+
+**`models/files.py` — the three `update_file_*_by_id` swallow blocks:**
+
+- Replace the silent `except Exception: return None` with
+  `log.exception(...); return None`. **Behavior is unchanged** — still returns
+  `None`, so every caller's contract holds; the only effect is that a swallowed
+  commit/write failure is now **visible in the log**. This is the traceability
+  fix for the root enabler (without it, even with the retry, the underlying
+  cause of an exhausted retry stays silent).
+
+## What patch 6 changes (1 site in `retrieval.py` + 3 sites in `models/files.py`)
+
+`apply_terminal_status.py` does four targeted replacements, each asserting its
+anchor occurs exactly once (fail loud on drift):
+
+- `retrieval.py`: the `if result:` → `return {...}` terminal block (anchored on
+  the `# Fresh session for the final update.` comment + the
+  `'collection_name': collection_name` field — unique).
+- `models/files.py`: the three swallow blocks, each anchored on its
+  method-specific mutation line (`file.hash = hash` / `file.data = {...}` /
+  `file.meta = {...}`) so the repeating bare `except Exception: return None`
+  resolves to exactly one site each.
+
+The script reads `OWUI_RETRIEVAL_PY` (default
+`/app/backend/open_webui/routers/retrieval.py`) and `OWUI_MODELS_FILES_PY`
+(default `/app/backend/open_webui/models/files.py`). `asyncio` and `log` are
+already in scope in both files; no new imports.
+
+## What patch 6 does NOT do
+
+- **No commit serialization across files.** Files stay concurrent; only the
+  terminal writes of one file are retried in sequence.
+- **No atomic per-file transaction.** The terminal fields + the junction link
+  are still separate commits (the link is in `_process_handler`, a different
+  function). An atomic per-file transaction (one session: mutate
+  collection_name + status + hash + insert the junction row, commit once) is
+  the higher-correctness option, but it needs no-commit variants of the update
+  helpers + the junction helper and introduces a Chroma/SQL non-atomicity
+  (orphan vectors if the SQL tx fails) — more surface for a flaky transient.
+  The narrow fix already prevents the stuck-linked state by aborting the link.
+- **`collection_name` is not retried.** It persisted in the incident; the storm
+  hit #5/#6. A missing tag is non-fatal (KB retrieval uses the KB collection
+  directly); out of scope.
+- **The broad `except: return None` contract is preserved.** Only logging is
+  added; no caller's control flow changes.
+- **The failed-handler's own writes (`retrieval.py:2104`, `files.py:252`) are
+  not retried.** If those also swallow under the same storm, the file is left
+  unlinked + `processing` — which the reconcile retries, and `make kb-check
+  --repair` (see `scripts/kb_check.py`) catches as the safety net.
+
+## No KB reset on cutover (patch 6)
+
+Patch 6 changes write resilience, not chunk content or embeddings. Existing
+rows are untouched. A file stuck at `processing` from a pre-patch run is
+repaired by `make kb-check --repair` (strong gate: linked + content present +
+vectors in the KB collection + stale > 60 s → set `completed` + backfill
+`File.hash`), or self-heals on the next `make gdrive-index` (the reconcile
+retries unlinked non-completed; a stuck **linked** file needs the repair). No
+re-index is required for the patch itself.
+
+## Risks / edge cases (patch 6)
+
+- **Retry adds latency on failure only.** A successful first attempt is
+  unchanged (one session, one commit). A transient failure adds up to
+  ~0.2+0.4+0.6 = 1.2 s before the retry succeeds or the file routes to
+  `failed`. Acceptable for a background task.
+- **Abort-before-link leaves orphan vectors.** If the status write exhausts and
+  raises, the KB-collection vectors (write #3a) are already committed with no
+  junction link — the same failed-link-orphan state patch 4 cleans on delete.
+  The reconcile re-triggers the file (unlinked + failed/processing); the
+  retry's delete + re-embed cleans the orphans. No new failure mode.
+- **`_TERMINAL_RETRY`/`_TERMINAL_BACKOFF` are literals.** Three attempts + a
+  0.2 s linear backoff. Not a runtime config; tuning needs an image rebuild.
+- **`log.exception` on every failed helper call.** A real failure now emits a
+  stack trace per attempt (up to 3 per file for status, 3 for hash). Noisy on a
+  genuine outage, silent in normal operation. Correct for an error path.
+- **Residual gap.** If the status write exhausts AND the failed-handler's
+  `status='failed'` write also swallows, the file is unlinked + `processing`
+  (retryable by reconcile + caught by `make kb-check --repair`). Not
+  stuck-forever-linked. Quad coverage: retry → abort-before-link → reconcile →
+  kb-check repair.
