@@ -25,7 +25,7 @@ The document KB also indexes **[Claude Code's project memory][claude-code]** —
 - **[Neo4j][neo4j]** — graph store for [Graphiti][graphiti] (internal only).
 - **API Gateway** (`api-gateway`) — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti REST bridge, live group discovery, and admin user provisioning.
 - **[Caddy][caddy]** — the single public edge (`KB_HOST`): fronts Open WebUI at the root (catch-all) and proxies `/memory/*`, `POST /admin/users`, `POST /index`, `GET /status`, `GET /openapi.json`, `/health` to the API Gateway (method-scoped routes fall through to Open WebUI for other methods, so browser deep-links keep working).
-- **[Ollama][ollama]** — external model host (not in the compose stack): serves the `qwen2.5:14b` chat LLM, [`nomic-embed-text`][nomic-embed-text] embeddings, and the `deepseek-ocr` OCR model; runs on the Docker host or a remote/LAN host, reached via `OLLAMA_HOST` (Ollama's native client env var).
+- **[Ollama][ollama]** — external model host (not in the compose stack): serves the [`qwen2.5:14b`](https://ollama.com/library/qwen2.5) chat LLM, [`nomic-embed-text`][nomic-embed-text] embeddings, and the [`deepseek-ocr`](https://ollama.com/library/deepseek-ocr) OCR model; runs on the Docker host or a remote/LAN host, reached via `OLLAMA_HOST` (Ollama's native client env var).
 
 ## Documentation map
 
