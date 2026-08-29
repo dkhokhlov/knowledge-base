@@ -88,12 +88,12 @@ Sub-documents:
   └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- A user with a browser and an agent both reach the stack through **one** URL, **`KB_HOST`** (default `http://localhost:3000`): [Caddy][caddy] fronts [Open WebUI][open-webui] at the root and the **API Gateway** under `/memory/*`, `POST /admin/users`, and `/health`. One port, one var for agents (mirrors `OLLAMA_HOST`).
+- A user with a browser and an agent both reach the stack through **one** URL, **`KB_HOST`** (mandatory, shell-provided — `export KB_HOST=http://<host>:3000`): [Caddy][caddy] fronts [Open WebUI][open-webui] at the root and the **API Gateway** under `/memory/*`, `POST /admin/users`, and `/health`. One port, one var for agents (mirrors `OLLAMA_HOST`).
 - An agent holds only `KB_API_KEY` + `KB_HOST` (no Graphiti token, no repo files) — it works on any host. Its CLI (`kb_gateway.py` / `owui.py`) is a thin client that reads ONLY those two env vars (no `.env` files) and hits `KB_HOST`: OWUI REST at `/api/*` (KBs, retrieve, files, projects memory), API Gateway at `/memory/*` (memory + RAG; the gateway inserts the chat model server-side).
 - **API Gateway** is the sole bridge to the graph. It resolves the caller's identity + role from `KB_API_KEY` via Open WebUI (tamper-proof), enforces ownership-bounded writes + owner/admin destructive gating, discovers all existing groups live from [Neo4j][neo4j], calls the internal [Graphiti][graphiti] REST server, and provisions new KB users for admins.
 - **Graphiti client injection.** The `ghcr.io/dkhokhlov/graphiti-rest` server defaults to `OpenAIClient` (OpenAI Responses API), which [Ollama][ollama] cannot satisfy — entity/fact extraction silently stores nothing. `graphiti/bootstrap.py` is mounted into the container and run as the command; it overrides the FastAPI dependency to inject the stock `OpenAIGenericClient` (graphiti_core >= 0.29 defaults to **`json_schema` structured outputs**, which Ollama enforces server-side; set at `temperature=0`) + `OpenAIEmbedder` (`nomic-embed-text`, 768-dim), so extraction works with Ollama. There is no config switch for this; the injection is required. See `graphiti/bootstrap.py`.
 - **Network split**: `graph_internal` (`neo4j` + `graphiti` + `api-gateway`), `edge` (`caddy` + `api-gateway`), `owui_net` (`caddy` + `api-gateway` + `openwebui`). The `graphiti` and `neo4j` services are **internal-only** — no host ports, reachable only through the API Gateway. Open WebUI is internal-only too (fronted by Caddy).
-- Only `KB_HOST_PORT` (default `3000`) → Caddy `:3000` binds to the host. Caddy's `depends_on` uses `service_started` (not `service_healthy`) so the OWUI root stays reachable even if the gateway is broken.
+- `KB_HOST_PORT` (the Caddy `:3000` host bind) is **derived from `KB_HOST`** by `make bootstrap` (compose cannot parse a URL, so it reads the port from `.env`); override it only for the tunnel case (client URL port ≠ bind port). Caddy's `depends_on` uses `service_started` (not `service_healthy`) so the OWUI root stays reachable even if the gateway is broken.
 - [Ollama][ollama] is external on the Docker host (reached via host-gateway); not published by this stack. The `openwebui` (RAG + chat) and `graphiti` (extraction LLM + embedder) services both reach it.
 - **TLS**: the Caddyfile is plain HTTP on the port. For a non-local `KB_HOST` you MUST either front Caddy with an upstream TLS reverse proxy, or switch the `:3000` site block to a hostname block so Caddy auto-terminates TLS and publishes `:443`. For a local deployment (`http://localhost:3000`) no TLS is needed.
 
@@ -106,7 +106,7 @@ Full prerequisites, configuration, and env vars are in [docs/operations.md](docs
 **Minimum env vars to set** (in your shell env — both are commented out in `.env.template` so the shell value is not clobbered; everything else has a working default or is auto-generated):
 
 - `OLLAMA_HOST`: the only hard blocker. `make start` fails fast if `OLLAMA_HOST` is unset — compose uses `${OLLAMA_HOST:?…}` (no `host.docker.internal` fallback; `make preflight` checks it too). `export OLLAMA_HOST=http://<ollama-host>:11434` (`http://host.docker.internal:11434` if Ollama runs on the Docker host). Do NOT use `localhost`/`127.0.0.1` — the value is used inside the containers, where localhost is the container's own loopback (no Ollama there).
-- `KB_HOST`: the single public URL agents/clients point at. `export KB_HOST=http://<host>:3000` (defaults to `http://localhost:3000` when unset). `KB_HOST_PORT` (default `3000`) is the only host-published port. Use `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
+- `KB_HOST`: the single public URL agents/clients point at — **mandatory** (no `localhost` fallback). `export KB_HOST=http://<host>:3000`; `make bootstrap` persists it into `.env` and derives `KB_HOST_PORT` (the Caddy host bind) from its port. Use `https://<host>` / VPN for a remote agent (`KB_API_KEY` is a bearer — plain HTTP only on a trusted local interface).
 
 **One-shot provision** — from a fresh checkout, run:
 
@@ -165,7 +165,7 @@ All endpoints are on one URL, **`KB_HOST`** (`http://<host>:3000` by default). C
 | `KB_HOST/admin/users` | `Authorization: Bearer <KB_API_KEY>` (admin, POST) | API Gateway: create a new KB user (returns temp password + `KB_API_KEY`); GET falls through to the OWUI SPA |
 | `KB_HOST/health` | none (read-only) | health probe (Caddy → API Gateway → OWUI, aggregated) |
 
-`KB_HOST` is set in `.env` (default `http://localhost:3000`); `KB_HOST_PORT` (default `3000`) is the only host-published port. The `neo4j` (`:7474`, `:7687`) and `graphiti` (`:8000` internal) services are not published — reachable only through the API Gateway over `graph_internal`.
+`KB_HOST` is mandatory (shell-provided, persisted into `.env` by `make bootstrap`); `KB_HOST_PORT` is derived from `KB_HOST`'s port by `make bootstrap` (the only host-published port). The `neo4j` (`:7474`, `:7687`) and `graphiti` (`:8000` internal) services are not published — reachable only through the API Gateway over `graph_internal`.
 
 ### Environment variable precedence
 
@@ -174,8 +174,9 @@ Two sourcing models:
 - **Operator scripts** (`scripts/*.sh`, run via `make <target>`): source `.env`
   then `.env.local` (`set -a; . ./.env; . ./.env.local; set +a`). Precedence is
   `.env.local` > `.env` > shell env — the file wins (location-specific to the
-  repo root). `KB_HOST` is computed from `KB_HOST_PORT`
-  (`http://localhost:${KB_HOST_PORT}`) unless the shell sets `KB_HOST`.
+  repo root). `KB_HOST` is mandatory (shell-provided, persisted into
+  `.env` by `make bootstrap`); `KB_HOST_PORT` is derived from `KB_HOST`'s
+  port by `make bootstrap` (override only for the tunnel case).
 - **The `/kb` skill** (`kb_gateway.py` / `owui.py`): a thin client that reads
   ONLY `KB_HOST` + `KB_API_KEY` from the shell env (no `.env` / `.env.local`
   sourcing) so it runs on any host.

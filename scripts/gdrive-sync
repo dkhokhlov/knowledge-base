@@ -674,7 +674,11 @@ emit "Files backed up (deleted/overwritten): ${backed_up} (in ${backup_root})"
 if (( !dry_run )); then
     set -a; . ./.env 2>/dev/null || true; . ./.env.local 2>/dev/null || true; set +a
     if [[ -n "${GDRIVE_KB_ID:-}" && -n "${OPENWEBUI_ADMIN_API_KEY:-}" ]]; then
-        O="http://localhost:${KB_HOST_PORT:-3000}"
+        if [[ -z "${KB_HOST:-}" ]]; then
+            echo "FAIL  KB_HOST not set -- export KB_HOST=http://<host>:<port> (see .env.template)" >&2
+            exit 1
+        fi
+        O="${KB_HOST%/}"
         idx_q="source=gdrive&kb_id=${GDRIVE_KB_ID}"
         (( index_all )) && idx_q="${idx_q}&reindex_all=1"
         (( retry_pending )) && idx_q="${idx_q}&retry_pending=1"

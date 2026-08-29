@@ -149,16 +149,58 @@ if [ -n "${OCR_ENABLED:-}" ]; then
   printf '  persisted OCR_ENABLED=%s into .env (defines the compose profile)\n' "$OCR_ENABLED"
 fi
 
-# Persist `make bootstrap KB_HOST=... KB_HOST_PORT=... OLLAMA_HOST=...`
-# overrides into .env (force-set: replace an existing line, append if absent or
-# commented). This is the standard make-tunable override mechanism (see
-# operations.md "Variable precedence"); the isolated e2e (test-e2e-iso) uses it
-# to pin the e2e port + KB_HOST + OLLAMA_HOST so they survive test-e2e's internal
-# clean-all (rm .env) -> bootstrap (recreates .env from .env.template). Without
-# an override the existing .env value is the source of truth (idempotent, not
-# rewritten) -- the live operator, who sets these in the shell env, is
-# unaffected (no tunable -> no change).
-for _k in KB_HOST KB_HOST_PORT OLLAMA_HOST; do
+# KB_HOST is the single source for the public URL (shell env or make-tunable;
+# see .env.template). KB_HOST_PORT (the Caddy host bind) is DERIVED from
+# KB_HOST's URL port here and persisted into .env (compose cannot parse a URL,
+# so it still reads KB_HOST_PORT from .env). Changing KB_HOST alone moves the
+# bind too -- one var, not two. KB_HOST_PORT is re-derived on EVERY bootstrap
+# (overwrites any prior .env value). Pass KB_HOST_PORT=... as a make-tunable
+# ONLY for the tunnel case (client URL port != bind port, e.g.
+# KB_HOST=http://tunnel:443 KB_HOST_PORT=3000); an explicit tunable wins over
+# the derivation. The isolated e2e (test-e2e-iso) pins KB_HOST (+ OLLAMA_HOST)
+# the same way so they survive test-e2e's internal clean-all (rm .env) ->
+# bootstrap; it no longer passes KB_HOST_PORT (the port is derived from
+# KB_HOST=http://localhost:<e2e-port>).
+#
+# Resolve KB_HOST: process env (shell/make-tunable) first, then a prior
+# persisted value in the existing .env (so a CLEAN-SHELL re-bootstrap -- no
+# operator profile -- reuses the last persisted KB_HOST instead of failing).
+# Above, .env was cp'd from .env.template only when missing, so at this point
+# .env exists and may hold a prior KB_HOST.
+_kb_host="${KB_HOST:-}"
+[ -z "$_kb_host" ] && _kb_host="$(grep -E '^KB_HOST=' .env 2>/dev/null | head -1 | cut -d= -f2- || true)"
+if [ -z "$_kb_host" ]; then
+  printf 'FAIL  KB_HOST not set -- export KB_HOST=http://<host>:<port> (bootstrap derives KB_HOST_PORT from it)\n' >&2
+  exit 1
+fi
+_kb_host_port_ovr="${KB_HOST_PORT:-}"   # explicit make-tunable (tunnel) ONLY
+# Derive the bind port from KB_HOST's AUTHORITY port (default 3000 = OWUI's
+# natural port when the URL has no explicit port, e.g. a TLS proxy fronting
+# Caddy on :3000). Parse the authority, not "last colon in the string" -- a
+# naive ${_kb_host##*:} misbinds http://h:3010/path:999 -> 999 and drops the
+# port on http://h:3010?x=1 / http://h:3010#frag.
+_derived=3000
+_auth="${_kb_host#*://}"                # strip scheme
+_auth="${_auth%%[/?#]*}"                # cut path/query/fragment at first delimiter
+case "$_auth" in
+  \[*\]:*)  _p="${_auth#*]:}";;          # [ipv6]:port  -> after ']:'
+  *:*)      _p="${_auth##*:}";;          # host:port    -> after last ':'
+  *)        _p="";;                      # host (no port)
+esac
+case "$_p" in *[!0-9]*|"") : ;; *) _derived="$_p" ;; esac
+_bind="${_kb_host_port_ovr:-$_derived}"  # explicit tunnel override wins
+# Persist KB_HOST_PORT (always -- compose needs it; re-derived each bootstrap).
+if grep -qE '^KB_HOST_PORT=' .env; then
+  sed -i "s|^KB_HOST_PORT=.*|KB_HOST_PORT=${_bind}|" .env
+else
+  printf 'KB_HOST_PORT=%s\n' "$_bind" >> .env
+fi
+printf '  persisted KB_HOST_PORT=%s into .env (derived from KB_HOST=%s)\n' "$_bind" "$_kb_host"
+# KB_HOST + OLLAMA_HOST: keep the existing force-persist-when-non-empty behavior
+# (unchanged) -- KB_HOST persists for the e2e clone; OLLAMA_HOST as today. The
+# live operator, who sets these in the shell env, gets them persisted on the
+# first bootstrap (.env wins thereafter, same as OLLAMA_HOST).
+for _k in KB_HOST OLLAMA_HOST; do
   _v="${!_k:-}"
   [ -n "$_v" ] || continue
   if grep -qE "^${_k}=" .env; then

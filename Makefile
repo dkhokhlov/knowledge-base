@@ -27,7 +27,7 @@ PYTEST   ?= .venv/bin/python -m pytest
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
         kb-public-read kb-check \
         projects-bootstrap \
-        shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-test clean-backup backup
+        shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-test clean-tests clean-backup backup
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -42,7 +42,7 @@ provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + adm
 	  set -a; . ./.env; set +a; \
 	  [ -n "$$_KB_DOMAIN_OVR" ] && export KB_DOMAIN="$$_KB_DOMAIN_OVR"; \
 	  [ -n "$$_OCR_ENABLED_OVR" ] && export OCR_ENABLED="$$_OCR_ENABLED_OVR"; \
-	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
+	  H=$${KB_HOST:?KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}; \
 	  i=0; until curl -sf "$$H/health" >/dev/null 2>&1; do i=$$((i+1)); [ $$i -lt 60 ] \
 	    || { echo "stack did not become healthy in 120s ($$H/health)" >&2; exit 1; }; sleep 2; done; \
 	  echo "  stack healthy ($$H/health)"; \
@@ -87,7 +87,7 @@ config: ## Render effective compose config incl. the ocr sidecar (COMPOSE_PROFIL
 
 health: ## Probe the stack /health (Caddy -> api-gateway aggregated, reflects OWUI)
 	@set -a; . ./.env; set +a; \
-	H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
+	H=$${KB_HOST:?KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}; \
 	curl -sf "$$H/health" >/dev/null \
 	  && echo "stack healthy ($$H/health)" || { echo "stack DOWN ($$H/health)"; exit 1; }
 
@@ -108,11 +108,14 @@ test-e2e-long: ci ## Run the long isolated e2e (test_08 agent-surface + test-e2e
 test-output: ci ## Unit-test CLI JSON output schemas (no stack needed)
 	@.venv/bin/python tests/test_output_json.py -v
 
-test-e2e-iso: ## Isolated e2e: clone to gitignored .test-e2e/ + run the destructive e2e (clean-state wipe + re-provision + rclone + full suite + test_09 drain) under a separate compose project (kb-e2e) so the LIVE stack keeps running. The destructive logic is inlined; there is NO in-place `make test-e2e` (it would wipe the live stack). REAL rclone (re-downloads the corpus). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On failure run make clean-test.
+test-e2e-iso: ## Isolated e2e: clone to a datetime-stamped gitignored .test-e2e/<stamp>/ + run the destructive e2e (clean-state wipe + re-provision + rclone + full suite + test_09 drain) under a separate compose project (kb-e2e-<stamp>) so the LIVE stack keeps running. The destructive logic is inlined; there is NO in-place `make test-e2e` (it would wipe the live stack). REAL rclone (re-downloads the corpus). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On success docker is stopped but the clone is KEPT (proliferation -- may hold commits); flush with `make clean-tests`. On failure the stack + clone are left; run `make clean-test STAMP=<stamp>`.
 	@./scripts/test-e2e-iso.sh
 
-clean-test: ## Tear down an isolated e2e stack + remove its .test-<NAME>/ clone (default NAME=e2e -> .test-e2e/ + compose project kb-e2e). Safe anytime (no-op if absent); use after a failed isolated run. NAME=kbcheck targets .test-kbcheck/ + kb-kbcheck. Delegates to scripts/e2e-env.sh (shared with make test-e2e-iso + tests/test_12_kb_check.sh).
-	@bash -c '. scripts/e2e-env.sh; e2e_down "$${NAME:-e2e}"'
+clean-test: ## Tear down ONE isolated e2e run + remove its clone. NAME=<name> (default e2e) + optional STAMP=<stamp> (latest stamp under .test-<name>/ if unset). Safe anytime (no-op if absent). Delegates to scripts/e2e-env.sh (shared with make test-e2e-iso + tests/test_*_e2e.sh).
+	@bash -c '. scripts/e2e-env.sh; e2e_down "$${NAME:-e2e}" "$${STAMP:-}"'
+
+clean-tests: ## Manual hygiene flush: remove EVERY .test-*/<stamp>/ clone + legacy un-stamped clones + stranded stamped e2e docker. Prints each clone's HEAD + unmerged commits before removing (a warning, not a hard refuse). NAME=<name> flushes only .test-<name>/. Run periodically -- stamped clones accumulate per e2e run (no autoclean). Delegates to scripts/e2e-env.sh.
+	@bash -c '. scripts/e2e-env.sh; e2e_clean_tests "$${NAME:-}"'
 
 api-keys: ## Provision admin + agent-user API keys into .env.local (run after `make start` + admin signup)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
@@ -169,7 +172,7 @@ gdrive-meta: ## Generate per-file .meta YAML sidecars (Drive description, [label
 gdrive-index: ## Reconcile ./gdrive into the OWUI gdrive KB via api-gateway POST /index (admin; incremental). Self-heals FAILED files (delete + re-upload) by default. Set RETRY_PENDING=1 to also retry stalled PENDING files. Set INDEX_ALL=1 for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
-	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
+	  H=$${KB_HOST:?KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}; \
 	  [ -n "$${GDRIVE_KB_ID:-}" ] || { echo "MISSING GDRIVE_KB_ID in .env.local (run: make gdrive-index-bootstrap)"; exit 1; }; \
 	  [ -n "$${OPENWEBUI_ADMIN_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
 	  q="source=gdrive&kb_id=$$GDRIVE_KB_ID"; [ "$${INDEX_ALL:-0}" = "1" ] && q="$$q&reindex_all=1"; \
@@ -218,7 +221,7 @@ kb-check: ## Cross-DB health check (OWUI SQLite + Chroma): audit both DBs, repor
 gdrive-status: ## Show gdrive index status via api-gateway GET /status (completed/pending/processing/failed), pretty JSON. Set SCOPE_PATH=<relpath> to scope source_count to a subpath (file counts are KB-wide; accurate when the KB's whole scope is that path).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
-	  H=$${KB_HOST:-http://localhost:$${KB_HOST_PORT:-3000}}; \
+	  H=$${KB_HOST:?KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}; \
 	  [ -n "$${GDRIVE_KB_ID:-}" ] || { echo "MISSING GDRIVE_KB_ID in .env.local (run: make gdrive-index-bootstrap)"; exit 1; }; \
 	  [ -n "$${OPENWEBUI_USER_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
 	  q="source=gdrive&kb_id=$$GDRIVE_KB_ID"; [ -n "$${SCOPE_PATH:-}" ] && q="$$q&path=$$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$$SCOPE_PATH")"; \

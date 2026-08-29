@@ -12,7 +12,35 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Nothing yet.
+- **`KB_HOST` is the single source; `KB_HOST_PORT` is derived from it.** `KB_HOST`
+  (the public URL agents/clients point at) is now **mandatory** — the `localhost:3000`
+  fallback is removed from the 8 helper scripts, the 4 Makefile recipes, and
+  `tests/lib.sh` (they fail loud without it, like the `/kb` skill already does).
+  `KB_HOST_PORT` (the Caddy host bind) is no longer an independent var: `make
+  bootstrap` parses the port out of `KB_HOST` and persists `KB_HOST_PORT` into
+  `.env` (compose cannot parse a URL, so it still reads the port there). Changing
+  `KB_HOST` alone now moves the bind too — one var, not two. `KB_HOST_PORT`
+  survives only as an optional make-tunable override for the tunnel case (client
+  URL port ≠ bind port, e.g. `KB_HOST=http://tunnel:443 KB_HOST_PORT=3000`); it is
+  commented out in `.env.template`. **Breaking change for clean-shell contexts:**
+  `make health` and helper scripts no longer fall back to `localhost:3000`, so a
+  shell without the exported `KB_HOST` (cron / recovery / a different user) fails
+  loud — `export KB_HOST=http://<host>:<port>` is now required in the shell
+  profile. The live `.env` (still `KB_HOST_PORT=3000`) reconverges on the next
+  `make bootstrap`.
+- **Isolated e2e clones are datetime-stamped and no longer auto-removed.** Each
+  `make test-e2e-iso` / `tests/test_*_e2e.sh` run now clones to a unique
+  `.test-<name>/<stamp>/` under compose project `kb-<name>-<stamp>` (stamp =
+  `date +%Y%m%d-%H%M%S`), so re-runs never clobber a prior (possibly
+  commit-bearing) clone and never collide on container names. On success the
+  gate **stops docker** (frees the shared Ollama GPU) but **keeps the clone** —
+  a commit-in-clone-first workflow no longer loses unmerged work to an
+  auto-cleanup. Removal is manual hygiene: `make clean-test NAME=<name>
+  STAMP=<stamp>` removes ONE run; `make clean-tests` (new) flushes every stamp +
+  legacy un-stamped clones + stranded stamped docker (it prints each clone's
+  HEAD + unmerged commits before removing). The host port stays serial. Teardown
+  sweeps use the compose project label, never a container-name prefix, so the
+  live stack (`kb-api-gateway`, `kb-markitdown-ocr`) is never touched.
 
 ### Fixed
 

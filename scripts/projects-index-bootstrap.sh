@@ -47,7 +47,10 @@ set +a
 python3 - <<'PY'
 import os, json, urllib.request, urllib.error, sys
 
-O = os.environ.get("KB_HOST") or ("http://localhost:%s" % os.environ.get("KB_HOST_PORT", "3000"))
+_kb_host = os.environ.get("KB_HOST")
+if not _kb_host:
+    sys.exit("FAIL  KB_HOST not set -- export KB_HOST=http://<host>:<port> (see .env.template)")
+O = _kb_host.rstrip("/")
 AK = os.environ["OPENWEBUI_ADMIN_API_KEY"]
 UK = os.environ["OPENWEBUI_USER_API_KEY"]
 PROBE = "projects-index-bootstrap-probe"

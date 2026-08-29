@@ -50,15 +50,15 @@ ISOLATED=0  # set 1 once e2e_isolate succeeds (we own the clone); the EXIT trap
 cleanup() {
   local rc=$?
   # Tear down the isolated stack + remove the clone -- but ONLY if e2e_isolate
-  # created it (ISOLATED=1). If e2e_isolate refused because .test-<NAME>/ already
-  # existed (a prior failed run left it for debugging), leave it; the operator
-  # tears it down with `make clean-test NAME=<NAME>`. The live stack is never
-  # touched (separate project + container names).
+  # created it (ISOLATED=1). e2e_isolate stamps a unique clone per run, so it
+  # never refuses on a leftover; ISOLATED=1 means THIS run's clone exists and the
+  # trap cleans only it. The live stack is never touched (separate project +
+  # container names).
   # KBCHECK_KEEP=1 keeps the stack + clone on FAILURE for inspection (mirrors
   # test-e2e-iso's E2E_KEEP); default 0 always cleans up.
   if [ "$ISOLATED" = "1" ]; then
     if [ "$rc" -ne 0 ] && [ "${KBCHECK_KEEP:-0}" = "1" ]; then
-      echo "==> KEEP (KBCHECK_KEEP=1): stack left for inspection (port $PORT, project kb-$NAME, clone $E2E_CLONE); tear down with: make clean-test NAME=$NAME" >&2
+      echo "==> KEEP (KBCHECK_KEEP=1): stack left for inspection (port $PORT, project $COMPOSE_PROJECT_NAME, clone $E2E_CLONE); tear down with: make clean-test NAME=$NAME STAMP=$E2E_STAMP" >&2
     else
       e2e_down "$NAME" 2>/dev/null || true
     fi

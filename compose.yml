@@ -135,7 +135,7 @@ services:
       api-gateway:
         condition: service_started
     ports:
-      - "${KB_HOST_PORT:?KB_HOST_PORT required in .env}:3000"
+      - "${KB_HOST_PORT:?KB_HOST_PORT required -- run make bootstrap (derives it from KB_HOST)}:3000"
     # Caddy is the public edge (single URL = KB_HOST). /memory/*, POST
     # /admin/users, and /health -> api-gateway (edge net); everything else ->
     # openwebui:8080 (owui_net). The gateway authorizes via KB_API_KEY

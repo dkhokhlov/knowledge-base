@@ -21,22 +21,25 @@
 # service added to compose.yml is covered automatically (the override is
 # generated from compose.yml's service list).
 #
-# The clone lives in .test-e2e/ (on disk, NOT /tmp shmem -- the e2e ./data +
-# ./gdrive corpus are too large for tmpfs). It is gitignored (`/.test-*/`);
-# `make clean-test` (or e2e_down) tears the stack down + removes the dir.
+# The clone lives in .test-e2e/<stamp>/ (on disk, NOT /tmp shmem -- the e2e
+# ./data + ./gdrive corpus are too large for tmpfs). It is gitignored
+# (`/.test-*/`). Clones are NOT auto-removed: each run leaves a datetime-stamped
+# snapshot (docker stopped, GPU freed). Remove ONE with `make clean-test STAMP=`
+# or flush ALL with `make clean-tests` (manual hygiene).
 #
 # Costs vs an in-place (un-isolated) clean-state run:
 #  - a second full stack runs alongside the live one (RAM + GPU contention on
 #    the shared external Ollama);
 #  - ./gdrive is gitignored, so the clone re-rclone-downloads the corpus.
 #
-# On success: the e2e stack is torn down and .test-e2e removed (unless
-# E2E_KEEP=1). On failure: the stack + clone are LEFT for debugging
-# (`make clean-test`).
+# On success: docker is STOPPED but the clone is KEPT at .test-e2e/<stamp>/
+# (proliferation -- a commit-in-clone-first workflow may hold unmerged commits),
+# unless E2E_KEEP=1 (leave the stack running too). On failure: the stack + clone
+# are LEFT for debugging (`make clean-test STAMP=<stamp>`).
 #
 # Usage: make test-e2e-iso [E2E_PORT=3010] [OCR_ENABLED=false] [E2E_KEEP=1]
 #   E2E_PORT  - host port for the e2e Caddy (default 3010; must not collide with
-#               the live KB_HOST_PORT, default 3000).
+#               the live stack's Caddy port, default 3000).
 #   E2E_KEEP  - 1 = leave the e2e stack running + .test-e2e on success too.
 # Requires: OLLAMA_HOST resolvable (shell env, live .env, or live stack up),
 # rclone `gdrive` remote configured, and the locally-built openwebui overlay
@@ -109,13 +112,13 @@ set +e
   _OCR_OVR="${OCR_ENABLED:-}"
   set -a; . ./.env; . ./.env.local; set +a
   if [ -n "$_OCR_OVR" ]; then export OCR_ENABLED="$_OCR_OVR"; fi
-  # Capture KB_HOST / KB_HOST_PORT / OLLAMA_HOST from the just-sourced .env
-  # (after the source, so the isolated e2e reads the persisted
-  # localhost:<E2E_PORT> values, not the empty shell env). Re-forwarded to the
-  # internal `make bootstrap` as make-tunables, so the freshly recreated .env
-  # keeps the e2e port + host + Ollama URL instead of reverting to the
-  # .env.template default.
-  _E2E_KB_HOST="${KB_HOST:-}"; _E2E_KB_HOST_PORT="${KB_HOST_PORT:-}"; _E2E_OLLAMA_HOST="${OLLAMA_HOST:-}"
+  # Capture KB_HOST / OLLAMA_HOST from the just-sourced .env (after the source,
+  # so the isolated e2e reads the persisted localhost:<E2E_PORT> KB_HOST, not
+  # the empty shell env). Re-forwarded to the internal `make bootstrap` as
+  # make-tunables, so the freshly recreated .env keeps the e2e host + Ollama
+  # URL instead of reverting to the .env.template default. KB_HOST_PORT is NOT
+  # captured -- bootstrap derives it from KB_HOST.
+  _E2E_KB_HOST="${KB_HOST:-}"; _E2E_OLLAMA_HOST="${OLLAMA_HOST:-}"
   [ -n "${OPENWEBUI_FIRST_USER:-}" ] && [ -n "${OPENWEBUI_FIRST_PASSWORD:-}" ] \
     || { echo "REFUSING: OPENWEBUI_FIRST_USER/PASSWORD not set in .env.local (admin account) — fill them first" >&2; exit 1; }
 
@@ -126,9 +129,10 @@ set +e
 
   make clean-all
   unset GDRIVE_KB_ID
-  # Re-forward the captured host/port/Ollama values as make-tunables so the
-  # recreated .env keeps them (bootstrap.sh force-persists them into .env).
-  make bootstrap KB_HOST="$_E2E_KB_HOST" KB_HOST_PORT="$_E2E_KB_HOST_PORT" OLLAMA_HOST="$_E2E_OLLAMA_HOST"
+  # Re-forward the captured host/Ollama values as make-tunables so the
+  # recreated .env keeps them (bootstrap.sh force-persists KB_HOST; derives
+  # KB_HOST_PORT from it).
+  make bootstrap KB_HOST="$_E2E_KB_HOST" OLLAMA_HOST="$_E2E_OLLAMA_HOST"
   ./scripts/e2e-restore-creds.sh "$stash"
   # Pull the OCR vision model before preflight (preflight hard-fails on a
   # missing OCR model when OCR_ENABLED=true). Pull only the OCR model, NOT full
@@ -149,7 +153,7 @@ set +e
   fi
   make start
 
-  H="${KB_HOST:-http://localhost:${KB_HOST_PORT:-3000}}"
+  H="${KB_HOST:?KB_HOST not set -- export KB_HOST=http://host:port}"
   i=0
   until curl -sf "$H/health" >/dev/null; do
     i=$((i+1))
@@ -179,7 +183,7 @@ if [ "$rc" -eq 0 ]; then
   e2e_keep_or_down "$NAME" "$E2E_KEEP"
 else
   echo "==> test-e2e-iso FAIL (rc=$rc). E2e stack + clone LEFT for debugging." >&2
-  echo "    port: $E2E_PORT   project: kb-$NAME   clone: $E2E_CLONE" >&2
-  echo "    tear down + remove:  make clean-test NAME=$NAME" >&2
+  echo "    port: $E2E_PORT   project: $COMPOSE_PROJECT_NAME   clone: $E2E_CLONE" >&2
+  echo "    tear down + remove:  make clean-test NAME=$NAME STAMP=$E2E_STAMP" >&2
 fi
 exit "$rc"

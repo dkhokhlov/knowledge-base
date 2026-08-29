@@ -24,7 +24,7 @@ VPN/tunnel for any non-local agent.
 ## Prerequisites
 
 - The stack is up and healthy: `make start && make health`.
-- `KB_HOST` is set in `.env` (default `http://localhost:3000`). Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs on the Docker host.
+- `KB_HOST` is set in your shell env (mandatory, no default — `export KB_HOST=http://<host>:3000`; `make bootstrap` persists it into `.env`). Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs on the Docker host.
 - You have a `KB_API_KEY`. For the bootstrap admin + read-scoped agent keys, run
   `make api-keys` (writes `OPENWEBUI_ADMIN_API_KEY` / `OPENWEBUI_USER_API_KEY` into
   gitignored `.env.local`). For additional accounts, an admin runs `make users-create`.

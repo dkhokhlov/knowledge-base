@@ -44,7 +44,10 @@ python3 - <<'PY'
 import os, json, secrets, tempfile, time, urllib.request, urllib.error, sys
 
 # OWUI is fronted by Caddy at the KB_HOST root; reach its /api/* there.
-O = os.environ.get("KB_HOST") or ("http://localhost:%s" % os.environ.get("KB_HOST_PORT", "3000"))
+_kb_host = os.environ.get("KB_HOST")
+if not _kb_host:
+    sys.exit("FAIL  KB_HOST not set -- export KB_HOST=http://<host>:<port> (see .env.template)")
+O = _kb_host.rstrip("/")
 ADMIN_USER = os.environ.get("OPENWEBUI_FIRST_USER", "")
 ADMIN_PASS = os.environ.get("OPENWEBUI_FIRST_PASSWORD", "")
 _kb_domain = os.environ.get("KB_DOMAIN")

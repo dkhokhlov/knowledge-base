@@ -51,10 +51,11 @@ http_code() {
 }
 
 # Resolve the single public URL (KB_HOST). Caddy fronts OWUI at the root and
-# the api-gateway at /memory/*, /admin/users, /health. Falls back to synth from
-# KB_HOST_PORT. Call after load_env.
+# the api-gateway at /memory/*, /admin/users, /health. KB_HOST is mandatory
+# (derived KB_HOST_PORT is the Caddy bind only, not a client URL source); fail
+# loud if unset. Call after load_env.
 kb_host() {
-  printf '%s' "${KB_HOST:-http://localhost:${KB_HOST_PORT:-3000}}"
+  printf '%s' "${KB_HOST:?KB_HOST not set (export KB_HOST=http://host:port)}"
 }
 
 # Bail early if the stack is not up and healthy. Exits with status 2.
