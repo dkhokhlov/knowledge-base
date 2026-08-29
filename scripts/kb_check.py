@@ -325,10 +325,15 @@ class Stores:
 
     def delete_kb_vectors_by_file(self, kb_name, file_id):
         """Direct Chroma delete(where={'file_id': file_id}) on a KB collection.
-        Maintenance window only (OWUI stopped). Chroma 1.5.x Collection.delete
-        takes `where` (metadata filter), not `filter`."""
-        self._chroma().get_collection(kb_name).delete(where={"file_id": file_id})
-        return True
+        Maintenance window only (OWUI stopped). Uses the RAW Chroma Collection
+        API, whose delete takes `where` (metadata filter), NOT `filter` -- that
+        is the kwarg one layer up at OWUI's async VectorDB wrapper
+        (apply_vector_cleanup_on_delete.py), which translates filter->where.
+        Returns the Chroma DeleteResult `deleted` count (int) or None; the
+        caller records it so a wrong filter key/type (a silent 0-delete)
+        surfaces in the purge manifest, not just the post-purge re-audit."""
+        res = self._chroma().get_collection(kb_name).delete(where={"file_id": file_id})
+        return res.get("deleted") if isinstance(res, dict) else None
 
     def _webui_rw(self):
         if self._webui_rw_db is None:
@@ -765,15 +770,16 @@ def _purge_safe(stores, classes, opts, export_dir, manifest):
 
 
 def _purge_maint(stores, classes, manifest):
-    # class 5b leaked KB vectors: direct Chroma delete(filter) on KB collections.
+    # class 5b leaked KB vectors: direct Chroma delete(where) on KB collections.
     c5 = classes["orphan_kb_vectors"]
     leaked_pairs = c5.detail.get("leaked_pairs", []) if c5.detail else []
     if leaked_pairs:
         log.info("purge leaked KB vectors: %d (direct Chroma delete; OWUI stopped)",
                  len(leaked_pairs))
     for kb_id, fid in leaked_pairs:
-        stores.delete_kb_vectors_by_file(kb_id, fid)
-        manifest["kb_vectors"].append({"kb_id": kb_id, "file_id": fid})
+        deleted = stores.delete_kb_vectors_by_file(kb_id, fid)
+        manifest["kb_vectors"].append(
+            {"kb_id": kb_id, "file_id": fid, "deleted": deleted})
 
     # class 7 orphan junction rows: direct sqlite DELETE per orphan file_id.
     c7 = classes["orphan_junction_rows"]
