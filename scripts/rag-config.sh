@@ -5,12 +5,14 @@
 #     refuse ("The indexed documents do not contain this information.") when
 #     the answer is not in the context; do not use outside knowledge; do not
 #     invent names, terms, file names, or artifacts.
-#   - CHUNK_MIN_SIZE_TARGET (from .env, default 200): activates _coalesce_spans
-#     (patch 5) -- spans under that many chars merge forward into the next while
-#     the combined span fits in CHUNK_SIZE. The image default is 0 (header-
-#     strict, no coalescing). .env seeds the persistent config at FIRST BOOT
-#     only (webui.db wins over env afterwards); this script re-asserts the
-#     same value over the DB.
+#   - CHUNK_MIN_SIZE_TARGET (from .env, the single source -- .env.template):
+#     activates _coalesce_spans (patch 5) -- spans under that many chars merge
+#     forward into the next while the combined span fits in CHUNK_SIZE. The
+#     image default is 0 (header-strict, no coalescing). .env seeds the
+#     persistent config at FIRST BOOT only (webui.db wins over env afterwards);
+#     this script re-asserts the same value over the DB. No literal default
+#     here -- the value is declared in .env.template and this fails loudly if
+#     it is missing (same discipline as compose ${VAR:?}).
 #
 # Idempotent: re-running just re-asserts the same values.
 #
@@ -89,7 +91,10 @@ def parse_json(text, label):
     except (TypeError, ValueError) as e:
         sys.exit("FAIL  %s returned invalid JSON: %s" % (label, e))
 
-MIN_SIZE = int(os.environ.get("CHUNK_MIN_SIZE_TARGET", "200"))
+_min = os.environ.get("CHUNK_MIN_SIZE_TARGET")
+if not _min:
+    sys.exit("FAIL  CHUNK_MIN_SIZE_TARGET not set -- declare it in .env.template")
+MIN_SIZE = int(_min)
 st, txt = call("POST", "/api/v1/retrieval/config/update",
                {"RAG_TEMPLATE": NEW, "CHUNK_MIN_SIZE_TARGET": MIN_SIZE})
 if st != 200:
