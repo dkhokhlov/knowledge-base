@@ -21,10 +21,10 @@ The document KB also indexes **[Claude Code's project memory][claude-code]** —
 - **[Open WebUI][open-webui]** — document knowledge base with vector search, grounded RAG chat, and user/group access control; also the identity provider for the api-gateway.
 - **[Graphiti][graphiti]** — temporal fact memory over [Neo4j][neo4j]; reached via an internal REST server.
 - **[Neo4j][neo4j]** — graph store for [Graphiti][graphiti] (internal only).
-- **api-gateway** — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti REST bridge, live group discovery, and admin user provisioning (zero-dependency Python stdlib).
+- **api-gateway** — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti REST bridge, live group discovery, and admin user provisioning.
 - **[Caddy][caddy]** — the single public edge (`KB_HOST`): fronts Open WebUI at the root (catch-all) and proxies `/memory/*`, `POST /admin/users`, `POST /index`, `GET /status`, `GET /openapi.json`, `/health` to the api-gateway (method-scoped routes fall through to Open WebUI for other methods, so browser deep-links keep working).
 
-[Ollama][ollama] supplies the chat LLM and [`nomic-embed-text`][nomic-embed-text] embeddings; it is reached via `OLLAMA_HOST` (Ollama's native client env var) and can run on the [Docker][docker] host or a remote/LAN host.
+[Ollama][ollama] serves the chat LLM, [`nomic-embed-text`][nomic-embed-text] embeddings, and the `deepseek-ocr` OCR model. It is external to the compose stack (a host service on the Docker host or a remote/LAN host), reached via `OLLAMA_HOST` (Ollama's native client env var).
 
 ## Documentation map
 
@@ -119,7 +119,7 @@ make provision
 
 > **PROMPT for Agent**
 >
-> Paste this prompt into an agent (Claude Code, etc.); it runs the `make` targets for you (provision creates the 1st user `admin@<domain>`, this adds you as the 2nd). Edit the domain, your name, and email:
+> Paste into an agent (Claude Code, etc.); the agent runs the `make` targets (provision creates the 1st user `admin@<domain>`; this adds the 2nd). Replace the domain, name, and email:
 >
 > ```
 > Do make clean-all then provision from scratch with domain: <your.domain>;
@@ -142,9 +142,9 @@ See [Google Drive indexing (manual, via api-gateway)](#google-drive-indexing-man
 
 ## Operating model
 
-The stack is **agent-facing**: the actor that calls the gateway is an **agent**. A **role** is `admin` or `user` (the Open Web UI role field). An **account** is an Open Web UI account that holds a role; `KB_API_KEY` is **per-account** (an Open Web UI API key).
+The stack is **agent-facing**. A **role** is `admin` or `user` (the Open WebUI role field). An **account** is an Open WebUI account that holds a role; `KB_API_KEY` is **per-account** (an Open WebUI API key).
 
-- **Identity is tamper-proof.** The gateway resolves `(id, email, role)` from `KB_API_KEY` via Open Web UI `GET /api/v1/auths/`. The caller cannot set or influence it — there is no `KB_USER_ID` env var, no spoofable header.
+- **Identity is tamper-proof.** The gateway resolves `(id, email, role)` from `KB_API_KEY` via Open WebUI `GET /api/v1/auths/`. The caller cannot set or influence it — there is no `KB_USER_ID` env var, no spoofable header.
 - **Authorization = role + personal-group ownership**, both enforced on the stack (not bypassable by a modified CLI):
   - **Writes go to your own personal group.** `add` with no `--group` writes to `user:<email>`. `add --group G` is allowed only if `G` is your own personal group; any other group → `403`. There are **no shared write groups** — reads are how knowledge is shared across accounts. Graphiti stores the personal group as a charset-safe id (`user-<sanitized-email>`, e.g. `user-agent-local-test`); `forget` accepts the `user:<email>` form too.
   - **Reads span all groups that have data**, discovered live from [Neo4j][neo4j] (no roster file). `retrieve`, `episodes`, `status`, `groups` are read-only for everyone.
@@ -188,26 +188,29 @@ Full detail: [docs/operations.md](docs/operations.md) → Variable precedence.
 
 ### KB user provisioning (admin)
 
-An admin runs **`make users-create EMAIL=alice@example.com NAME=Alice`** (an operator make target; the former in-skill `user-create` command is removed — admin functions are operator-only now). The make target calls the api-gateway `POST /admin/users` flow below.
+An admin runs **`make users-create EMAIL=alice@example.com NAME=Alice`** — an operator make target (the former in-skill `user-create` is removed; admin functions are operator-only). It calls the api-gateway `POST /admin/users` flow below.
 
 - The gateway enforces `role=admin` **server-side** before any write. A non-admin key → `403` (not merely a CLI check). OWUI down → `503`.
 - Flow (all inside the gateway, one stateless request): generate a strong temp password → create the OWUI user (`POST /api/v1/auths/add`, admin key) → sign in as the new user → generate that user's `KB_API_KEY` with the new user's own JWT (`POST /api/v1/auths/api_key`) → verify the key via `GET /api/v1/auths/` resolves to the expected email + `role=user`.
 - Returns to the admin **only**: `email`, `temp_password`, `kb_api_key`, `role`, `id`. The gateway is stateless — it **never persists** the password or key; they exist only in the one response. The operator must relay them to the new account out-of-band and not store them.
 - **Rollback**: if any step after user creation fails, the gateway deletes the partial user (admin `DELETE /api/v1/users/{id}`) and returns a clear error. It never reports success on partial provisioning. A duplicate email → deterministic `409` (no second account).
-- Prerequisite: the deployed Open Web UI image must expose the provisioning endpoints. The gateway probes `/openapi.json` at startup and returns `501` from `/admin/users` if the image lacks them.
+- Prerequisite: the deployed Open WebUI image must expose the provisioning endpoints. The gateway probes `/openapi.json` at startup and returns `501` from `/admin/users` if the image lacks them.
 
 ### RAG governance
 
 - A user's uploaded files and knowledge bases are private to that user by default. The KB owner (with `sharing.knowledge`) or an admin grants a KB to user groups: Workspace -> Knowledge.
 - An agent using a user's API key inherits that user's permissions: the user's own files + KBs shared with the user's groups. It cannot see other users' private docs. An admin key bypasses access control — give agents a dedicated low-priv user's key, not an admin key.
 - To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds. The `/kb` skill reaches RAG via `POST /memory/rag` (the api-gateway inserts the chat model from `OPENWEBUI_MODEL`; send `messages` + `files`, no `model`); humans/admins RAG directly at `POST /api/chat/completions` with an explicit `model`.
-- `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes ~12B models confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
+- `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes the local 14B chat model confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
 
 ### Google Drive indexing (manual, via api-gateway)
 
 The `gdrive` knowledge base is indexed by **api-gateway** (stateless, no sidecar). `make gdrive-sync` runs rclone to sync `./gdrive` from the shared drives, then POSTs `/index` to api-gateway, which walks `./gdrive` read-only and drives OWUI's native sync/diff protocol to reconcile the tree into the KB. Indexing is **manual/on-demand only**: no daemon, no schedule, no hooks. **Prerequisite:** a configured + authenticated rclone `gdrive` remote — one-time `rclone config` (new `gdrive` remote, Google Drive storage, browser OAuth login); `make gdrive-sync` fail-fasts if no shared drives are visible. Full setup (headless auth, verify, re-auth): see [docs/gdrive.md](docs/gdrive.md).
 
-- `make gdrive-sync` syncs `./gdrive` from all shared drives (rclone `sync --backup-dir --delete-after`; delta — files removed from Drive are deleted from `./gdrive`, and the next `/index` drops them from the KB via `sync/cleanup`; deleted/overwritten files are retained in a dated `./.gdrive-backup/<UTC-ISO>/` dir outside `./gdrive` as a recovery net; `make clean-backup` clears it). Per-drive non-downloadable files and global patterns (e.g. `*.tmp`) are read from the gitignored `./gdrive-exclude.conf` (INI format: `[<drive name>]` and `[*]` sections; format documented in the tracked `gdrive-exclude.conf.example`) and converted to `--exclude-from` per drive. It fail-fasts on any transfer error and writes a per-run report (`0600`) to `./gdrive/.sync-reports/sync-<UTC-ISO>.report` with a per-drive `remote`/`local`/`excluded`/`dups` table, a `COPY`/`UPDATE`/`DELETE` breakdown (per file; correct under `--backup-dir`), a "Files excluded" section (Drive files matching the exclude patterns), a "Duplicates ignored" section (Drive files rclone skipped because another file shares the same path — Drive permits duplicate names), and a "Files not downloaded" section (e.g. admin-protected / download-restricted Drive files, surfaced with their 403 reason). Downloadable files still transfer; exit code is non-zero if any drive had errors. After rclone, it POSTs `/index` and fail-fasts on a non-2xx response or `ok=false` (per-file errors logged to stderr). `--index-all` forces a full re-index instead of incremental.
+- `make gdrive-sync` syncs `./gdrive` from all shared drives (rclone `sync --backup-dir --delete-after`; delta — files removed from Drive are deleted from `./gdrive`, and the next `/index` drops them from the KB via `sync/cleanup`). Deleted/overwritten files are retained in a dated `./.gdrive-backup/<UTC-ISO>/` dir outside `./gdrive` as a recovery net; `make clean-backup` clears it.
+- Exclude rules: per-drive non-downloadable files and global patterns (e.g. `*.tmp`) are read from the gitignored `./gdrive-exclude.conf` (INI format: `[<drive name>]` and `[*]` sections; format documented in the tracked `gdrive-exclude.conf.example`) and converted to `--exclude-from` per drive.
+- Sync report: fail-fasts on any transfer error; writes a per-run report (`0600`) to `./gdrive/.sync-reports/sync-<UTC-ISO>.report` with a per-drive `remote`/`local`/`excluded`/`dups` table, a `COPY`/`UPDATE`/`DELETE` breakdown (per file; correct under `--backup-dir`), a "Files excluded" section (Drive files matching the exclude patterns), a "Duplicates ignored" section (Drive files rclone skipped because another file shares the same path — Drive permits duplicate names), and a "Files not downloaded" section (e.g. admin-protected / download-restricted Drive files, surfaced with their 403 reason). Downloadable files still transfer; exit code is non-zero if any drive had errors.
+- After rclone, `make gdrive-sync` POSTs `/index` and fail-fasts on a non-2xx response or `ok=false` (per-file errors logged to stderr). `--index-all` forces a full re-index instead of incremental.
 - `make gdrive-index` runs POST `/index` alone (no rclone). Default incremental; set `INDEX_ALL=1` for a full re-index (drain + re-upload every file). Set `RETRY_PENDING=1` to also re-trigger stalled `pending` files (delete + re-upload; the default retries only `failed`).
 - `make gdrive-index-bootstrap` (one-time, after `make api-keys`) creates the `gdrive` KB, grants public read (`user:*`) so every authenticated user can retrieve/RAG it, and writes `GDRIVE_KB_ID` to `.env.local`. Idempotent. Does NOT start a sidecar (there is none).
 - `make gdrive-status` reads GET `/status` and emits **pretty JSON (indent=2)**: `source` (`gdrive`), `kb_id`, `source_count` (allowlisted `gdrive/` file count), `indexed_count` (files with `data.status=completed` — extracted, embedded, linked, searchable), `pending` (in extraction / OCR / GPU, or queued), `processing` (embedding + linking), `failed`, `failed_files` (`{filename, error}`), `pending_files` (`{filename, error}`), and the per-file `indexed_files` list. Key order: `indexed_files` first (the long list scrolls off the top), then `failed_files`/`pending_files`, then the single-field counts (visible at the bottom). The drain is terminal when `pending+processing=0` AND `completed+failed` covers `source_count`. No ETA (no daemon). (It passes `?json=1`; the bare `/status` text/glyph form still exists for direct curl.)
@@ -218,7 +221,12 @@ The `gdrive` knowledge base is indexed by **api-gateway** (stateless, no sidecar
 
 ### OCR extraction (image-bearing documents)
 
-The `markitdown-ocr` sidecar is an **external extraction engine** that OCRs image-bearing documents (PDF/DOCX/PPTX/XLSX) and standalone images via `deepseek-ocr` on Ollama's native `/api/chat`, so image-only PDFs and embedded figures/diagrams become searchable instead of orphaning. Gated by `OCR_ENABLED` in `.env` (default `true`); compose-profile-gated (`COMPOSE_PROFILES=ocr`, baked into `.env` by `make bootstrap` from `OCR_ENABLED` and read by `docker compose` for every command); no per-type fallback (global + all-or-nothing). When enabled it is provisioned by the standard chain (`bootstrap` generates the token + bakes `COMPOSE_PROFILES=ocr`, `pull-models` pulls `deepseek-ocr`, `start` builds + starts the sidecar, `api-keys` sets the OWUI routing) — no separate step. To disable, run `make clean-all && make provision OCR_ENABLED=false` (bakes `OCR_ENABLED=false` + an empty `COMPOSE_PROFILES` into `.env`; existing OCR'd members keep their content until re-ingested). A hit carries `file_id` + `page` → the exact original page/slide/sheet. Full design, scope, and service guards: [docs/ocr.md](docs/ocr.md).
+The `markitdown-ocr` sidecar is an **external extraction engine** that OCRs image-bearing documents (PDF/DOCX/PPTX/XLSX) and standalone images via `deepseek-ocr` on Ollama's native `/api/chat`, so image-only PDFs and embedded figures/diagrams become searchable instead of orphaning. Full design, scope, and service guards: [docs/ocr.md](docs/ocr.md).
+
+- **Gating:** `OCR_ENABLED` in `.env` (default `true`); compose-profile-gated (`COMPOSE_PROFILES=ocr`, baked into `.env` by `make bootstrap` from `OCR_ENABLED` and read by `docker compose` for every command); no per-type fallback (global + all-or-nothing).
+- **Provisioning:** when enabled, the standard chain covers it (`bootstrap` generates the token + bakes `COMPOSE_PROFILES=ocr`, `pull-models` pulls `deepseek-ocr`, `start` builds + starts the sidecar, `api-keys` sets the OWUI routing) — no separate step.
+- **Disable:** `make clean-all && make provision OCR_ENABLED=false` (bakes `OCR_ENABLED=false` + an empty `COMPOSE_PROFILES` into `.env`; existing OCR'd members keep their content until re-ingested).
+- **Hit metadata:** a retrieval hit carries `file_id` + `page` → the exact original page/slide/sheet.
 
 For per-tool agent integration (skill install, CLI examples), see [docs/agents.md](docs/agents.md).
 
@@ -238,7 +246,7 @@ Measured warm on the GPU host (one 14B ctx-baked model loaded). The first call a
 - `/memory/retrieve` returns **facts** (`entity_edges`; fact text + `valid_at` / `invalid_at`) via Graphiti RAG: the query is embedded (`nomic-embed-text`), matched by vector similarity over nodes, then refined by graph traversal. The original `add` text is not returned.
 - `/memory/episodes` returns the raw **episodes**: the original `add` texts, verbatim, in order. No embedding, no LLM, no graph traversal.
 
-### RAG (Open Web UI)
+### RAG (Open WebUI)
 
 | Operation | Endpoint | Median latency |
 |---|---|---|
@@ -250,7 +258,7 @@ Measured warm on the GPU host (one 14B ctx-baked model loaded). The first call a
 
 ## Security
 
-The trust model in brief. For lockdown defaults, phone-home hardening, container caps, secrets handling, Neo4j auth, and dev-mode docs, see [docs/operations.md#hardening-reference](docs/operations.md#hardening-reference).
+For lockdown defaults, phone-home hardening, container caps, secrets handling, Neo4j auth, and dev-mode docs, see [docs/operations.md#hardening-reference](docs/operations.md#hardening-reference).
 
 ### Open WebUI (fronted by Caddy at `KB_HOST`)
 
@@ -279,8 +287,8 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 | `Modelfile_qwen2_5` | reference Modelfile for the custom ctx-baked `GRAPHITI_MODEL` (`FROM qwen2.5:14b` + `PARAMETER num_ctx 8192`); see [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant) |
 | `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `rag-config.sh`, `gdrive-sync`, `gdrive-index-bootstrap.sh` |
 | `skills/` | per-tool `kb` agent skill (`claude/` primary; `codex/`, `opencode/`, `pi/` symlink `scripts/` to it) — see [docs/agents.md](docs/agents.md) |
-| `tests/` | `test_01`..`test_08` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
-| `docs/` | `operations.md`, `testing.md`, `agents.md`, favicon assets |
+| `tests/` | `test_01`..`test_12` bash tests + `test_runner.py` (pytest driver) + 4 native UTs + `conftest.py` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
+| `docs/` | `operations.md`, `ocr.md`, `gdrive.md`, `memory.md`, `testing.md`, `agents.md`, favicon assets |
 | `.env` / `.env.template` | tracked template — no secrets (ports, tags, models, tunables, `OLLAMA_HOST`) |
 | `.env.local` / `.env.local.template` | gitignored secrets + generated keys (`chmod 0600`) |
 | `Makefile` | targets (see [docs/operations.md#make-targets](docs/operations.md#make-targets)) |
@@ -302,6 +310,5 @@ The trust model in brief. For lockdown defaults, phone-home hardening, container
 [neo4j]: https://neo4j.com/
 [caddy]: https://caddyserver.com/
 [ollama]: https://ollama.com/
-[docker]: https://www.docker.com/
 [nomic-embed-text]: https://huggingface.co/nomic-ai/nomic-embed-text
 [claude-code]: https://code.claude.com/docs/en/memory
