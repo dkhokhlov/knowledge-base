@@ -95,6 +95,9 @@ _min = os.environ.get("CHUNK_MIN_SIZE_TARGET")
 if not _min:
     sys.exit("FAIL  CHUNK_MIN_SIZE_TARGET not set -- declare it in .env.template")
 MIN_SIZE = int(_min)
+_emb_model = os.environ.get("RAG_EMBEDDING_MODEL")
+if not _emb_model:
+    sys.exit("FAIL  RAG_EMBEDDING_MODEL not set -- declare it in .env.template")
 st, txt = call("POST", "/api/v1/retrieval/config/update",
                {"RAG_TEMPLATE": NEW, "CHUNK_MIN_SIZE_TARGET": MIN_SIZE})
 if st != 200:
@@ -118,7 +121,10 @@ print("      merge sanity: TOP_K=%s CHUNK_SIZE=%s CHUNK_MIN_SIZE_TARGET=%s"
 # via the embedding API: GET the current config, change only the ollama URL, POST
 # it back. /embedding/update REPLACES the whole config, so we preserve
 # engine/model/batch/async/concurrent/key from the GET. Idempotent.
-OLLAMA_URL = (os.environ.get("OLLAMA_HOST") or "http://host.docker.internal:11434").rstrip("/")
+_ollama_host = os.environ.get("OLLAMA_HOST")
+if not _ollama_host:
+    sys.exit("FAIL  OLLAMA_HOST not set -- export it or uncomment in .env (see .env.template)")
+OLLAMA_URL = _ollama_host.rstrip("/")
 # OWUI uses this URL INSIDE its container, where localhost is the container's
 # own loopback (no Ollama). Apply the same localhost->host.docker.internal
 # translation the container entrypoint shim (scripts/ollama-host.sh) and
@@ -137,7 +143,7 @@ if cur_url == OLLAMA_URL:
 else:
     payload = {
         "RAG_EMBEDDING_ENGINE": emb.get("RAG_EMBEDDING_ENGINE", "ollama"),
-        "RAG_EMBEDDING_MODEL": emb.get("RAG_EMBEDDING_MODEL", os.environ.get("RAG_EMBEDDING_MODEL", "nomic-embed-text")),
+        "RAG_EMBEDDING_MODEL": emb.get("RAG_EMBEDDING_MODEL", _emb_model),
         "RAG_EMBEDDING_BATCH_SIZE": emb.get("RAG_EMBEDDING_BATCH_SIZE", 1),
         "ENABLE_ASYNC_EMBEDDING": emb.get("ENABLE_ASYNC_EMBEDDING", True),
         "RAG_EMBEDDING_CONCURRENT_REQUESTS": emb.get("RAG_EMBEDDING_CONCURRENT_REQUESTS", 0),
