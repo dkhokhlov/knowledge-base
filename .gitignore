@@ -49,6 +49,12 @@ __pycache__/
 # targets are siblings under ./gdrive/<drive>/, not the root).
 !/gdrive/.tests/
 !/gdrive/.tests/**
+# test_13 runtime-generated fixtures (tests/fixtures_chunkq_gen.py writes them,
+# test_13 removes them on exit). Generated at test time, never committed — a
+# leftover dir must not dirty the tree (the e2e-iso clean-tree guard aborts on
+# an unclean source tree), so it is re-ignored despite the !/gdrive/.tests/**
+# negation above.
+/gdrive/.tests/chunkq/
 
 # rclone sync --backup-dir retention (deleted/overwritten Drive files moved here
 # so oikb does not re-index them; outside ./gdrive on purpose). `make clean` wipes it.

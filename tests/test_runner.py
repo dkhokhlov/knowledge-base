@@ -81,6 +81,11 @@ def test_11_gdrive_index_fixture(run_sh):
     """api-gateway /index `path` parameter on a small, deterministic, committed fixture set (fast replacement for the full test_09 drain)."""
     run_sh("tests/test_11_gdrive_index_fixture.sh")
 
+@pytest.mark.integration
+def test_13_chunk_quality(run_sh):
+    """Chunk-QUALITY audit over generated fixtures for all 10 allowlisted types (sliceability, span/page metadata, coalescing, offsets, fidelity)."""
+    run_sh("tests/test_13_chunk_quality.sh")
+
 @pytest.mark.e2e
 def test_12_kb_check(run_sh):
     """Isolated e2e for make kb-check: throwaway stack, upload synthetic files, create the file-{id} leak, then detect -> PURGE=1 export+purge -> re-audit 0 orphans."""

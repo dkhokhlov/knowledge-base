@@ -54,6 +54,9 @@ Two kinds of test, both collected natively by pytest:
 runner's functions are. `tests/lib.sh` is the shared bash helpers (`pass`/`fail`/
 `section`/`finish`/`load_env`/`require_env`/`require_stack_up`/`kb_host`); not a
 test. `scripts/e2e-env.sh` is the reusable e2e isolation lib; not a test.
+`tests/fixtures_chunkq_gen.py` is the deterministic fixture generator test_13
+runs (not a test itself); it writes the per-type fixtures into the gitignored
+`gdrive/.tests/chunkq/` and prints the manifest JSON that drives the audit.
 
 ## Inventory
 
@@ -70,6 +73,7 @@ test. `scripts/e2e-env.sh` is the reusable e2e isolation lib; not a test.
 | `test_09_gdrive_index` | `tests/test_09_gdrive_index.sh` | `integration long` |
 | `test_10_ocr_auth` | `tests/test_10_ocr_auth.sh` | `integration` |
 | `test_11_gdrive_index_fixture` | `tests/test_11_gdrive_index_fixture.sh` | `integration` |
+| `test_13_chunk_quality` | `tests/test_13_chunk_quality.sh` | `integration` |
 | `test_12_kb_check` | `tests/test_12_kb_check.sh` | `e2e` |
 | `test_e2e_iso` | `scripts/test-e2e-iso.sh` | `e2e long` |
 | (native UT) | `test_gateway_unit.py` | `unit` |
