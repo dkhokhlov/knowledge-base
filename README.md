@@ -97,6 +97,8 @@ Sub-documents:
 
 ## Quick start
 
+**Host prerequisites:** `make`, `uv` (provisions the Python 3.12 `.venv` for the test suite — every test target runs `make ci`, which is `uv sync` from `pyproject.toml` + `uv.lock`; install at <https://docs.astral.sh/uv/>), `docker compose` (the stack), and `rclone` (only for `make gdrive-sync`).
+
 Full prerequisites, configuration, and env vars are in [docs/operations.md](docs/operations.md). Core sequence:
 
 **Minimum env vars to set** (in your shell env — both are commented out in `.env.template` so the shell value is not clobbered; everything else has a working default or is auto-generated):

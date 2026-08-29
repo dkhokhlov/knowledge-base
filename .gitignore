@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+# uv venv (provisioned by `make ci` = uv sync; not committed -- reprovision from
+# pyproject.toml + uv.lock). uv.lock IS committed (the pinned resolution).
+.venv/
 
 # Editor / IDE
 .vscode/

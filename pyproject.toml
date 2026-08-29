@@ -1,0 +1,15 @@
+# Virtual project (not a package: tool.uv.package = false) so `uv sync` only
+# provisions the .venv with the dev dependencies -- it does NOT build or install
+# this repo as a Python package. The repo is a deployment + test suite, not a
+# library. `make ci` runs `uv sync`; `uv.lock` pins the full resolved set.
+[project]
+name = "knowledgebase"
+version = "0.0.0"
+description = "Self-hosted agent-first knowledge stack: api-gateway + integration/e2e test suite."
+requires-python = ">=3.12"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false

@@ -14,9 +14,14 @@
 # COMPOSE_PROFILES into .env). No --profile flag, no shell export.
 COMPOSE  := env -u COMPOSE_PROFILES docker compose
 DATA_DIR := ./data
+# pytest runs in the .venv provisioned by `make ci` (uv sync: Python 3.12 from
+# .python-version + locked deps from uv.lock). The venv path avoids relying on a
+# `pytest` binary on PATH. Override with PYTEST="python3 -m pytest" to use a
+# different interpreter (still needs pytest installed in it).
+PYTEST   ?= .venv/bin/python -m pytest
 
 .PHONY: help provision bootstrap preflight pull pull-models start stop restart logs ps config \
-        health test test-output test-e2e-iso api-keys admin-signup rag-config \
+        health ci test test-unit test-e2e test-e2e-long test-output test-e2e-iso api-keys admin-signup rag-config \
         users-create users-list users-search \
         ocr-config \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
@@ -86,25 +91,22 @@ health: ## Probe the stack /health (Caddy -> api-gateway aggregated, reflects OW
 	curl -sf "$$H/health" >/dev/null \
 	  && echo "stack healthy ($$H/health)" || { echo "stack DOWN ($$H/health)"; exit 1; }
 
-test: ## Run unit tests (no stack) then system integration tests against the running stack (run: make start)
-	@status=0; echo "=== unit: test_output_json ==="; \
-	  python3 tests/test_output_json.py -v || status=1; \
-	  echo "=== unit: test_offset_aware_chunking ==="; \
-	  python3 tests/test_offset_aware_chunking.py -v || status=1; \
-	  echo "=== unit: test_kb_check ==="; \
-	  python3 tests/test_kb_check.py -v || status=1; \
-	  for t in tests/test_*.sh; do [ -e "$$t" ] || continue; \
-	  case "$$t" in *test_08_e2e.sh) \
-	    echo "==> skip $$t (isolated e2e: forget deletes the agent Graphiti group; run via: bash tests/test_08_e2e.sh)"; continue;; \
-	    *test_09_gdrive_index.sh) \
-	    echo "==> skip $$t (full real-gdrive drain; run via: make test-e2e-iso)"; continue;; \
-	    *test_12_kb_check.sh) \
-	    echo "==> skip $$t (isolated e2e: starts its own throwaway stack; run via: bash tests/test_12_kb_check.sh)"; continue;; esac; \
-	  echo; echo "=== $$t ==="; bash "$$t" || status=1; \
-	done; exit $$status
+ci: ## Provision the .venv: uv sync (Python 3.12 from .python-version + locked deps from uv.lock). Idempotent; prereq for every test target.
+	uv sync
 
-test-output: ## Unit-test CLI JSON output schemas (no stack needed)
-	@python3 tests/test_output_json.py -v
+test: ci ## Run the fast set: python unit tests + live-stack integration tests (excludes e2e + long). Requires: make start (for the integration tests).
+	@$(PYTEST) -m "not e2e and not long" -v
+
+test-unit: ci ## Run only the python unit tests (no stack needed).
+	@$(PYTEST) -m unit -v
+
+test-e2e: ci ## Run the quick isolated e2e tests (self-isolate a throwaway stack via scripts/e2e-env.sh; NOT the live stack). GPU/RAM: a 2nd stack on the shared Ollama.
+	@$(PYTEST) -m "e2e and not long" -v
+
+test-e2e-long: ci ## Run the long isolated e2e (test_08 agent-surface + test-e2e-iso at-scale). Self-isolate; GPU/RAM heavy; runs many minutes.
+	@$(PYTEST) -m "e2e and long" -v
+test-output: ci ## Unit-test CLI JSON output schemas (no stack needed)
+	@.venv/bin/python tests/test_output_json.py -v
 
 test-e2e-iso: ## Isolated e2e: clone to gitignored .test-e2e/ + run the destructive e2e (clean-state wipe + re-provision + rclone + full suite + test_09 drain) under a separate compose project (kb-e2e) so the LIVE stack keeps running. The destructive logic is inlined; there is NO in-place `make test-e2e` (it would wipe the live stack). REAL rclone (re-downloads the corpus). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On failure run make clean-test.
 	@./scripts/test-e2e-iso.sh

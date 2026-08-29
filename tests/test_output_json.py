@@ -24,6 +24,13 @@ from unittest import mock
 SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                        "skills", "claude", "scripts")
 sys.path.insert(0, os.path.abspath(SCRIPTS))
+# Native pytest collection imports every test module in ONE process.
+# test_gateway_unit.py imports a DIFFERENT module also named `owui`
+# (gateway/owui.py). If that one was imported first, sys.modules["owui"] holds
+# it, and our `import owui` below would bind the wrong module. Evict any cached
+# `owui` so this module re-resolves to skills/claude/scripts/owui.py. The other
+# module's already-bound references are unaffected (module globals bind once).
+sys.modules.pop("owui", None)
 import kb_gateway  # noqa: E402
 import owui  # noqa: E402
 
