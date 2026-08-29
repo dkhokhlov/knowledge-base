@@ -18,13 +18,14 @@ Documents provide **grounded answers** from a **curated reference corpus**. **Fa
 
 The document KB also indexes **[Claude Code's project memory][claude-code]** — the **per-project auto-memory** Claude Code writes under `~/.claude/projects/*/memory/` — into **one Open WebUI KB per project**, so knowledge accumulated across **sessions and repositories** stays **searchable** instead of expiring with each session's context. The `/kb` skill drives this **host-side** with the caller's own **user key** (`index-projects` / `retrieve-projects` / `status-projects`); the caller **creates and owns** each project KB, and the **api-gateway is not involved** on this surface. See [Projects memory indexing](docs/operations.md#projects-memory-indexing-claude-project-memory--open-webui) in docs/operations.md, and the `/kb` skill ([docs/agents.md](docs/agents.md)).
 
+**Components:**
+
 - **[Open WebUI][open-webui]** — document knowledge base with vector search, grounded RAG chat, and user/group access control; also the identity provider for the api-gateway.
 - **[Graphiti][graphiti]** — temporal fact memory over [Neo4j][neo4j]; reached via an internal REST server.
 - **[Neo4j][neo4j]** — graph store for [Graphiti][graphiti] (internal only).
 - **api-gateway** — a custom component in this repo: stack-side authorization, per-account identity and role validation, Graphiti REST bridge, live group discovery, and admin user provisioning.
 - **[Caddy][caddy]** — the single public edge (`KB_HOST`): fronts Open WebUI at the root (catch-all) and proxies `/memory/*`, `POST /admin/users`, `POST /index`, `GET /status`, `GET /openapi.json`, `/health` to the api-gateway (method-scoped routes fall through to Open WebUI for other methods, so browser deep-links keep working).
-
-[Ollama][ollama] serves the `qwen2.5:14b` chat LLM, [`nomic-embed-text`][nomic-embed-text] embeddings, and the `deepseek-ocr` OCR model. It is external to the compose stack (a host service on the Docker host or a remote/LAN host), reached via `OLLAMA_HOST` (Ollama's native client env var).
+- **[Ollama][ollama]** — external model host (not in the compose stack): serves the `qwen2.5:14b` chat LLM, [`nomic-embed-text`][nomic-embed-text] embeddings, and the `deepseek-ocr` OCR model; runs on the Docker host or a remote/LAN host, reached via `OLLAMA_HOST` (Ollama's native client env var).
 
 ## Documentation map
 
