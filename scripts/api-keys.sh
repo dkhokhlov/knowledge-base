@@ -47,7 +47,10 @@ import os, json, secrets, tempfile, time, urllib.request, urllib.error, sys
 O = os.environ.get("KB_HOST") or ("http://localhost:%s" % os.environ.get("KB_HOST_PORT", "3000"))
 ADMIN_USER = os.environ.get("OPENWEBUI_FIRST_USER", "")
 ADMIN_PASS = os.environ.get("OPENWEBUI_FIRST_PASSWORD", "")
-AGENT_USER = os.environ.get("OPENWEBUI_USER") or "agent@" + (os.environ.get("KB_DOMAIN") or "local.test")
+_kb_domain = os.environ.get("KB_DOMAIN")
+if not _kb_domain:
+    sys.exit("FAIL  KB_DOMAIN not set -- declare it in .env.template")
+AGENT_USER = os.environ.get("OPENWEBUI_USER") or "agent@" + _kb_domain
 AGENT_NAME = os.environ.get("OPENWEBUI_USER_NAME") or "Agent"
 FORCE = os.environ.get("FORCE", "") == "1"
 
@@ -133,10 +136,12 @@ else:
 # Without a model access grant, a non-admin user sees 0 models and
 # /api/chat/completions returns "Model not found". Same '*' pattern as KB grants.
 # Grant the chat model the agent actually requests: OPENWEBUI_MODEL (inserted by
-# the api-gateway for POST /memory/rag), then the built-in default. OPENWEBUI_MODEL
-# (chat) is independent from GRAPHITI_MODEL (extraction); .env may set them
-# differently. The default must be a model `make pull-models` creates.
-CHAT_MODEL = os.environ.get("OPENWEBUI_MODEL") or "qwen2.5:14b-ctx8192"
+# the api-gateway for POST /memory/rag). Declared in .env.template (independent
+# from GRAPHITI_MODEL/extraction); it must be a model `make pull-models` creates.
+_chat_model = os.environ.get("OPENWEBUI_MODEL")
+if not _chat_model:
+    sys.exit("FAIL  OPENWEBUI_MODEL not set -- declare it in .env.template")
+CHAT_MODEL = _chat_model
 code, ml, _ = jget("GET", "/api/models", admin_jwt)
 mids = []
 if code == 200 and isinstance(ml, dict):
