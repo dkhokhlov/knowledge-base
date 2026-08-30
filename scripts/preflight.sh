@@ -74,6 +74,28 @@ ok "PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH == EMBEDDER_DIMENSIONS (${PGVECTOR_INI
   || fail "RAG_TOP_K_RERANKER=${RAG_TOP_K_RERANKER} < KB_RETRIEVE_K_MAX=${KB_RETRIEVE_K_MAX} (large-k /retrieve requests would be truncated)"
 ok "RAG_TOP_K_RERANKER >= KB_RETRIEVE_K_MAX (${RAG_TOP_K_RERANKER} >= ${KB_RETRIEVE_K_MAX})"
 
+# --- RAG embedding concurrency (herd bound) ---
+# RAG_EMBEDDING_BATCH_SIZE packs N chunks per /api/embed. Default 1 fired one
+# request per chunk and killed Ollama's embed runner under a 5195-chunk file.
+# RAG_EMBEDDING_CONCURRENT_REQUESTS caps in-flight batches per file (0 = unlimited
+# thundering herd). Both must be >= 1; 0 reproduces the runner EOF.
+: "${RAG_EMBEDDING_BATCH_SIZE:?RAG_EMBEDDING_BATCH_SIZE required in .env}"
+[ "${RAG_EMBEDDING_BATCH_SIZE}" -ge 1 ] \
+  || fail "RAG_EMBEDDING_BATCH_SIZE=${RAG_EMBEDDING_BATCH_SIZE} must be >= 1 (default 1 fired one request per chunk)"
+ok "RAG_EMBEDDING_BATCH_SIZE=${RAG_EMBEDDING_BATCH_SIZE}"
+: "${RAG_EMBEDDING_CONCURRENT_REQUESTS:?RAG_EMBEDDING_CONCURRENT_REQUESTS required in .env}"
+[ "${RAG_EMBEDDING_CONCURRENT_REQUESTS}" -ge 1 ] \
+  || fail "RAG_EMBEDDING_CONCURRENT_REQUESTS=${RAG_EMBEDDING_CONCURRENT_REQUESTS} must be >= 1 (0 = unlimited thundering herd)"
+ok "RAG_EMBEDDING_CONCURRENT_REQUESTS=${RAG_EMBEDDING_CONCURRENT_REQUESTS}"
+: "${ENABLE_ASYNC_EMBEDDING:?ENABLE_ASYNC_EMBEDDING required in .env}"
+ok "ENABLE_ASYNC_EMBEDDING=${ENABLE_ASYNC_EMBEDDING}"
+: "${THREAD_POOL_SIZE:?THREAD_POOL_SIZE required in .env}"
+ok "THREAD_POOL_SIZE=${THREAD_POOL_SIZE}"
+: "${AIOHTTP_CLIENT_SESSION_SSL:?AIOHTTP_CLIENT_SESSION_SSL required in .env}"
+ok "AIOHTTP_CLIENT_SESSION_SSL=${AIOHTTP_CLIENT_SESSION_SSL}"
+: "${RAG_RERANKING_BATCH_SIZE:?RAG_RERANKING_BATCH_SIZE required in .env}"
+ok "RAG_RERANKING_BATCH_SIZE=${RAG_RERANKING_BATCH_SIZE}"
+
 : "${OLLAMA_HOST:?OLLAMA_HOST is required (set in shell env or uncomment in .env; see .env.template)}"
 OLLAMA="${OLLAMA_HOST%/}"
 # Probe the configured Ollama from the host side (it must be reachable from

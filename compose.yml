@@ -312,6 +312,13 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_HOST:?OLLAMA_HOST is required (shell env or uncomment in .env)}
       - RAG_EMBEDDING_ENGINE=ollama
       - RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:?RAG_EMBEDDING_MODEL required in .env}
+      # --- RAG embedding concurrency (startup env; herd bound) ---
+      - RAG_EMBEDDING_BATCH_SIZE=${RAG_EMBEDDING_BATCH_SIZE:?RAG_EMBEDDING_BATCH_SIZE required in .env}
+      - RAG_EMBEDDING_CONCURRENT_REQUESTS=${RAG_EMBEDDING_CONCURRENT_REQUESTS:?RAG_EMBEDDING_CONCURRENT_REQUESTS required in .env}
+      - ENABLE_ASYNC_EMBEDDING=${ENABLE_ASYNC_EMBEDDING:?ENABLE_ASYNC_EMBEDDING required in .env}
+      - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:?THREAD_POOL_SIZE required in .env}
+      - AIOHTTP_CLIENT_SESSION_SSL=${AIOHTTP_CLIENT_SESSION_SSL:?AIOHTTP_CLIENT_SESSION_SSL required in .env}
+      - RAG_RERANKING_BATCH_SIZE=${RAG_RERANKING_BATCH_SIZE:?RAG_RERANKING_BATCH_SIZE required in .env}
       # --- Vector DB (pgvector; startup env, NOT a /retrieval/config key) ---
       - VECTOR_DB=${VECTOR_DB:?VECTOR_DB required in .env}
       - PGVECTOR_DB_URL=${PGVECTOR_DB_URL:?PGVECTOR_DB_URL required in .env}
