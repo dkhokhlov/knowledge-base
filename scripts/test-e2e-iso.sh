@@ -9,9 +9,9 @@
 #
 # The isolation (clone + compose project + generated container-rename override
 # + OLLAMA_HOST resolve + bootstrap + teardown) is the REUSABLE
-# scripts/e2e-env.sh library, shared with tests/test_12_kb_check.sh. This file
+# scripts/lib-e2e-env.sh library, shared with tests/test_12_kb_check.sh. This file
 # holds only the gdrive-specific setup (gdrive-exclude.conf copy) + the
-# destructive body. See e2e-env.sh for the isolation mechanics.
+# destructive body. See lib-e2e-env.sh for the isolation mechanics.
 #
 # Why a clone is not enough on its own: compose.yml hardcodes
 # `container_name: kb-*` (project-name-independent), so a second stack would
@@ -54,7 +54,7 @@ NAME="e2e"
 OCR_OVR="${OCR_ENABLED:-}"
 
 # Reusable isolation lib (sets E2E_SRC + the e2e_* functions; sourced, not run).
-. "$(cd "$(dirname "$0")" && pwd)/e2e-env.sh"
+. "$(cd "$(dirname "$0")" && pwd)/lib-e2e-env.sh"
 
 # --- 1. isolate + bootstrap the throwaway clone ------------------------------
 e2e_resolve_ollama || { echo "FAIL  OLLAMA_HOST resolution failed" >&2; exit 1; }

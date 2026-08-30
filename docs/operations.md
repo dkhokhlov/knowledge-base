@@ -631,7 +631,7 @@ fixtures only — no gdrive, no PII).
 
 The isolation (clone + compose project + container-rename override +
 `OLLAMA_HOST` resolve + `make bootstrap` + teardown) is the **reusable
-`scripts/e2e-env.sh` library**, sourced by both tests so the isolation logic is
+`scripts/lib-e2e-env.sh` library**, sourced by both tests so the isolation logic is
 not duplicated. `e2e_isolate` **generates** the container-rename override from
 `compose.yml`'s service list (every `container_name` → `kb-<NAME>-<stamp>-*`),
 merged via `COMPOSE_FILE` — so a new service added to `compose.yml` is covered
@@ -646,7 +646,7 @@ from it by `make bootstrap`, not passed) and `OLLAMA_HOST` (the shared external
 Ollama). They are pinned through the **standard make-tunable override
 mechanism** — the same one `bootstrap.sh` uses for `OCR_ENABLED` / `KB_DOMAIN`
 (see [Variable precedence](#variable-precedence)) — not by editing the tracked
-template. The `e2e_*` functions in `scripts/e2e-env.sh` apply it:
+template. The `e2e_*` functions in `scripts/lib-e2e-env.sh` apply it:
 
 | Step | Function | Mechanism |
 |---|---|---|

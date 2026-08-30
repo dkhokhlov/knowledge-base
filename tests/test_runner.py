@@ -9,7 +9,7 @@ process's fds, so output streams live (not buffered until the end).
 
 Markers are on each test, in-file:
   integration  bash system test against the live stack (run: make start first)
-  e2e          self-isolates a throwaway stack via scripts/e2e-env.sh
+  e2e          self-isolates a throwaway stack via scripts/lib-e2e-env.sh
   long         cross-cutting tag (real-corpus drain or at-scale); stacked with
                the primary group (a test can be e2e AND long, or integration AND long)
 

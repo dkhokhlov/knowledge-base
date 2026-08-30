@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create the one ephemeral throwaway test user for an e2e iso-clone env.
 
-The shell (scripts/e2e-env.sh e2e_ephemeral_user) sources the clone .env and
+The shell (scripts/lib-e2e-env.sh e2e_ephemeral_user) sources the clone .env and
 .env.local BEFORE it calls this script, so KB_HOST and OPENWEBUI_ADMIN_API_KEY
 are in os.environ. This script does the precise work in Python, not in the
 shell, so the structured gateway response is never passed through a shell

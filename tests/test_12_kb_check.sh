@@ -4,9 +4,9 @@
 # create the file-{id} leak (the files.py delete() no-op), then exercise
 # `make kb-check` detect -> PURGE=1 purge+export -> re-audit 0 orphans.
 #
-# Uses the reusable isolation in scripts/e2e-env.sh (clone + compose project +
+# Uses the reusable isolation in scripts/lib-e2e-env.sh (clone + compose project +
 # container-rename override + provision + teardown), so the live stack is never
-# touched and the isolation logic is NOT duplicated here. See e2e-env.sh.
+# touched and the isolation logic is NOT duplicated here. See lib-e2e-env.sh.
 #
 # The purge path is unit-tested in tests/test_kb_check.py (FakeStores). This
 # script verifies the tool against REAL isolated DBs: it reads the clone's
@@ -34,7 +34,7 @@ MARKER="kbcheck-fixture-marker-9c2d1"
 # e2e_isolate) reads ./.env from the clone cwd. Swapping these two source lines
 # would point load_env + every `make` at the live tree -- keep lib.sh before
 # e2e_isolate.
-. "$(cd "$(dirname "$0")/.." && pwd)/scripts/e2e-env.sh"
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib-e2e-env.sh"
 
 # Source the test helpers (pass/fail/section/finish) for consistent output.
 . "$(dirname "$0")/lib.sh"

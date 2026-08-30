@@ -15,7 +15,7 @@ other three are primary groups (a test belongs to one).
 |---|---|---|
 | `unit` | python unit test (stdlib `unittest`, no stack) | nothing |
 | `integration` | bash system test against the live stack | `make start` |
-| `e2e` | isolated e2e: self-clones a throwaway stack via `scripts/e2e-env.sh` | nothing (self-isolates; GPU/RAM: a 2nd stack) |
+| `e2e` | isolated e2e: self-clones a throwaway stack via `scripts/lib-e2e-env.sh` | nothing (self-isolates; GPU/RAM: a 2nd stack) |
 | `long` | long-running (real-corpus drain, at-scale); cross-cutting | patient run |
 
 ## Make targets
@@ -53,7 +53,7 @@ Two kinds of test, both collected natively by pytest:
 `.sh` files are not python, so pytest never collects them directly — only the
 runner's functions are. `tests/lib.sh` is the shared bash helpers (`pass`/`fail`/
 `section`/`finish`/`load_env`/`require_env`/`require_stack_up`/`kb_host`); not a
-test. `scripts/e2e-env.sh` is the reusable e2e isolation lib; not a test.
+test. `scripts/lib-e2e-env.sh` is the reusable e2e isolation lib; not a test.
 `tests/fixtures_chunkq_gen.py` is the deterministic generator that produced the
 committed chunk-quality fixtures at `gdrive/.tests/chunkq/` (not a test itself;
 regenerate with `--out gdrive/.tests/chunkq`). test_13 runs it with
@@ -104,7 +104,7 @@ A test passes iff it exits 0. Add the marker on the test, in-file.
          run_sh("tests/test_<name>.sh")
      ```
    - isolated e2e (destructive, must not touch the live stack) → `e2e`. Source
-     `scripts/e2e-env.sh`, call `e2e_resolve_ollama` → `e2e_isolate <NAME> <PORT>`
+     `scripts/lib-e2e-env.sh`, call `e2e_resolve_ollama` → `e2e_isolate <NAME> <PORT>`
      → `e2e_provision` → body → `e2e_down` in an EXIT trap. See `test_08_e2e.sh`
      / `test_12_kb_check.sh` for the pattern (ISOLATED flag + `*_KEEP`). Then add
      the runner function with `@pytest.mark.e2e`.

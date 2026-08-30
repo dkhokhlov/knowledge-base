@@ -156,7 +156,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `ghcr.io/dkhokhlov/open-webui:0.11.0-pathdedup-idem-mtime-orphanclean-offsetchunks`
   (the prior `…-orphanclean` tag held patches 1–4). Rebuild + re-index to
   populate the new chunk boundaries.
-- **Reusable e2e isolation library + `kb-check` fsck tool.** `scripts/e2e-env.sh`
+- **Reusable e2e isolation library + `kb-check` fsck tool.** `scripts/lib-e2e-env.sh`
   (sourced) provides clone + compose-project + container-rename override +
   provision + teardown for isolated e2e; `test_08_e2e.sh` + `test_12_kb_check.sh`
   migrated to throwaway stacks (the agent `forget` / orphan purge no longer

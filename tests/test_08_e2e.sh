@@ -12,9 +12,9 @@
 # has a fresh empty Neo4j, so the agent identity + its Graphiti group are
 # disposable. Isolation contains the destructive op to throwaway state.
 #
-# Uses scripts/e2e-env.sh (clone + compose project + container-rename override
+# Uses scripts/lib-e2e-env.sh (clone + compose project + container-rename override
 # + provision + teardown) so the live stack is never touched and the isolation
-# logic is NOT duplicated here. See e2e-env.sh.
+# logic is NOT duplicated here. See lib-e2e-env.sh.
 #
 # e2e_provision (make start + admin-signup + api-keys) suffices for the /memory
 # endpoints -- no extra provisioning:
@@ -46,9 +46,9 @@ NAME="test08"
 # KB_ROOT resolves from BASH_SOURCE to the LIVE repo (this script is invoked
 # from there). e2e_isolate below then cds INTO the clone. load_env (called after
 # e2e_isolate) reads ./.env from the clone cwd. Swapping these two source lines
-# would point load_env + every `make` at the live tree -- keep e2e-env.sh before
+# would point load_env + every `make` at the live tree -- keep lib-e2e-env.sh before
 # lib.sh. (Same ordering as test_12_kb_check.sh.)
-. "$(cd "$(dirname "$0")/.." && pwd)/scripts/e2e-env.sh"
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib-e2e-env.sh"
 
 # Source the test helpers (pass/fail/section/finish) for consistent output.
 . "$(dirname "$0")/lib.sh"

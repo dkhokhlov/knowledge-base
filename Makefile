@@ -100,7 +100,7 @@ test: ci ## Run the python unit tests only (no stack needed). Integration + e2e 
 test-unit: ci ## Run only the python unit tests (no stack needed).
 	@$(PYTEST) -m unit -v
 
-test-e2e: ci ## Run the quick isolated e2e tests (self-isolate a throwaway stack via scripts/e2e-env.sh; NOT the live stack). GPU/RAM: a 2nd stack on the shared Ollama.
+test-e2e: ci ## Run the quick isolated e2e tests (self-isolate a throwaway stack via scripts/lib-e2e-env.sh; NOT the live stack). GPU/RAM: a 2nd stack on the shared Ollama.
 	@$(PYTEST) -m "e2e and not long" -v
 
 test-e2e-long: ci ## Run the long isolated e2e (test_08 agent-surface + test-e2e-iso at-scale). Self-isolate; GPU/RAM heavy; runs many minutes.
@@ -111,11 +111,11 @@ test-output: ci ## Unit-test CLI JSON output schemas (no stack needed)
 test-e2e-iso: ## Isolated e2e: clone to a datetime-stamped gitignored .test-e2e/<stamp>/ + run the destructive e2e (clean-state wipe + re-provision + rclone + full suite + test_09 drain) under a separate compose project (kb-e2e-<stamp>) so the LIVE stack keeps running. The destructive logic is inlined; there is NO in-place `make test-e2e` (it would wipe the live stack). REAL rclone (re-downloads the corpus). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On success docker is stopped but the clone is KEPT (proliferation -- may hold commits); flush with `make clean-tests`. On failure the stack + clone are left; run `make clean-test STAMP=<stamp>`.
 	@./scripts/test-e2e-iso.sh
 
-clean-test: ## Tear down ONE isolated e2e run + remove its clone. NAME=<name> (default e2e) + optional STAMP=<stamp> (latest stamp under .test-<name>/ if unset). Safe anytime (no-op if absent). Delegates to scripts/e2e-env.sh (shared with make test-e2e-iso + tests/test_*_e2e.sh).
-	@bash -c '. scripts/e2e-env.sh; e2e_down "$${NAME:-e2e}" "$${STAMP:-}"'
+clean-test: ## Tear down ONE isolated e2e run + remove its clone. NAME=<name> (default e2e) + optional STAMP=<stamp> (latest stamp under .test-<name>/ if unset). Safe anytime (no-op if absent). Delegates to scripts/lib-e2e-env.sh (shared with make test-e2e-iso + tests/test_*_e2e.sh).
+	@bash -c '. scripts/lib-e2e-env.sh; e2e_down "$${NAME:-e2e}" "$${STAMP:-}"'
 
-clean-tests: ## Manual hygiene flush: remove EVERY .test-*/<stamp>/ clone + legacy un-stamped clones + stranded stamped e2e docker. Prints each clone's HEAD + unmerged commits before removing (a warning, not a hard refuse). NAME=<name> flushes only .test-<name>/. Run periodically -- stamped clones accumulate per e2e run (no autoclean). Delegates to scripts/e2e-env.sh.
-	@bash -c '. scripts/e2e-env.sh; e2e_clean_tests "$${NAME:-}"'
+clean-tests: ## Manual hygiene flush: remove EVERY .test-*/<stamp>/ clone + legacy un-stamped clones + stranded stamped e2e docker. Prints each clone's HEAD + unmerged commits before removing (a warning, not a hard refuse). NAME=<name> flushes only .test-<name>/. Run periodically -- stamped clones accumulate per e2e run (no autoclean). Delegates to scripts/lib-e2e-env.sh.
+	@bash -c '. scripts/lib-e2e-env.sh; e2e_clean_tests "$${NAME:-}"'
 
 api-keys: ## Provision the admin API key into .env.local (run after `make start` + admin signup)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
