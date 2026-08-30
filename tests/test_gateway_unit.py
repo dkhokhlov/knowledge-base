@@ -18,14 +18,10 @@ from unittest import mock
 
 GATEWAY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway")
 sys.path.insert(0, os.path.abspath(GATEWAY))
-# Native pytest collection imports every test module in ONE process. Another
-# test module (test_output_json.py) imports a DIFFERENT module also named `owui`
-# (skills/claude/scripts/owui.py). If that one was imported first,
-# sys.modules["owui"] holds it, and our `import app` (gateway/app.py, which
-# itself does `import owui`) would bind the wrong module. Evict any cached
-# `owui` so app + this module re-resolve to gateway/owui.py. The other module's
-# already-bound references are unaffected (module globals bind once, at import).
-sys.modules.pop("owui", None)
+# No sys.modules["owui"] clash to evict: the skill's wrapper used to be named
+# `owui` (skills/claude/scripts/owui.py) and collided with gateway/owui.py under
+# pytest's single-process collection. The skill module is now `kb`, so
+# gateway/owui.py binds unambiguously here.
 import app  # noqa: E402  (gateway/app.py)
 import owui  # noqa: E402  (gateway/owui.py)
 

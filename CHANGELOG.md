@@ -12,6 +12,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Consolidated the `/kb` skill's two wrappers into one self-contained
+  `skills/claude/scripts/kb.py`.** Merged `owui.py` (OWUI KBs + projects memory)
+  + `kb_gateway.py` (Graphiti facts) into a single zero-dependency CLI. Verb
+  collisions (`retrieve`, `whoami`) are resolved by a `memory` subcommand group
+  for facts (`kb memory <verb>`), mirroring the `/memory/*` URL namespace; OWUI
+  verbs stay top-level. One shared `call()` / `jget()` (the latter via a
+  `strict` flag that preserves both files' response contracts). Renaming the
+  skill module `owui` → `kb` also eliminates the `sys.modules["owui"]` clash
+  with `gateway/owui.py` (the test files drop the eviction dance; the gateway
+  module is untouched). Tests: `test_output_json.py` + `test_gateway_unit.py`
+  rewired to `kb`; new `test_kb_dispatch.py` covers OWUI + `memory` argparse
+  dispatch; `test_08_e2e.sh` drives `kb.py memory …` end-to-end.
 - Removed the `rag` subcommand from the `/kb` skill (`skills/claude/scripts/owui.py`
   + all four `skills/*/SKILL.md` copies). KB queries now use `retrieve` only (raw
   chunks via the gateway `POST /retrieve`; the agent synthesizes the answer). The

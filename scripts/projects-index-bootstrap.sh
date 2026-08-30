@@ -3,7 +3,7 @@
 #
 # The api-gateway has NO user-key OWUI-KB write path (its /index uses the admin
 # key internally). Projects memory is indexed by the skill-side wrapper
-# (skills/claude/scripts/owui.py index-projects), which calls OWUI REST
+# (skills/claude/scripts/kb.py index-projects), which calls OWUI REST
 # directly with the caller's USER key so each project KB is owned by the caller
 # (KB.user.email == account; search filters by KB owner). OWUI gates KB
 # creation on the workspace.knowledge permission, which is FALSE by default in

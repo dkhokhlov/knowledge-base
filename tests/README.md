@@ -115,18 +115,14 @@ A test passes iff it exits 0. Add the marker on the test, in-file.
    free port.
 3. Run it: `python3 -m pytest -m <marker>` or the matching make target.
 
-## The `owui` name clash (why two UTs evict `sys.modules["owui"]`)
+## Module names (no `owui` clash)
 
-Two modules are both named `owui`: `gateway/owui.py` (has `upload_file`) and
-`skills/claude/scripts/owui.py` (does not). `gateway/app.py` does `import owui`
-(transitive), and `test_output_json.py` does `import owui` (direct). Native
-pytest collection imports every test module in ONE process, so
-`sys.modules["owui"]` can hold only one. `test_gateway_unit.py` and
-`test_output_json.py` each `sys.modules.pop("owui", None)` before their imports,
-so each chain re-resolves to its own `owui`. The other chain's already-bound
-references are unaffected — a module global binds once, at import time, and is
-not re-resolved. (Renaming a source `owui` would also fix it but touches the
-deployed skill; the eviction is surgical and stays in the test files.)
+The skill wrapper is one self-contained module, `skills/claude/scripts/kb.py`
+(was two: `owui.py` + `kb_gateway.py`). The gateway's `gateway/owui.py` is a
+separate file copied into the gateway image. With the skill module renamed
+`owui` → `kb`, the two no longer share a module name, so no
+`sys.modules["owui"]` eviction is needed and the test files no longer do the
+`sys.modules.pop("owui", None)` dance. `gateway/owui.py` binds unambiguously.
 
 ## Prerequisites
 

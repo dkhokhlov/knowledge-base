@@ -1,6 +1,6 @@
 ---
 name: kb
-description: Use when the user wants to query a self-hosted Open WebUI knowledge base (KB) over REST, index/search/retrieve Claude projects memory (~/.claude/projects/*/memory), or remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "index projects memory", "search projects memory"/"retrieve projects memory", "projects/repo index status", "remember …", "what do we know about …", and "forget …". One URL (KB_HOST) fronts OWUI REST (/api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side for facts memory). Zero-dependency Python CLI wrappers: scripts/owui.py (OWUI KBs + projects memory), scripts/kb_gateway.py (Graphiti facts).
+description: Use when the user wants to query a self-hosted Open WebUI knowledge base (KB) over REST, index/search/retrieve Claude projects memory (~/.claude/projects/*/memory), or remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "index projects memory", "search projects memory"/"retrieve projects memory", "projects/repo index status", "remember …", "what do we know about …", and "forget …". One URL (KB_HOST) fronts OWUI REST (/api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side for facts memory). Zero-dependency Python CLI wrapper: scripts/kb.py (OWUI KBs + projects memory at the top level; Graphiti facts under the `memory` subcommand).
 ---
 
 # KB + memory (agent / api-gateway)
@@ -94,23 +94,23 @@ documented elsewhere: `GET /openapi.json` (JSON; no auth) and `/api/docs`
 (interactive Swagger). Use an admin-role Open WebUI key for those — keep it
 private; do not hand it to agents.
 
-## Using the wrapper (`scripts/owui.py`)
+## Using the wrapper (`scripts/kb.py`)
 
-Zero-dependency (Python 3.10+ stdlib). Set `S` to its path in your installed
-skill (default `~/.claude/skills/kb/scripts/owui.py`).
+Zero-dependency (Python 3.10+ stdlib). Set `KB` to its path in your installed
+skill (default `~/.claude/skills/kb/scripts/kb.py`).
 
 ```
-S=~/.claude/skills/kb/scripts/owui.py
+KB=~/.claude/skills/kb/scripts/kb.py
 export KB_HOST=http://localhost:3000   # your stack URL (required)
 export KB_API_KEY=...                  # your Open WebUI user key (required; make users-create)
 
-python3 "$S" whoami                    # verify key + role
-python3 "$S" kbs                       # list KBs visible to this key
-python3 "$S" kb <kb-id>                 # one KB's metadata
-python3 "$S" search-kbs "main"         # find a KB by name
-python3 "$S" retrieve <kb-name-or-id> "XSL streaming"   # raw chunks, you synthesize (default; --mode hybrid|lexical|vector)
-python3 "$S" file <file-id>             # file's extracted text content (full doc)
-python3 "$S" file <file-id> --raw       # original bytes instead of extracted text (binary saved to /tmp)
+python3 "$KB" whoami                    # verify key + role
+python3 "$KB" kbs                       # list KBs visible to this key
+python3 "$KB" kb <kb-id>                 # one KB's metadata
+python3 "$KB" search-kbs "main"         # find a KB by name
+python3 "$KB" retrieve <kb-name-or-id> "XSL streaming"   # raw chunks, you synthesize (default; --mode hybrid|lexical|vector)
+python3 "$KB" file <file-id>             # file's extracted text content (full doc)
+python3 "$KB" file <file-id> --raw       # original bytes instead of extracted text (binary saved to /tmp)
 ```
 
 Typical flow: `kbs` → `retrieve <kb-name>` (resolves name→id; fails loudly on
@@ -161,15 +161,15 @@ delete-then-uploaded (router `DELETE` cleans the old vectors); and orphans
 ## Wrapper subcommands (projects memory)
 
 ```
-S=~/.claude/skills/kb/scripts/owui.py   # KB_HOST + KB_API_KEY already exported
+KB=~/.claude/skills/kb/scripts/kb.py   # KB_HOST + KB_API_KEY already exported
 
-python3 "$S" index-projects --dry-run                 # plan only; JSON {projects,total}
-python3 "$S" index-projects --project myrepo --wait   # index a repo, then wait for drain
-python3 "$S" index-projects --root ~/.claude/projects # override the projects root
-python3 "$S" status-projects                          # current repo's drain status (walks up cwd)
-python3 "$S" status-projects --wait                   # poll until pending+processing == 0
-python3 "$S" retrieve-projects "QPU scheduling"        # across ALL your project KBs
-python3 "$S" retrieve-projects "memory" --host <host> --project myrepo  # filtered
+python3 "$KB" index-projects --dry-run                 # plan only; JSON {projects,total}
+python3 "$KB" index-projects --project myrepo --wait   # index a repo, then wait for drain
+python3 "$KB" index-projects --root ~/.claude/projects # override the projects root
+python3 "$KB" status-projects                          # current repo's drain status (walks up cwd)
+python3 "$KB" status-projects --wait                   # poll until pending+processing == 0
+python3 "$KB" retrieve-projects "QPU scheduling"        # across ALL your project KBs
+python3 "$KB" retrieve-projects "memory" --host <host> --project myrepo  # filtered
 ```
 
 `index-projects`: `--dry-run`, `--project <name>` (select; overrides cwd
@@ -226,23 +226,24 @@ own identity). Authorization is server-side.
   rejected (fail-closed).
 - **`status` is global** (Graphiti server + DB health); no group scoping.
 
-## Using the wrapper (`scripts/kb_gateway.py`)
+## Using the wrapper (`scripts/kb.py`, `memory` subcommand)
 
-Zero-dependency (Python 3.10+ stdlib). Set `G` to its path in your installed
-skill (default `~/.claude/skills/kb/scripts/kb_gateway.py`).
+Zero-dependency (Python 3.10+ stdlib). Set `KB` to its path in your installed
+skill (default `~/.claude/skills/kb/scripts/kb.py`). Facts verbs live under the
+`memory` subcommand.
 
 ```
-G=~/.claude/skills/kb/scripts/kb_gateway.py   # KB_HOST + KB_API_KEY already exported
+KB=~/.claude/skills/kb/scripts/kb.py   # KB_HOST + KB_API_KEY already exported
 
-python3 "$G" whoami                              # verify identity (from the key, via the gateway)
-python3 "$G" groups                              # list all groups that have data
-python3 "$G" add "Project Atlas uses a QPU scheduler" --name atlas
-python3 "$G" retrieve "QPU scheduling" --k 5      # facts across ALL groups (read-only; --k default 10)
-python3 "$G" episodes --max 20                   # episodes across ALL groups (read-only; --max default 10)
-python3 "$G" status                              # graphiti server + DB status
-python3 "$G" forget user:<your-email>            # clear YOUR group's memory (owner/admin)
-python3 "$G" delete-edge <uuid>                  # delete one edge (owner/admin of its group)
-python3 "$G" delete-episode <uuid>               # delete one episode (owner/admin of its group)
+python3 "$KB" memory whoami                              # verify identity (from the key, via the gateway)
+python3 "$KB" memory groups                              # list all groups that have data
+python3 "$KB" memory add "Project Atlas uses a QPU scheduler" --name atlas
+python3 "$KB" memory retrieve "QPU scheduling" --k 5      # facts across ALL groups (read-only; --k default 10)
+python3 "$KB" memory episodes --max 20                   # episodes across ALL groups (read-only; --max default 10)
+python3 "$KB" memory status                              # graphiti server + DB status
+python3 "$KB" memory forget user:<your-email>            # clear YOUR group's memory (owner/admin)
+python3 "$KB" memory delete-edge <uuid>                  # delete one edge (owner/admin of its group)
+python3 "$KB" memory delete-episode <uuid>               # delete one episode (owner/admin of its group)
 ```
 
 **`add` is asynchronous:** Graphiti extracts entity edges in a background

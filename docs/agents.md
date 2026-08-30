@@ -39,15 +39,15 @@ The repo ships the `kb` skill in `skills/<tool>/` (one per agent tool):
 with `scripts/` symlinked to `../claude/scripts`. The wrappers are zero-dependency
 Python 3.10+ stdlib:
 
-- `scripts/owui.py` — Open WebUI REST: KB surface (read-scoped) `whoami`, `kbs`,
-  `retrieve`, `file`; **projects memory** (user-key writes to owned KBs)
-  `index-projects`, `retrieve-projects`, `status-projects` — **Claude Code skill copy
-  only**; the shared `owui.py` keeps the subcommands, but the codex/opencode/pi
-  `SKILL.md` copies do not document them.
-- `scripts/kb_gateway.py` — api-gateway: facts memory (`whoami`, `groups`, `add`,
+- `scripts/kb.py` — one self-contained CLI. **Top level:** Open WebUI REST KB
+  surface (read-scoped) `whoami`, `kbs`, `retrieve`, `file`; **projects memory**
+  (user-key writes to owned KBs) `index-projects`, `retrieve-projects`,
+  `status-projects` — **Claude Code skill copy only**; the shared `kb.py` keeps the
+  subcommands, but the codex/opencode/pi `SKILL.md` copies do not document them.
+  **`memory` subcommand:** api-gateway facts memory (`whoami`, `groups`, `add`,
   `retrieve`, `episodes`, `status`, `forget`, `delete-edge`, `delete-episode`).
 
-Both read ONLY `KB_HOST` + `KB_API_KEY` from the shell environment — no
+It reads ONLY `KB_HOST` + `KB_API_KEY` from the shell environment — no
 `.env` / `.env.local` files, no `--env-file`, no other env vars. Set both in
 your shell before invoking them (`export KB_HOST=...` / `export KB_API_KEY=...`).
 
@@ -106,28 +106,28 @@ Export `KB_HOST` + `KB_API_KEY` once (the wrappers read only those two):
 ```
 export KB_HOST=http://localhost:3000            # or your KB_HOST
 export KB_API_KEY=...                           # your own user key (make users-create; ~/.api_keys)
-S=~/.claude/skills/kb/scripts                   # your tool's installed skill dir
+KB=~/.claude/skills/kb/scripts/kb.py          # your tool's installed wrapper
 ```
 
 ### Verify identity
 
 ```
-python3 "$S/owui.py" whoami    # OWUI: email + role
-python3 "$S/kb_gateway.py" whoami    # api-gateway: email + role + id (derived from the key)
+python3 "$KB" whoami              # OWUI: email + role
+python3 "$KB" memory whoami       # api-gateway: email + role + id (derived from the key)
 ```
 
 ### Open WebUI KBs (read-scoped)
 
 ```
-python3 "$S/owui.py" kbs                          # list visible KBs
-python3 "$S/owui.py" search-kbs "main"            # find a KB by name
-python3 "$S/owui.py" retrieve <kb-id> "XSL streaming"   # raw chunks (you synthesize)
+python3 "$KB" kbs                          # list visible KBs
+python3 "$KB" search-kbs "main"            # find a KB by name
+python3 "$KB" retrieve <kb-id> "XSL streaming"   # raw chunks (you synthesize)
 ```
 
-### Projects memory (owui.py, user key) — Claude Code skill only
+### Projects memory (kb.py, user key) — Claude Code skill only
 
 Available only in the Claude Code skill copy (`skills/claude/SKILL.md`); the
-codex/opencode/pi copies do not expose projects memory. The shared `owui.py`
+codex/opencode/pi copies do not expose projects memory. The shared `kb.py`
 keeps the subcommands.
 
 **Projects memory** = Claude's per-project auto-memory
@@ -148,11 +148,11 @@ are easy to reason about (`retrieve-projects` returns compact JSON
 `{"kbs":N,"hits":[{"repo","kb_name","file","text"}],"errors":[...]}`).
 
 ```
-python3 "$S/owui.py" index-projects --dry-run                  # plan only
-python3 "$S/owui.py" index-projects --project knowledgebase --wait   # index this repo, wait for drain
-python3 "$S/owui.py" status-projects                           # current repo's drain status (walks up cwd)
-python3 "$S/owui.py" retrieve-projects "QPU scheduling"          # across ALL your project KBs
-python3 "$S/owui.py" retrieve-projects "X" --host <host> --project knowledgebase   # filtered
+python3 "$KB" index-projects --dry-run                  # plan only
+python3 "$KB" index-projects --project knowledgebase --wait   # index this repo, wait for drain
+python3 "$KB" status-projects                           # current repo's drain status (walks up cwd)
+python3 "$KB" retrieve-projects "QPU scheduling"          # across ALL your project KBs
+python3 "$KB" retrieve-projects "X" --host <host> --project knowledgebase   # filtered
 ```
 
 **Workflow**: run `index-projects` at session start (so this session's memory is
@@ -166,13 +166,13 @@ file is delete-then-uploaded so no stale vectors; orphans are deleted).
 ### Facts memory (Graphiti, api-gateway)
 
 ```
-python3 "$S/kb_gateway.py" groups                              # list all groups that have data
-python3 "$S/kb_gateway.py" add "Project Atlas uses a QPU scheduler" --name atlas
-python3 "$S/kb_gateway.py" retrieve "QPU scheduling" --k 5        # facts across ALL groups (read-only)
-python3 "$S/kb_gateway.py" episodes --max 20                    # episodes across ALL groups (read-only)
-python3 "$S/kb_gateway.py" status                               # graphiti server + DB status
-python3 "$S/kb_gateway.py" forget user:<me>                     # clear YOUR group (owner/admin)
-python3 "$S/kb_gateway.py" delete-edge <uuid>                   # delete one edge (owner/admin)
+python3 "$KB" memory groups                              # list all groups that have data
+python3 "$KB" memory add "Project Atlas uses a QPU scheduler" --name atlas
+python3 "$KB" memory retrieve "QPU scheduling" --k 5        # facts across ALL groups (read-only)
+python3 "$KB" memory episodes --max 20                    # episodes across ALL groups (read-only)
+python3 "$KB" memory status                               # graphiti server + DB status
+python3 "$KB" memory forget user:<me>                     # clear YOUR group (owner/admin)
+python3 "$KB" memory delete-edge <uuid>                   # delete one edge (owner/admin)
 ```
 
 Model: writes go to your own personal group (logical `user:<email>`, stored by

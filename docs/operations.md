@@ -118,7 +118,7 @@ Two sourcing models apply to different callers:
   runs). `KB_HOST` is **mandatory** (shell-provided, persisted into `.env` by
   `make bootstrap`); `KB_HOST_PORT` is **derived from `KB_HOST`**'s port by
   `make bootstrap` (override only for the tunnel case).
-- **The `/kb` skill** (`skills/claude/scripts/{kb_gateway,owui}.py`): a thin
+- **The `/kb` skill** (`skills/claude/scripts/kb.py`): a thin
   client that reads ONLY `KB_HOST` + `KB_API_KEY` from the shell env. It does
   NOT source `.env` / `.env.local`, so it runs on any host that can reach
   `KB_HOST`. Set both in the shell before invoking it.
@@ -476,7 +476,7 @@ sessions. This is distinct from **facts memory** (the Graphiti knowledge graph,
 explicitly.
 
 Unlike the gdrive KB (api-gateway `/index`, admin key, admin-owned KB), projects
-memory is indexed by the **skill-side wrapper** (`skills/claude/scripts/owui.py`
+memory is indexed by the **skill-side wrapper** (`skills/claude/scripts/kb.py`
 `index-projects`): it walks the host filesystem and calls OWUI REST **directly
 with the caller's user key**, which creates + owns each project KB
 (`KB.user.email == caller`). The api-gateway is not involved (it has no user-key
@@ -560,7 +560,7 @@ dependency is down.
 | Agent chat returns `Model not found` | non-admin user lacks read access on the chat model | `make api-keys` (grants `*` read on `OPENWEBUI_MODEL` to non-admin users) |
 | api-gateway returns `503 identity service unavailable` | Open WebUI unreachable from the gateway (identity resolution fails closed) | check `make health`, the `openwebui` container, and `owui_net`; the gateway cannot authorize without OWUI |
 | api-gateway `/admin/users` returns `501` | deployed OWUI image lacks the provisioning endpoints | check `OPENWEBUI_IMAGE_TAG`; gateway startup log prints `provisioning=missing ...` listing the absent paths |
-| api-gateway returns `401` | bad or missing `KB_API_KEY` | verify the key: `kb_gateway.py ... whoami`; confirm `KB_API_KEY` is set in the shell env (the CLI reads only `KB_API_KEY`, no fallback) |
+| api-gateway returns `401` | bad or missing `KB_API_KEY` | verify the key: `kb.py ... memory whoami`; confirm `KB_API_KEY` is set in the shell env (the CLI reads only `KB_API_KEY`, no fallback) |
 | `add --group G` returns `403` | only your own personal group is writable (no shared write groups) | omit `--group` to write to `user:<email>`; reads are how knowledge is shared |
 | `add` returns `200` but the fact never appears in `retrieve` | extraction failed or is still running — `add` is async (202) and each episode runs several LLM calls; a fact is searchable in ~9 s warm (~30 s cold, model load) | poll `/memory/retrieve` for the probe token for up to ~5 min; check `docker logs kb-graphiti` — the LLM must hit `OLLAMA_HOST/v1/chat/completions` (not `/v1/responses`, not `api.openai.com`); if it hits `api.openai.com` → `OPENAI_BASE_URL` is wrong; if `/v1/responses` → the bootstrap injection is missing/broken |
 | `add` returns `200`, episode is stored, but no fact ever appears; `docker logs kb-graphiti` shows `Expecting value: line 1 column 1 (char 0)` | `OLLAMA_MODEL_BASE` is a **reasoning model** (one with a thinking chain): its thinking exhausts the token budget, `content` is empty (`finish_reason=length`), and `json.loads('')` fails | set `OLLAMA_MODEL_BASE` to a **non-reasoning** model (`qwen2.5:14b`), `make pull-models && make restart`, re-add. Ollama `/v1/chat/completions` ignores `think=false`, so you cannot suppress reasoning that way |

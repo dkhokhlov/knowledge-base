@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Isolated e2e for the api-gateway Graphiti agent surface: drives
-# skills/claude/scripts/kb_gateway.py through every gateway endpoint the agent
+# skills/claude/scripts/kb.py (memory subcommand) through every gateway endpoint the agent
 # surface exposes (whoami, status, groups, add, retrieve, episodes, delete-edge,
 # delete-episode, forget) against a THROWAWAY stack (separate compose project,
 # NOT the live kb-* stack).
@@ -92,7 +92,7 @@ load_env
 require_env KB_API_KEY || { finish; exit 1; }
 
 # --- 2. agent-surface body (verbatim from the non-isolated original) --------
-# Drives skills/claude/scripts/kb_gateway.py through every gateway endpoint the
+# Drives skills/claude/scripts/kb.py (memory subcommand) through every gateway endpoint the
 # agent surface exposes:
 #   whoami, status, groups, add, retrieve, episodes, delete-edge,
 #   delete-episode, forget
@@ -106,33 +106,33 @@ KB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shell env (no --env-file / --key / --base-url flags). load_env exports both
 # from the clone .env.local; inline `env` overrides only KB_HOST per invocation
 # (KB_API_KEY is inherited). KB = user key. KB_ROOT resolves to the CLONE root
-# here (cwd is the clone after e2e_isolate), so the clone's kb_gateway.py is the
+# here (cwd is the clone after e2e_isolate), so the clone's kb.py is the
 # code under test -- NOT the live repo's copy (clean-tree guard guarantees they
 # are at the same commit, but the clone is the code being verified).
-KB="env KB_HOST=${G} python3 ${KB_ROOT}/skills/claude/scripts/kb_gateway.py"
+KB="env KB_HOST=${G} python3 ${KB_ROOT}/skills/claude/scripts/kb.py"
 
 # kbrun <cmd...>: print stdout; record a failure (and return 1) if the cmd
 # exits non-zero. Does not exit the script (lib.sh uses pass/fail/finish).
 kbrun() {
   local out rc
   out=$("$@" 2>/tmp/t08_err); rc=$?
-  if [ "$rc" != 0 ]; then fail "kb_gateway failed ($(cat /tmp/t08_err 2>/dev/null))"; return 1; fi
+  if [ "$rc" != 0 ]; then fail "kb memory failed ($(cat /tmp/t08_err 2>/dev/null))"; return 1; fi
   printf '%s' "$out"
 }
 
 section "agent identity + status"
-WHO=$(kbrun $KB whoami) || { finish; exit 1; }
+WHO=$(kbrun $KB memory whoami) || { finish; exit 1; }
 AGENT_EMAIL=$(printf '%s' "$WHO" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("email") or "")')
 AGENT_GROUP="user:${AGENT_EMAIL}"
 [ -n "$AGENT_EMAIL" ] && pass "agent whoami -> ${AGENT_EMAIL}" || fail "agent whoami empty"
-STAT=$(kbrun $KB status) || true
+STAT=$(kbrun $KB memory status) || true
 printf '%s' "$STAT" | grep -q '"healthy"' && pass "agent status -> healthy" || fail "agent status not healthy"
 
 section "agent add (probe) -> own group"
 # Clean slate: forget the agent's own group first so any data left by an
 # earlier test (test_06 shares this agent identity) is gone before we add.
 # forget (DELETE /group/<id>) is synchronous, so this completes before add.
-kbrun $KB forget "$AGENT_GROUP" >/dev/null 2>&1 || true
+kbrun $KB memory forget "$AGENT_GROUP" >/dev/null 2>&1 || true
 TS=$(date +%s)
 # The probe embeds a 6-digit RID as a descriptive quantity, but the test does
 # NOT rely on the number surviving extraction: at temperature=0 ggml batching
@@ -143,7 +143,7 @@ TS=$(date +%s)
 # $TS (10-digit) makes the episode name (e2e-${TS}) run-unique for delete-episode.
 RID=$(( TS % 900000 + 100000 ))
 PROBE="E2E comprehensive probe: the cryostat on lattice-D holds exactly ${RID} cells at 15 millikelvin for calibration."
-ADDOUT=$(kbrun $KB add "$PROBE" --name "e2e-${TS}") || true
+ADDOUT=$(kbrun $KB memory add "$PROBE" --name "e2e-${TS}") || true
 AGENT_GROUP_ID=$(printf '%s' "$ADDOUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("group") or "")')
 [ -n "$AGENT_GROUP_ID" ] && pass "agent add -> ${AGENT_GROUP_ID}" || fail "agent add failed"
 
@@ -156,7 +156,7 @@ section "fact extracted (searchable after async extraction)"
 # first cryostat fact to appear IS this add's.
 fact_found=0
 for i in $(seq 1 42); do
-  if kbrun $KB retrieve "cryostat lattice-D" --k 5 2>/dev/null | grep -qE "cryostat|lattice-D"; then fact_found=1; break; fi
+  if kbrun $KB memory retrieve "cryostat lattice-D" --k 5 2>/dev/null | grep -qE "cryostat|lattice-D"; then fact_found=1; break; fi
   sleep 10
 done
 if [ "$fact_found" = "1" ]; then pass "fact extracted (cryostat in /memory/retrieve)"; else fail "no fact in 420s (cryostat not searchable)"; fi
@@ -166,27 +166,27 @@ section "delete-edge (fact uuid) + delete-episode"
 # group was emptied above, so this is this add's fact). Gating on fact_found
 # avoids f[0] being an unrelated fact when the probe is absent. The run-id
 # number is NOT used (extraction sometimes drops it).
-FACT_UUID=$(kbrun $KB retrieve "cryostat lattice-D" --k 5 2>/dev/null | python3 -c 'import sys,json; f=json.load(sys.stdin).get("facts") or []; print(next((x["uuid"] for x in f if "cryostat" in json.dumps(x).lower()), ""))' 2>/dev/null)
-EP_UUID=$(kbrun $KB episodes --max 20 2>/dev/null | python3 -c 'import sys,json; eps=json.load(sys.stdin).get("episodes") or []; print(next((e["uuid"] for e in eps if str(e.get("name","")).startswith("e2e-")), eps[0]["uuid"] if eps else ""))' 2>/dev/null)
+FACT_UUID=$(kbrun $KB memory retrieve "cryostat lattice-D" --k 5 2>/dev/null | python3 -c 'import sys,json; f=json.load(sys.stdin).get("facts") or []; print(next((x["uuid"] for x in f if "cryostat" in json.dumps(x).lower()), ""))' 2>/dev/null)
+EP_UUID=$(kbrun $KB memory episodes --max 20 2>/dev/null | python3 -c 'import sys,json; eps=json.load(sys.stdin).get("episodes") or []; print(next((e["uuid"] for e in eps if str(e.get("name","")).startswith("e2e-")), eps[0]["uuid"] if eps else ""))' 2>/dev/null)
 if [ "$fact_found" = "1" ] && [ -n "$FACT_UUID" ]; then
-  DELOUT=$(kbrun $KB delete-edge "$FACT_UUID") || true
+  DELOUT=$(kbrun $KB memory delete-edge "$FACT_UUID") || true
   printf '%s' "$DELOUT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("uuid") else 1)' && pass "delete-edge ${FACT_UUID}" || fail "delete-edge failed"
   # verify the edge is gone from retrieve
-  kbrun $KB retrieve "$RID" --k 5 2>/dev/null | grep -q "$FACT_UUID" \
+  kbrun $KB memory retrieve "$RID" --k 5 2>/dev/null | grep -q "$FACT_UUID" \
     && fail "delete-edge: ${FACT_UUID} still in retrieve" \
     || pass "delete-edge verified gone"
 else
   fail "no probe fact uuid to delete-edge (fact_found=${fact_found})"
 fi
 if [ -n "$EP_UUID" ]; then
-  DELOUT=$(kbrun $KB delete-episode "$EP_UUID") || true
+  DELOUT=$(kbrun $KB memory delete-episode "$EP_UUID") || true
   printf '%s' "$DELOUT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("uuid") else 1)' && pass "delete-episode ${EP_UUID}" || fail "delete-episode failed"
 else
   fail "no episode uuid to delete-episode"
 fi
 
 section "forget own group -> agent group gone"
-FORGOT=$(kbrun $KB forget "$AGENT_GROUP") || true
+FORGOT=$(kbrun $KB memory forget "$AGENT_GROUP") || true
 printf '%s' "$FORGOT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("group") else 1)' && pass "agent forget ${AGENT_GROUP}" || fail "agent forget failed"
 # Assert the agent's OWN group is gone from the read-all list. Do NOT assert
 # global emptiness: other groups (admin, other tests) may have data. add_episode
@@ -195,8 +195,8 @@ printf '%s' "$FORGOT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(
 # out (the worker stops once extraction completes).
 gone=0
 for i in $(seq 1 12); do
-  if ! kbrun $KB groups 2>/dev/null | grep -q "${AGENT_GROUP_ID}"; then gone=1; break; fi
-  kbrun $KB forget "$AGENT_GROUP" >/dev/null 2>&1 || true
+  if ! kbrun $KB memory groups 2>/dev/null | grep -q "${AGENT_GROUP_ID}"; then gone=1; break; fi
+  kbrun $KB memory forget "$AGENT_GROUP" >/dev/null 2>&1 || true
   sleep 5
 done
 [ "$gone" = "1" ] && pass "agent group ${AGENT_GROUP_ID} gone from /memory/groups" \

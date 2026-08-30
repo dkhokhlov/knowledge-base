@@ -52,7 +52,7 @@ Sub-documents:
 ```
   ┌───────────┐       ┌────────────────────────┐
   │ User      │       │ Agent  (any host)      │
-  │ (browser) │       │ kb_gateway.py / owui.py│
+  │ (browser) │       │ kb.py                  │
   │           │       │ KB_HOST + KB_API_KEY   │
   └──────┬────┘       └────────────┬───────────┘
          └─────────┬───────────────┘
@@ -89,7 +89,7 @@ Sub-documents:
 ```
 
 - A user with a browser and an agent both reach the stack through **one** URL, **`KB_HOST`** (mandatory, shell-provided — `export KB_HOST=http://<host>:3000`): [Caddy][caddy] fronts [Open WebUI][open-webui] at the root and the **API Gateway** under `/memory/*`, `POST /admin/users`, and `/health`. One port, one var for agents (mirrors `OLLAMA_HOST`).
-- An agent holds only `KB_API_KEY` + `KB_HOST` (no Graphiti token, no repo files) — it works on any host. Its CLI (`kb_gateway.py` / `owui.py`) is a thin client that reads ONLY those two env vars (no `.env` files) and hits `KB_HOST`: OWUI REST at `/api/*` (KBs, retrieve, files, projects memory), API Gateway at `/memory/*` (facts memory; `/memory/rag` is direct/operator-only).
+- An agent holds only `KB_API_KEY` + `KB_HOST` (no Graphiti token, no repo files) — it works on any host. Its CLI (`kb.py`) is a thin client that reads ONLY those two env vars (no `.env` files) and hits `KB_HOST`: OWUI REST at `/api/*` (KBs, retrieve, files, projects memory), API Gateway at `/memory/*` (facts memory; `/memory/rag` is direct/operator-only).
 - **API Gateway** is the sole bridge to the graph. It resolves the caller's identity + role from `KB_API_KEY` via Open WebUI (tamper-proof), enforces ownership-bounded writes + owner/admin destructive gating, discovers all existing groups live from [Neo4j][neo4j], calls the internal [Graphiti][graphiti] REST server, and provisions new KB users for admins.
 - **Graphiti client injection.** The `ghcr.io/dkhokhlov/graphiti-rest` server defaults to `OpenAIClient` (OpenAI Responses API), which [Ollama][ollama] cannot satisfy — entity/fact extraction silently stores nothing. `graphiti/bootstrap.py` is mounted into the container and run as the command; it overrides the FastAPI dependency to inject the stock `OpenAIGenericClient` (graphiti_core >= 0.29 defaults to **`json_schema` structured outputs**, which Ollama enforces server-side; set at `temperature=0`) + `OpenAIEmbedder` (`nomic-embed-text`, 768-dim), so extraction works with Ollama. There is no config switch for this; the injection is required. See `graphiti/bootstrap.py`.
 - **Network split**: `graph_internal` (`neo4j` + `graphiti` + `api-gateway`), `edge` (`caddy` + `api-gateway`), `owui_net` (`caddy` + `api-gateway` + `openwebui`). The `graphiti` and `neo4j` services are **internal-only** — no host ports, reachable only through the API Gateway. Open WebUI is internal-only too (fronted by Caddy).
@@ -177,7 +177,7 @@ Two sourcing models:
   repo root). `KB_HOST` is mandatory (shell-provided, persisted into
   `.env` by `make bootstrap`); `KB_HOST_PORT` is derived from `KB_HOST`'s
   port by `make bootstrap` (override only for the tunnel case).
-- **The `/kb` skill** (`kb_gateway.py` / `owui.py`): a thin client that reads
+- **The `/kb` skill** (`kb.py`): a thin client that reads
   ONLY `KB_HOST` + `KB_API_KEY` from the shell env (no `.env` / `.env.local`
   sourcing) so it runs on any host.
 - **Make-time tunables** (`make <target> VAR=val`) override the file: the script

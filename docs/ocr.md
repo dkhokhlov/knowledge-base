@@ -52,7 +52,7 @@ matches the input type and returns a JSON list of `{page_content, metadata}`:
 | DOCX / text / csv / json / html | (none) | `{}` — one document |
 
 OWUI `filter_metadata` keeps `page` (+ `sheet`), so a hit carries `file_id` +
-`page` → the exact original page / slide / sheet. Round-trip: `owui.py file
+`page` → the exact original page / slide / sheet. Round-trip: `kb.py file
 <file_id>` saves the file; `pdftoppm -f <page>` renders the page.
 
 > **PPTX upstream bug:** the PPTX converter emits **literal `\n`** (two chars),

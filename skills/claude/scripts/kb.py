@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
-"""CLI wrapper for a self-hosted Open WebUI knowledge base.
+"""CLI wrapper for a self-hosted knowledge base (OWUI KBs + Graphiti facts).
 
-Two surfaces, one key (your non-admin user key, KB_API_KEY):
+One key (KB_API_KEY, an Open WebUI key), one URL (KB_HOST). Two surfaces:
 
-  * KB surface (read-scoped): list/search KBs, retrieve (semantic) from a KB,
-    read file content. The key is read-only here: it
-    cannot upload, modify, or delete KBs/files it does not own.
+  * KB + projects-memory surface (top-level verbs): list/search KBs, retrieve
+    (semantic) from a KB, read file content, and index/retrieve/status the
+    Claude projects memory (~/.claude/projects/<encoded>/memory/*.md, one KB
+    per project). The KB surface is read-scoped; the projects-memory surface
+    writes to OWNED KBs (the user key creates + owns each project KB; run
+    `make projects-bootstrap` once to enable KB creation before the first
+    index-projects).
 
-  * Projects-memory surface (user-key writes to OWNED KBs): index
-    ~/.claude/projects/<encoded>/memory/*.md into OWUI KBs (one KB per project),
-    retrieve across those KBs, and check a repo's index status. The user key
-    CREATES + OWNS each project KB (KB.user.email == caller) and uploads/deletes
-    files in it. OWUI gates KB creation on the workspace.knowledge permission,
-    which is off by default: run `make projects-bootstrap` once (admin) to enable
-    it before the first `index-projects`.
+  * Facts memory surface (the `memory` subcommand): remember/retrieve/forget
+    Graphiti facts via the api-gateway /memory/* endpoints. Authorization is
+    done server-side (identity + role are derived from the key by the gateway;
+    the CLI cannot influence them).
 
 The stack is fronted by Caddy at KB_HOST: OWUI REST is at the KB_HOST root
-(/api/* via Caddy catch-all -> openwebui:8080). The api-gateway memory endpoints are
-at /memory/* on the same KB_HOST. One URL, one key.
+(/api/* via Caddy catch-all -> openwebui:8080); the api-gateway memory endpoints
+are at /memory/* on the same KB_HOST. One URL, one key.
 
-Zero dependencies (Python 3.10+ stdlib). Config: the wrapper is a thin client.
-It reads ONLY two env vars from the shell environment — KB_HOST and KB_API_KEY.
-It does not read .env / .env.local files (set both in your shell before invoking
-it). The projects-memory --wait deadline is 600s (fixed).
+Zero dependencies (Python 3.10+ stdlib). The wrapper is a thin client. It reads
+ONLY two env vars from the shell environment — KB_HOST and KB_API_KEY. It does
+not read .env / .env.local files (set both in your shell before invoking it).
+The projects-memory --wait deadline is 600s (fixed).
 
 Env vars: KB_HOST, KB_API_KEY.
 """
@@ -55,8 +56,10 @@ def api_key():
     sys.exit("FAIL  no API key: set KB_API_KEY in your shell env")
 
 
-def call(base, key, method, path, body=None):
+def call(base, key, method, path, body=None, query=None):
     url = base + path
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Authorization": "Bearer " + key}
     if body is not None:
@@ -64,20 +67,41 @@ def call(base, key, method, path, body=None):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req) as r:
-            txt = r.read().decode()
-            return r.status, txt
+            return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
+        return e.code, (e.read().decode() or "")
+    except urllib.error.URLError as e:
+        sys.exit("FAIL  gateway unreachable: %s (is KB_HOST correct? "
+                 "is the stack up?)" % e)
 
 
-def jget(base, key, method, path, body=None):
-    code, txt = call(base, key, method, path, body)
+def jget(base, key, method, path, body=None, query=None, strict=True):
+    """Call the endpoint; exit non-zero on non-200; return parsed JSON on 200.
+
+    `strict` reconciles the two original contracts this file merged:
+      * strict=True  (OWUI KB verbs): a 200 must be valid JSON (empty/non-JSON
+        200 is an error); a non-200 prints the RAW response body.
+      * strict=False (facts `memory` verbs): an empty/non-JSON 200 returns None
+        (lenient); a non-200 extracts data["error"] when present, else the body.
+    """
+    code, txt = call(base, key, method, path, body, query)
+    data = None
+    parsed = False
+    if txt:
+        try:
+            data = json.loads(txt)
+            parsed = True
+        except Exception:
+            pass
     if code != 200:
-        sys.exit("FAIL  %s %s -> HTTP %s: %s" % (method, path, code, txt[:300]))
-    try:
-        return json.loads(txt)
-    except Exception:
+        if strict:
+            msg = txt[:300]
+        else:
+            msg = (data.get("error") if isinstance(data, dict) else None) or txt[:300]
+        sys.exit("FAIL  %s %s -> HTTP %s: %s" % (method, path, code, msg))
+    if strict and not parsed:
         sys.exit("FAIL  non-JSON response from %s %s: %s" % (method, path, txt[:300]))
+    return data
 
 
 def _file_gdrive(base, key, file_id):
@@ -119,7 +143,7 @@ def _gdrive_view(g):
     }
 
 
-# --- subcommands -------------------------------------------------------------
+# --- OWUI KB + projects-memory subcommands -----------------------------------
 
 def cmd_whoami(base, key, a):
     d = jget(base, key, "GET", "/api/v1/auths/")
@@ -743,13 +767,88 @@ def cmd_status_projects(base, key, a):
                       "failed_files": st["failed_files"]}))
 
 
+# --- facts memory subcommands (api-gateway /memory/*) ------------------------
+# Authorization is server-side: the gateway derives identity + role from
+# KB_API_KEY. The CLI holds only KB_API_KEY + KB_HOST. Each verb uses the
+# lenient jget contract (strict=False): an empty/non-JSON 200 returns None,
+# a non-200 extracts data["error"] when present.
+
+def cmd_mem_whoami(base, key, a):
+    d = jget(base, key, "GET", "/memory/whoami", strict=False)
+    print(json.dumps({"email": d.get("email"), "role": d.get("role"),
+                      "id": d.get("id")}))
+
+
+def cmd_mem_groups(base, key, a):
+    d = jget(base, key, "GET", "/memory/groups", strict=False)
+    print(json.dumps({"groups": d.get("groups", [])}))
+
+
+def cmd_mem_add(base, key, a):
+    body = {"text": a.text, "name": a.name}
+    if a.group:
+        body["group"] = a.group
+    if a.source_description:
+        body["source_description"] = a.source_description
+    d = jget(base, key, "POST", "/memory/add", body, strict=False)
+    print(json.dumps(d))
+
+
+def cmd_mem_retrieve(base, key, a):
+    d = jget(base, key, "POST", "/memory/retrieve", {"query": a.query, "k": a.k}, strict=False)
+    print(json.dumps({"facts": d.get("facts", [])}))
+
+
+def cmd_mem_episodes(base, key, a):
+    d = jget(base, key, "GET", "/memory/episodes", query={"max": a.max}, strict=False)
+    print(json.dumps({"episodes": d.get("episodes", [])}))
+
+
+def cmd_mem_status(base, key, a):
+    d = jget(base, key, "GET", "/memory/status", strict=False)
+    print(json.dumps({"status": d.get("status")}))
+
+
+def cmd_mem_forget(base, key, a):
+    d = jget(base, key, "POST", "/memory/forget", {"group": a.group}, strict=False)
+    print(json.dumps(d))
+
+
+def cmd_mem_delete_edge(base, key, a):
+    d = jget(base, key, "POST", "/memory/delete-edge", {"uuid": a.uuid}, strict=False)
+    print(json.dumps(d))
+
+
+def cmd_mem_delete_episode(base, key, a):
+    d = jget(base, key, "POST", "/memory/delete-episode", {"uuid": a.uuid}, strict=False)
+    print(json.dumps(d))
+
+
+OWUI_DISPATCH = {
+    "whoami": cmd_whoami, "kbs": cmd_kbs, "kb": cmd_kb, "search-kbs": cmd_search_kbs,
+    "retrieve": cmd_retrieve, "file": cmd_file,
+    "index-projects": cmd_index_projects, "retrieve-projects": cmd_retrieve_projects,
+    "status-projects": cmd_status_projects,
+}
+
+MEM_DISPATCH = {
+    "whoami": cmd_mem_whoami, "groups": cmd_mem_groups, "add": cmd_mem_add,
+    "retrieve": cmd_mem_retrieve, "episodes": cmd_mem_episodes, "status": cmd_mem_status,
+    "forget": cmd_mem_forget, "delete-edge": cmd_mem_delete_edge,
+    "delete-episode": cmd_mem_delete_episode,
+}
+
+
 def main():
     p = argparse.ArgumentParser(
-        prog="owui.py",
-        description="Read-scoped Open WebUI REST wrapper (non-admin user key).",
+        prog="kb.py",
+        description="Self-hosted knowledge base CLI. OWUI KBs + projects memory "
+                    "are top-level verbs; Graphiti facts memory is the `memory` "
+                    "subcommand. One key (KB_API_KEY), one URL (KB_HOST).",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    # --- OWUI KB + projects-memory surface ---
     sub.add_parser("whoami", help="print the key's email + role")
     sub.add_parser("kbs", help="list knowledge bases visible to this key")
     sp = sub.add_parser("kb", help="print one knowledge base metadata"); sp.add_argument("id")
@@ -796,16 +895,43 @@ def main():
     sp.add_argument("--host", default=None, help="host segment (default $HOSTNAME short)")
     sp.add_argument("--wait", action="store_true", help="poll until pending+processing == 0")
 
+    # --- Graphiti facts memory surface (gateway /memory/*) ---
+    mem = sub.add_parser("memory", help="Graphiti facts memory (api-gateway /memory/*)")
+    memsub = mem.add_subparsers(dest="mem_cmd", required=True)
+
+    memsub.add_parser("whoami", help="print the key's email + role (identity from the gateway)")
+    memsub.add_parser("groups", help="list all groups that currently have data (read-all)")
+
+    sp = memsub.add_parser("add", help="add a memory to YOUR personal group (user:<email>)")
+    sp.add_argument("text"); sp.add_argument("--name", default="kb-memory")
+    sp.add_argument("--group", help="only your own personal group_id is accepted; any other group -> 403 (no shared write groups). Default: your personal user:<email>.")
+    sp.add_argument("--source-description", help="optional source description")
+
+    sp = memsub.add_parser("retrieve", help="retrieve facts across ALL groups (read-only)")
+    sp.add_argument("query"); sp.add_argument("--k", type=int, default=10)
+
+    sp = memsub.add_parser("episodes", help="list episodes across ALL groups (read-only)")
+    sp.add_argument("--max", type=int, default=10)
+
+    memsub.add_parser("status", help="graphiti server + DB status (read-only, global)")
+
+    sp = memsub.add_parser("forget", help="clear a group's memory (owner or admin only)")
+    sp.add_argument("group")
+
+    sp = memsub.add_parser("delete-edge", help="delete one entity edge by uuid (owner/admin)")
+    sp.add_argument("uuid")
+    sp = memsub.add_parser("delete-episode", help="delete one episode by uuid (owner/admin)")
+    sp.add_argument("uuid")
+
     a = p.parse_args()
     base = base_url()
     key = api_key()
 
-    {
-        "whoami": cmd_whoami, "kbs": cmd_kbs, "kb": cmd_kb, "search-kbs": cmd_search_kbs,
-        "retrieve": cmd_retrieve, "file": cmd_file,
-        "index-projects": cmd_index_projects, "retrieve-projects": cmd_retrieve_projects,
-        "status-projects": cmd_status_projects,
-    }[a.cmd](base, key, a)
+    if a.cmd == "memory":
+        fn = MEM_DISPATCH[a.mem_cmd]
+    else:
+        fn = OWUI_DISPATCH[a.cmd]
+    fn(base, key, a)
 
 
 if __name__ == "__main__":

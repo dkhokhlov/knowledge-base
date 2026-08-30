@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Unit tests for the agentic-first JSON output of the /kb skill scripts.
 
-Covers every report/status/retrieve subcommand of skills/claude/scripts/{owui.py,
-kb_gateway.py}: asserts the success path prints valid JSON with the expected
+Covers every report/status/retrieve subcommand of skills/claude/scripts/kb.py
+(the OWUI KB+projects verbs and the `memory` facts verbs): asserts the success
+path prints valid JSON with the expected
 top-level schema, and (for the agent-facing scripts) that the JSON is COMPACT
 (single line, no indent — whitespace costs an agent tokens). `file` defaults
 to the EXTRACTED text (GET /files/{id}/data/content) and
 has a `--raw` escape hatch (GET /files/{id}/content, original bytes). No stack
 required: the HTTP layer is monkeypatched (unittest.mock), and cmd_file's
-owui.call + direct urllib.request.urlopen calls are patched too.
+kb.call + direct urllib.request.urlopen calls are patched too.
 
 Run:  python3 tests/test_output_json.py -v   (or: make test-output)
 """
@@ -24,15 +25,10 @@ from unittest import mock
 SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                        "skills", "claude", "scripts")
 sys.path.insert(0, os.path.abspath(SCRIPTS))
-# Native pytest collection imports every test module in ONE process.
-# test_gateway_unit.py imports a DIFFERENT module also named `owui`
-# (gateway/owui.py). If that one was imported first, sys.modules["owui"] holds
-# it, and our `import owui` below would bind the wrong module. Evict any cached
-# `owui` so this module re-resolves to skills/claude/scripts/owui.py. The other
-# module's already-bound references are unaffected (module globals bind once).
-sys.modules.pop("owui", None)
-import kb_gateway  # noqa: E402
-import owui  # noqa: E402
+# The skill wrapper is ONE module, kb.py (a merge of the former kb.py +
+# kb.py). It is no longer named `owui`, so there is no clash with
+# gateway/kb.py and no sys.modules eviction is needed.
+import kb  # noqa: E402
 
 BASE = "http://testhost"
 KEY = "testkey"
@@ -71,69 +67,135 @@ class _Assertions(unittest.TestCase):
                       % stripped[:200])
 
 
-class KbGatewayTests(_Assertions):
-    # Every kb_gateway cmd_* calls jget(); patch kb_gateway.jget with canned JSON.
+class JgetContractTests(_Assertions):
+    # The merged kb.jget carries a `strict` flag that reconciles the two
+    # original contracts (OWUI strict vs gateway lenient). These mock kb.call
+    # and exercise the REAL jget logic (the verb tests above patch jget out).
+    # Guards the codex-reviewed blocker: a context-free jget cannot preserve
+    # both contracts; the strict flag must.
+
+    def _jget(self, code, txt, strict):
+        with mock.patch.object(kb, "call", return_value=(code, txt)):
+            return kb.jget(BASE, KEY, "GET", "/x", strict=strict)
+
+    def _exit_msg(self, code, txt, strict):
+        with mock.patch.object(kb, "call", return_value=(code, txt)):
+            with self.assertRaises(SystemExit) as cm:
+                kb.jget(BASE, KEY, "GET", "/x", strict=strict)
+        return cm.exception.args[0] if cm.exception.args else ""
+
+    # --- strict=True (OWUI KB verbs) ---
+    def test_strict_200_json_returns_parsed(self):
+        self.assertEqual(self._jget(200, '{"a": 1}', True), {"a": 1})
+
+    def test_strict_200_empty_exits(self):
+        msg = self._exit_msg(200, "", True)
+        self.assertIn("non-JSON", msg)
+
+    def test_strict_200_non_json_exits(self):
+        msg = self._exit_msg(200, "not-json", True)
+        self.assertIn("non-JSON", msg)
+        self.assertIn("not-json", msg)
+
+    def test_strict_200_null_returns_none(self):
+        # JSON null parses (valid JSON); strict only rejects non-JSON.
+        self.assertIsNone(self._jget(200, "null", True))
+
+    def test_strict_non200_raw_body(self):
+        # strict prints the RAW body, NOT data["error"].
+        msg = self._exit_msg(403, '{"error": "denied", "detail": "x"}', True)
+        self.assertIn("403", msg)
+        self.assertIn('"error"', msg)   # raw JSON body, not the extracted word
+        self.assertIn("denied", msg)
+
+    # --- strict=False (facts `memory` verbs) ---
+    def test_lenient_200_json_returns_parsed(self):
+        self.assertEqual(self._jget(200, '{"a": 1}', False), {"a": 1})
+
+    def test_lenient_200_empty_returns_none(self):
+        self.assertIsNone(self._jget(200, "", False))
+
+    def test_lenient_200_non_json_returns_none(self):
+        self.assertIsNone(self._jget(200, "not-json", False))
+
+    def test_lenient_200_null_returns_none(self):
+        self.assertIsNone(self._jget(200, "null", False))
+
+    def test_lenient_non200_extracts_error(self):
+        # lenient extracts data["error"] when present, else the raw body.
+        msg = self._exit_msg(403, '{"error": "denied", "detail": "x"}', False)
+        self.assertIn("403", msg)
+        self.assertIn("denied", msg)
+        self.assertNotIn("detail", msg)   # .error extracted, not the raw body
+
+    def test_lenient_non200_empty_body(self):
+        msg = self._exit_msg(500, "", False)
+        self.assertIn("500", msg)
+
+
+class MemoryTests(_Assertions):
+    # Every memory cmd_mem_* calls jget(); patch kb.jget with canned JSON.
 
     def test_whoami(self):
         ns = mock.Mock(spec=[])
-        out = _run([(kb_gateway, "jget", {"email": "a@b", "role": "user", "id": "u1"})],
-                   kb_gateway.cmd_whoami, ns)
+        out = _run([(kb, "jget", {"email": "a@b", "role": "user", "id": "u1"})],
+                   kb.cmd_mem_whoami, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(set(d), {"email", "role", "id"})
 
     def test_groups(self):
         ns = mock.Mock(spec=[])
-        out = _run([(kb_gateway, "jget", {"groups": ["g1", "g2"]})],
-                   kb_gateway.cmd_groups, ns)
+        out = _run([(kb, "jget", {"groups": ["g1", "g2"]})],
+                   kb.cmd_mem_groups, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d, {"groups": ["g1", "g2"]})
 
     def test_add(self):
         ns = mock.Mock(text="t", name="n", group=None, source_description=None)
-        out = _run([(kb_gateway, "jget", {"group": "user:a@b", "ok": True})],
-                   kb_gateway.cmd_add, ns)
+        out = _run([(kb, "jget", {"group": "user:a@b", "ok": True})],
+                   kb.cmd_mem_add, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["group"], "user:a@b")
 
     def test_retrieve(self):
         ns = mock.Mock(query="q", k=5)
-        out = _run([(kb_gateway, "jget", {"facts": [{"uuid": "f1"}]})],
-                   kb_gateway.cmd_retrieve, ns)
+        out = _run([(kb, "jget", {"facts": [{"uuid": "f1"}]})],
+                   kb.cmd_mem_retrieve, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d, {"facts": [{"uuid": "f1"}]})
 
     def test_episodes(self):
         ns = mock.Mock(max=10)
-        out = _run([(kb_gateway, "jget", {"episodes": [{"uuid": "e1"}]})],
-                   kb_gateway.cmd_episodes, ns)
+        out = _run([(kb, "jget", {"episodes": [{"uuid": "e1"}]})],
+                   kb.cmd_mem_episodes, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d, {"episodes": [{"uuid": "e1"}]})
 
     def test_status(self):
         ns = mock.Mock(spec=[])
-        out = _run([(kb_gateway, "jget", {"status": {"neo4j": "healthy"}})],
-                   kb_gateway.cmd_status, ns)
+        out = _run([(kb, "jget", {"status": {"neo4j": "healthy"}})],
+                   kb.cmd_mem_status, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d, {"status": {"neo4j": "healthy"}})
 
     def test_forget(self):
         ns = mock.Mock(group="user:a@b")
-        out = _run([(kb_gateway, "jget", {"group": "user:a@b"})],
-                   kb_gateway.cmd_forget, ns)
+        out = _run([(kb, "jget", {"group": "user:a@b"})],
+                   kb.cmd_mem_forget, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["group"], "user:a@b")
 
     def test_delete_edge(self):
         ns = mock.Mock(uuid="u1")
-        out = _run([(kb_gateway, "jget", {"uuid": "u1", "group": "g"})],
-                   kb_gateway.cmd_delete_edge, ns)
+        out = _run([(kb, "jget", {"uuid": "u1", "group": "g"})],
+                   kb.cmd_mem_delete_edge, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["uuid"], "u1")
 
     def test_delete_episode(self):
         ns = mock.Mock(uuid="e1")
-        out = _run([(kb_gateway, "jget", {"uuid": "e1", "group": "g"})],
-                   kb_gateway.cmd_delete_episode, ns)
+        out = _run([(kb, "jget", {"uuid": "e1", "group": "g"})],
+                   kb.cmd_mem_delete_episode, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["uuid"], "e1")
 
@@ -141,8 +203,8 @@ class KbGatewayTests(_Assertions):
 class OwuiTests(_Assertions):
     def test_whoami(self):
         ns = mock.Mock(spec=[])
-        out = _run([(owui, "jget", {"email": "a@b", "role": "user"})],
-                   owui.cmd_whoami, ns)
+        out = _run([(kb, "jget", {"email": "a@b", "role": "user"})],
+                   kb.cmd_whoami, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(set(d), {"email", "role"})
 
@@ -150,14 +212,14 @@ class OwuiTests(_Assertions):
         items = [{"id": "k1", "name": "KB1", "file_count": 3, "write_access": True,
                   "user": {"email": "o@x"}}]
         ns = mock.Mock(spec=[])
-        out = _run([(owui, "jget", {"items": items})], owui.cmd_kbs, ns)
+        out = _run([(kb, "jget", {"items": items})], kb.cmd_kbs, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["kbs"], [{"id": "k1", "name": "KB1", "file_count": 3,
                                      "write_access": True, "owner": "o@x"}])
 
     def test_kbs_empty(self):
         ns = mock.Mock(spec=[])
-        out = _run([(owui, "jget", {"items": []})], owui.cmd_kbs, ns)
+        out = _run([(kb, "jget", {"items": []})], kb.cmd_kbs, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d, {"kbs": []})  # JSON empty form, not prose
 
@@ -168,7 +230,7 @@ class OwuiTests(_Assertions):
             {"id": "k1", "name": "KB1", "user": None},
             {"items": [{"id": "k1", "user": {"email": "o@x"}}]},
         ])
-        out = _run([(owui, "jget", jget)], owui.cmd_kb, ns)
+        out = _run([(kb, "jget", jget)], kb.cmd_kb, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["id"], "k1")
         self.assertEqual(d["user"]["email"], "o@x")
@@ -176,7 +238,7 @@ class OwuiTests(_Assertions):
     def test_search_kbs(self):
         items = [{"id": "k1", "name": "KB1"}, {"id": "k2", "name": "KB2"}]
         ns = mock.Mock(query="kb")
-        out = _run([(owui, "jget", {"items": items})], owui.cmd_search_kbs, ns)
+        out = _run([(kb, "jget", {"items": items})], kb.cmd_search_kbs, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d, {"kbs": [{"id": "k1", "name": "KB1"},
                                      {"id": "k2", "name": "KB2"}]})
@@ -207,9 +269,9 @@ class OwuiTests(_Assertions):
         # _resolve_kb supplies provenance (kb_id, kb_name); jget serves the
         # /retrieve response; _file_gdrive serves the per-file gdrive meta.
         jget = mock.Mock(return_value=resp)
-        out = _run([(owui, "_resolve_kb", ("k1", "KB1")),
-                   (owui, "jget", jget),
-                   (owui, "_file_gdrive", gdrive)], owui.cmd_retrieve, ns)
+        out = _run([(kb, "_resolve_kb", ("k1", "KB1")),
+                   (kb, "jget", jget),
+                   (kb, "_file_gdrive", gdrive)], kb.cmd_retrieve, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(set(d), {"kb_id", "kb_name", "mode", "score_order", "hits"})
         self.assertEqual(d["kb_id"], "k1")
@@ -253,8 +315,8 @@ class OwuiTests(_Assertions):
             ns = mock.Mock(kb="k1", query="q", k=4, mode=mode_arg,
                            no_hybrid=no_hybrid)
             jget = mock.Mock(return_value={"hits": [], "score_order": "desc"})
-            out = _run([(owui, "_resolve_kb", ("k1", "KB1")),
-                       (owui, "jget", jget)], owui.cmd_retrieve, ns)
+            out = _run([(kb, "_resolve_kb", ("k1", "KB1")),
+                       (kb, "jget", jget)], kb.cmd_retrieve, ns)
             d = self.assert_json(out)
             self.assertEqual(d["mode"], expect, (mode_arg, no_hybrid))
             body = jget.call_args.args[4]
@@ -266,7 +328,7 @@ class OwuiTests(_Assertions):
         # --mode hybrid/lexical (exit) but is redundant-but-accepted with
         # --mode vector. A bare --no-hybrid emits a deprecation line to stderr.
         def _m(mode, no_hybrid):
-            return owui._mode(mock.Mock(mode=mode, no_hybrid=no_hybrid))
+            return kb._mode(mock.Mock(mode=mode, no_hybrid=no_hybrid))
 
         self.assertEqual(_m(None, False), "hybrid")   # bare default
         self.assertEqual(_m("hybrid", False), "hybrid")
@@ -280,7 +342,7 @@ class OwuiTests(_Assertions):
         # bare --no-hybrid -> vector + stderr deprecation
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            self.assertEqual(owui._mode(mock.Mock(mode=None, no_hybrid=True)),
+            self.assertEqual(kb._mode(mock.Mock(mode=None, no_hybrid=True)),
                              "vector")
         self.assertIn("deprecation", buf.getvalue())
 
@@ -291,26 +353,26 @@ class OwuiTests(_Assertions):
         # wrong KB.
         items = [{"id": "k1", "name": "KB1"}, {"id": "k2", "name": "KB2"}]
         def _r(arg):
-            with mock.patch.object(owui, "jget", return_value={"items": items}):
-                return owui._resolve_kb(BASE, KEY, arg)
+            with mock.patch.object(kb, "jget", return_value={"items": items}):
+                return kb._resolve_kb(BASE, KEY, arg)
         self.assertEqual(_r("k1"), ("k1", "KB1"))   # exact id
         self.assertEqual(_r("KB2"), ("k2", "KB2"))  # exact name
-        with mock.patch.object(owui, "jget", return_value={"items": items}):
+        with mock.patch.object(kb, "jget", return_value={"items": items}):
             with self.assertRaises(SystemExit):    # valid UUID, unknown -> fail
-                owui._resolve_kb(BASE, KEY, "00000000-0000-0000-0000-000000000000")
+                kb._resolve_kb(BASE, KEY, "00000000-0000-0000-0000-000000000000")
             with self.assertRaises(SystemExit):    # no match -> fail
-                owui._resolve_kb(BASE, KEY, "no-such-kb")
+                kb._resolve_kb(BASE, KEY, "no-such-kb")
 
     def test_file_default_returns_extracted_text(self):
         # Default: GET /files/{id}/data/content -> the EXTRACTED text OWUI stored
         # at index time (file.data['content']). Bypasses urlopen entirely; one
-        # owui.call, no raw-bytes fetch. Asserts the URL + a trailing newline.
+        # kb.call, no raw-bytes fetch. Asserts the URL + a trailing newline.
         ns = mock.Mock(id="f1", raw=False)
         call = mock.Mock(return_value=(200, json.dumps({"content": "hello world text"})))
         urlopen = mock.Mock(
             side_effect=AssertionError("urlopen must not be called without --raw"))
-        out = _run([(owui, "call", call), (owui.urllib.request, "urlopen", urlopen)],
-                   owui.cmd_file, ns)
+        out = _run([(kb, "call", call), (kb.urllib.request, "urlopen", urlopen)],
+                   kb.cmd_file, ns)
         self.assertEqual(out, "hello world text\n")  # trailing newline added
         self.assertEqual(call.call_args.args[:4],
                          (BASE, KEY, "GET", "/api/v1/files/f1/data/content"))
@@ -333,8 +395,8 @@ class OwuiTests(_Assertions):
         urlopen = mock.Mock(side_effect=_urlopen)
         call = mock.Mock(side_effect=AssertionError("call() must not be called with --raw"))
         ns = mock.Mock(id="f1", raw=True)
-        out = _run([(owui, "call", call), (owui.urllib.request, "urlopen", urlopen)],
-                   owui.cmd_file, ns)
+        out = _run([(kb, "call", call), (kb.urllib.request, "urlopen", urlopen)],
+                   kb.cmd_file, ns)
         self.assertEqual(out, "plain text body\n")
         req = captured["req"]
         self.assertEqual(req.get_method(), "GET")
@@ -360,10 +422,10 @@ class OwuiTests(_Assertions):
         ns = mock.Mock(id="f1", raw=False)
         buf, err = io.StringIO(), io.StringIO()
         stack = contextlib.ExitStack()
-        stack.enter_context(mock.patch.object(owui, "call", new=call))
-        stack.enter_context(mock.patch.object(owui.urllib.request, "urlopen", new=urlopen))
+        stack.enter_context(mock.patch.object(kb, "call", new=call))
+        stack.enter_context(mock.patch.object(kb.urllib.request, "urlopen", new=urlopen))
         with stack, contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
-            ret = owui.cmd_file(BASE, KEY, ns)
+            ret = kb.cmd_file(BASE, KEY, ns)
         self.assertIsNone(ret)                 # no SystemExit (exit 0)
         self.assertEqual(buf.getvalue(), "")  # nothing on stdout
         note = err.getvalue()
@@ -389,10 +451,10 @@ class OwuiTests(_Assertions):
         ns = mock.Mock(id="f9", raw=False)
         buf, err = io.StringIO(), io.StringIO()
         stack = contextlib.ExitStack()
-        stack.enter_context(mock.patch.object(owui, "call", new=call))
-        stack.enter_context(mock.patch.object(owui.urllib.request, "urlopen", new=urlopen))
+        stack.enter_context(mock.patch.object(kb, "call", new=call))
+        stack.enter_context(mock.patch.object(kb.urllib.request, "urlopen", new=urlopen))
         with stack, contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
-            ret = owui.cmd_file(BASE, KEY, ns)
+            ret = kb.cmd_file(BASE, KEY, ns)
         self.assertIsNone(ret)  # exit 0, not a SystemExit
         note = err.getvalue()
         self.assertIn("image/png", note)
@@ -403,7 +465,7 @@ class OwuiTests(_Assertions):
             self.assertEqual(f.read(), raw)  # exact raw bytes saved
         os.unlink(path)
 
-    # --- projects-memory surface (owui._whoami / _kb_files / _kb_status / ...) ---
+    # --- projects-memory surface (kb._whoami / _kb_files / _kb_status / ...) ---
 
     def _proj_tree(self):
         root = tempfile.mkdtemp(prefix="kb-ut-")
@@ -420,14 +482,14 @@ class OwuiTests(_Assertions):
                        dry_run=False, wait=False, no_cleanup=False)
         upload = mock.Mock(return_value=({"id": "fid"}, None))
         patches = [
-            (owui, "_whoami", {"email": "a@b"}),
-            (owui, "jget", {"items": []}),                # no existing KB
-            (owui, "call", (200, '{"id": "newid"}')),      # create KB
-            (owui, "_kb_files", []),
-            (owui, "_upload_memory_file", upload),
-            (owui, "_delete_file", (True, None)),
+            (kb, "_whoami", {"email": "a@b"}),
+            (kb, "jget", {"items": []}),                # no existing KB
+            (kb, "call", (200, '{"id": "newid"}')),      # create KB
+            (kb, "_kb_files", []),
+            (kb, "_upload_memory_file", upload),
+            (kb, "_delete_file", (True, None)),
         ]
-        out = _run(patches, owui.cmd_index_projects, ns)
+        out = _run(patches, kb.cmd_index_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["total"]["added"], 1)
         self.assertEqual(d["projects"][0]["created"], "created")
@@ -440,12 +502,12 @@ class OwuiTests(_Assertions):
         ns = mock.Mock(host="testhost", root=root, project=None,
                        dry_run=True, wait=False, no_cleanup=False)
         patches = [
-            (owui, "_whoami", {"email": "a@b"}),
-            (owui, "jget", {"items": []}),
-            (owui, "call", (200, '{"id": "newid"}')),
-            (owui, "_kb_files", []),
+            (kb, "_whoami", {"email": "a@b"}),
+            (kb, "jget", {"items": []}),
+            (kb, "call", (200, '{"id": "newid"}')),
+            (kb, "_kb_files", []),
         ]
-        out = _run(patches, owui.cmd_index_projects, ns)
+        out = _run(patches, kb.cmd_index_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["projects"][0]["created"], "would-create")
         self.assertEqual(d["projects"][0]["added"], 1)
@@ -456,12 +518,12 @@ class OwuiTests(_Assertions):
         ns = mock.Mock(host="testhost", root=root, project=None,
                        dry_run=False, wait=False, no_cleanup=False)
         patches = [
-            (owui, "_whoami", {"email": "a@b"}),
-            (owui, "jget", {"items": []}),
-            (owui, "call", (500, '{"error": "boom"}')),   # create fails
-            (owui, "_kb_files", []),
+            (kb, "_whoami", {"email": "a@b"}),
+            (kb, "jget", {"items": []}),
+            (kb, "call", (500, '{"error": "boom"}')),   # create fails
+            (kb, "_kb_files", []),
         ]
-        out = _run(patches, owui.cmd_index_projects, ns)
+        out = _run(patches, kb.cmd_index_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["total"]["failed"], 1)
         self.assertEqual(d["projects"][0]["created"], "failed")
@@ -471,8 +533,8 @@ class OwuiTests(_Assertions):
         root = tempfile.mkdtemp(prefix="kb-ut-")
         ns = mock.Mock(host="testhost", root=root, project=None,
                        dry_run=False, wait=False, no_cleanup=False)
-        out = _run([(owui, "_whoami", {"email": "a@b"})],
-                   owui.cmd_index_projects, ns)
+        out = _run([(kb, "_whoami", {"email": "a@b"})],
+                   kb.cmd_index_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d, {"projects": [],
                              "total": {"added": 0, "modified": 0, "reused": 0,
@@ -486,16 +548,16 @@ class OwuiTests(_Assertions):
         drained = {"completed": 1, "pending": 0, "processing": 0,
                    "failed": 0, "failed_files": []}
         patches = [
-            (owui, "_whoami", {"email": "a@b"}),
-            (owui, "jget", {"items": []}),
-            (owui, "call", (200, '{"id": "newid"}')),
-            (owui, "_kb_files", []),
-            (owui, "_upload_memory_file", ({"id": "fid"}, None)),
-            (owui, "_delete_file", (True, None)),
-            (owui, "_kb_status", drained),
+            (kb, "_whoami", {"email": "a@b"}),
+            (kb, "jget", {"items": []}),
+            (kb, "call", (200, '{"id": "newid"}')),
+            (kb, "_kb_files", []),
+            (kb, "_upload_memory_file", ({"id": "fid"}, None)),
+            (kb, "_delete_file", (True, None)),
+            (kb, "_kb_status", drained),
         ]
-        with mock.patch.object(owui.time, "sleep"):  # no real sleeping
-            out = _run(patches, owui.cmd_index_projects, ns)
+        with mock.patch.object(kb.time, "sleep"):  # no real sleeping
+            out = _run(patches, kb.cmd_index_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(len(d["waited"]), 1)
         self.assertEqual(d["waited"][0]["completed"], 1)
@@ -507,11 +569,11 @@ class OwuiTests(_Assertions):
         items = [{"id": "k1", "name": "testhost--p", "user": {"email": "a@b"},
                   "description": "repo=r"}]
         patches = [
-            (owui, "_whoami", {"email": "a@b"}),
-            (owui, "jget", {"items": items}),
-            (owui, "_search_one_kb", (hits, "desc", None)),
+            (kb, "_whoami", {"email": "a@b"}),
+            (kb, "jget", {"items": items}),
+            (kb, "_search_one_kb", (hits, "desc", None)),
         ]
-        out = _run(patches, owui.cmd_retrieve_projects, ns)
+        out = _run(patches, kb.cmd_retrieve_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["kbs"], 1)
         self.assertEqual(d["score_order"], "desc")
@@ -522,9 +584,9 @@ class OwuiTests(_Assertions):
     def test_retrieve_projects_empty(self):
         ns = mock.Mock(query="q", host=None, project=None, account=None,
                        kb_glob=None, k=4, mode=None, no_hybrid=False)
-        patches = [(owui, "_whoami", {"email": "a@b"}),
-                   (owui, "jget", {"items": []})]
-        out = _run(patches, owui.cmd_retrieve_projects, ns)
+        patches = [(kb, "_whoami", {"email": "a@b"}),
+                   (kb, "jget", {"items": []})]
+        out = _run(patches, kb.cmd_retrieve_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d, {"kbs": 0, "score_order": "asc",
                              "hits": [], "errors": []})
@@ -550,10 +612,10 @@ class OwuiTests(_Assertions):
             self._order = order
             ns = mock.Mock(query="q", host=None, project=None, account=None,
                            kb_glob=None, k=10, mode=None, no_hybrid=False)
-            patches = [(owui, "_whoami", {"email": "a@b"}),
-                       (owui, "jget", {"items": items}),
-                       (owui, "_search_one_kb", mock.Mock(side_effect=_search))]
-            return _run(patches, owui.cmd_retrieve_projects, ns)
+            patches = [(kb, "_whoami", {"email": "a@b"}),
+                       (kb, "jget", {"items": items}),
+                       (kb, "_search_one_kb", mock.Mock(side_effect=_search))]
+            return _run(patches, kb.cmd_retrieve_projects, ns)
 
         # desc: highest distance first (RRF score, higher=better)
         d = self.assert_json(_run_proj("desc"))
@@ -571,10 +633,10 @@ class OwuiTests(_Assertions):
         drained = {"completed": 2, "pending": 0, "processing": 0,
                    "failed": 0, "failed_files": []}
         items = [{"id": "k1", "name": "testhost--p", "user": {"email": "a@b"}}]
-        patches = [(owui, "_whoami", {"email": "a@b"}),
-                   (owui, "jget", {"items": items}),
-                   (owui, "_kb_status", drained)]
-        out = _run(patches, owui.cmd_status_projects, ns)
+        patches = [(kb, "_whoami", {"email": "a@b"}),
+                   (kb, "jget", {"items": items}),
+                   (kb, "_kb_status", drained)]
+        out = _run(patches, kb.cmd_status_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["kb_id"], "k1")
         self.assertEqual(d["completed"], 2)
@@ -582,14 +644,14 @@ class OwuiTests(_Assertions):
 
     def test_status_projects_not_found_exits(self):
         ns = mock.Mock(project="nope", host=None, wait=False)
-        patches = [(owui, "_whoami", {"email": "a@b"}),
-                   (owui, "jget", {"items": []})]
+        patches = [(kb, "_whoami", {"email": "a@b"}),
+                   (kb, "jget", {"items": []})]
         buf = io.StringIO()
         stack = contextlib.ExitStack()
         for mod, name, val in patches:
             stack.enter_context(mock.patch.object(mod, name, return_value=val))
         with stack, contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
-            owui.cmd_status_projects(BASE, KEY, ns)
+            kb.cmd_status_projects(BASE, KEY, ns)
         d = json.loads(buf.getvalue())  # the error object is valid JSON
         self.assertIn("error", d)
 

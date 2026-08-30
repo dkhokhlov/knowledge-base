@@ -1,6 +1,6 @@
 ---
 name: kb
-description: Use when the user wants to query a self-hosted Open WebUI knowledge base (KB) over REST, or to remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "remember …", "what do we know about …", and "forget …". Covers list/search KBs, retrieve (semantic search) from a KB, and Graphiti facts memory (add/retrieve/episodes/forget via the api-gateway). One URL (KB_HOST) fronts OWUI REST (root /api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the api-gateway for facts memory). Includes zero-dependency Python CLI wrappers (scripts/owui.py for OWUI KBs, scripts/kb_gateway.py for Graphiti facts memory).
+description: Use when the user wants to query a self-hosted Open WebUI knowledge base (KB) over REST, or to remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "remember …", "what do we know about …", and "forget …". Covers list/search KBs, retrieve (semantic search) from a KB, and Graphiti facts memory (add/retrieve/episodes/forget via the api-gateway). One URL (KB_HOST) fronts OWUI REST (root /api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the api-gateway for facts memory). Includes a zero-dependency Python CLI wrapper (scripts/kb.py: OWUI KBs at the top level, Graphiti facts memory under the `memory` subcommand).
 ---
 
 # Open WebUI REST (non-admin / read-scoped)
@@ -102,22 +102,22 @@ documented elsewhere:
 Use `OPENWEBUI_ADMIN_API_KEY` (full admin, bypasses access control) for those —
 keep it private; do not hand it to agents.
 
-## Using the wrapper (`scripts/owui.py`)
+## Using the wrapper (`scripts/kb.py`)
 
 Zero-dependency (Python 3.10+ stdlib). The KB surface (kbs/retrieve/file) is
-read-only and matches the agent role. The wrapper lives in `scripts/` next to this file; set `S` to its
+read-only and matches the agent role. The wrapper lives in `scripts/` next to this file; set `KB` to its
 path in your installed copy of this skill.
 
 ```
-S=~/.config/opencode/skills/kb/scripts/owui.py
+KB=~/.config/opencode/skills/kb/scripts/kb.py
 export KB_HOST=http://localhost:3000            # or your KB_HOST
 export KB_API_KEY=...                           # your non-admin user key (~/.api_keys; make users-create EMAIL=...)
 
-python3 "$S" whoami                             # verify key + role
-python3 "$S" kbs                                # list visible KBs
-python3 "$S" search-kbs "main"                  # find a KB by name
-python3 "$S" retrieve <kb-name-or-id> "XSL streaming"     # retrieve — raw chunks, you synthesize
-python3 "$S" file <file-id>                     # file text content
+python3 "$KB" whoami                             # verify key + role
+python3 "$KB" kbs                                # list visible KBs
+python3 "$KB" search-kbs "main"                  # find a KB by name
+python3 "$KB" retrieve <kb-name-or-id> "XSL streaming"     # retrieve — raw chunks, you synthesize
+python3 "$KB" file <file-id>                     # file text content
 ```
 
 Config: the wrapper is a thin client. It reads ONLY `KB_HOST` and `KB_API_KEY`
@@ -163,25 +163,25 @@ derives your identity + role from your `KB_API_KEY` via Open WebUI (tamper-proof
   rejected (fail-closed).
 - **`status` is global** (Graphiti server + DB health); no group scoping.
 
-## Using the wrapper (`scripts/kb_gateway.py`)
+## Using the wrapper (`scripts/kb.py`, `memory` subcommand)
 
 Zero-dependency (Python 3.10+ stdlib). One client for memory + admin ops. The
-wrapper lives in `scripts/` next to this file; set `G` to its path in your
-installed copy of this skill.
+wrapper lives in `scripts/` next to this file; set `KB` to its path in your
+installed copy of this skill. Facts verbs live under the `memory` subcommand.
 
 ```
-G=~/.config/opencode/skills/kb/scripts/kb_gateway.py
+KB=~/.config/opencode/skills/kb/scripts/kb.py
 # (KB_HOST + KB_API_KEY already exported — see Prerequisites above)
 
-python3 "$G" whoami                              # verify identity (from the key, via the gateway)
-python3 "$G" groups                              # list all groups that have data
-python3 "$G" add "Project Atlas uses a QPU scheduler" --name atlas
-python3 "$G" retrieve "QPU scheduling" --k 5       # facts across ALL groups (read-only; --k default 10)
-python3 "$G" episodes --max 20                   # episodes across ALL groups (read-only)
-python3 "$G" status                              # graphiti server + DB status
-python3 "$G" forget user:alice@example.com       # clear YOUR group's memory (owner/admin)
-python3 "$G" delete-edge <uuid>                  # delete one edge (owner/admin of its group)
-python3 "$G" delete-episode <uuid>               # delete one episode (owner/admin of its group)
+python3 "$KB" memory whoami                              # verify identity (from the key, via the gateway)
+python3 "$KB" memory groups                              # list all groups that have data
+python3 "$KB" memory add "Project Atlas uses a QPU scheduler" --name atlas
+python3 "$KB" memory retrieve "QPU scheduling" --k 5       # facts across ALL groups (read-only; --k default 10)
+python3 "$KB" memory episodes --max 20                   # episodes across ALL groups (read-only)
+python3 "$KB" memory status                              # graphiti server + DB status
+python3 "$KB" memory forget user:alice@example.com       # clear YOUR group's memory (owner/admin)
+python3 "$KB" memory delete-edge <uuid>                  # delete one edge (owner/admin of its group)
+python3 "$KB" memory delete-episode <uuid>               # delete one episode (owner/admin of its group)
 ```
 
 **`add` is asynchronous:** Graphiti extracts entity edges in a background
