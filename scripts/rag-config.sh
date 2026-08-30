@@ -169,13 +169,20 @@ print("      merge sanity: TOP_K=%s CHUNK_SIZE=%s CHUNK_MIN_SIZE_TARGET=%s"
 print("      hybrid: ENABLE_RAG_HYBRID_SEARCH=%s HYBRID_BM25_WEIGHT=%s TOP_K_RERANKER=%s"
       % (d.get("ENABLE_RAG_HYBRID_SEARCH"), d.get("HYBRID_BM25_WEIGHT"), d.get("TOP_K_RERANKER")))
 
-# --- sync rag.ollama.base_url to OLLAMA_HOST ---------------------------------
-# Open WebUI persists rag.ollama.base_url in webui.db on first boot and ignores
-# later OLLAMA_HOST changes, so the embedder can drift to a stale host while chat
-# works (file upload then "process/status=failed", RAG search returns 0 hits). Reconcile
-# via the embedding API: GET the current config, change only the ollama URL, POST
-# it back. /embedding/update REPLACES the whole config, so we preserve
-# engine/model/batch/async/concurrent/key from the GET. Idempotent.
+# --- sync rag.ollama.base_url + assert embed-concurrency herd bound ------------
+# Open WebUI persists the retrieval config in webui.db on first boot and ignores
+# later env changes. Two fields drift this way and both break the embed path:
+#   1. rag.ollama.base_url -- the embedder points at a stale host (chat works,
+#      file upload fails, RAG search returns 0 hits).
+#   2. RAG_EMBEDDING_BATCH_SIZE / RAG_EMBEDDING_CONCURRENT_REQUESTS -- OWUI defaults
+#      BATCH=1 and CONCURRENT=0 (unlimited). A 5195-chunk file then fires 5195
+#      concurrent /api/embed calls and kills the Ollama nomic runner (HTTP 400
+#      /tokenize EOF). .env.template pins 32/4; assert them here so an existing
+#      webui.db gets the bound, not only a fresh one (env seeds a fresh DB).
+# Reconcile via the embedding API: GET the current config, POST it back with the
+# env values. /embedding/update REPLACES the whole config, so we preserve
+# engine/model/key from the GET and set url + the 3 concurrency keys from .env.
+# Idempotent (POST only when a tracked field differs).
 _ollama_host = os.environ.get("OLLAMA_HOST")
 if not _ollama_host:
     sys.exit("FAIL  OLLAMA_HOST not set -- export it or uncomment in .env (see .env.template)")
@@ -187,29 +194,61 @@ OLLAMA_URL = _ollama_host.rstrip("/")
 # writes http://host.docker.internal:11434 to the DB.
 OLLAMA_URL = re.sub(r'(https?://)(localhost|127\.0\.0\.1)([:/]|$)', r'\1host.docker.internal\3', OLLAMA_URL)
 
+# Embed-concurrency herd bound -- .env single source (no literal defaults).
+_ebs = os.environ.get("RAG_EMBEDDING_BATCH_SIZE")
+if not _ebs:
+    sys.exit("FAIL  RAG_EMBEDDING_BATCH_SIZE not set -- declare it in .env.template")
+EBS = int(_ebs)
+if EBS < 1:
+    sys.exit("FAIL  RAG_EMBEDDING_BATCH_SIZE=%s -- must be >= 1 (1 = one request per chunk, herd)" % _ebs)
+_ecr = os.environ.get("RAG_EMBEDDING_CONCURRENT_REQUESTS")
+if not _ecr:
+    sys.exit("FAIL  RAG_EMBEDDING_CONCURRENT_REQUESTS not set -- declare it in .env.template")
+ECR = int(_ecr)
+if ECR < 1:
+    sys.exit("FAIL  RAG_EMBEDDING_CONCURRENT_REQUESTS=%s -- must be >= 1 (0 = unlimited thundering herd)" % _ecr)
+_ase = os.environ.get("ENABLE_ASYNC_EMBEDDING")
+if not _ase:
+    sys.exit("FAIL  ENABLE_ASYNC_EMBEDDING not set -- declare it in .env.template")
+ASE = _ase.strip().lower() in ("1", "true", "yes", "on")
+
 st, txt = call("GET", "/api/v1/retrieval/embedding")
 if st != 200:
     sys.exit("FAIL  get embedding config -> HTTP %s: %s" % (st, txt[:200]))
 emb = parse_json(txt, "GET /api/v1/retrieval/embedding")
 oc = emb.get("ollama_config") or {}
 cur_url = (oc.get("url") or "").rstrip("/")
-if cur_url == OLLAMA_URL:
-    print("OK    rag.ollama.base_url already in sync: %s" % OLLAMA_URL)
+cur_ebs = int(emb.get("RAG_EMBEDDING_BATCH_SIZE") or 0)
+cur_ecr = int(emb.get("RAG_EMBEDDING_CONCURRENT_REQUESTS") or 0)
+cur_ase = bool(emb.get("ENABLE_ASYNC_EMBEDDING"))
+url_sync = cur_url == OLLAMA_URL
+keys_sync = (cur_ebs == EBS and cur_ecr == ECR and cur_ase == ASE)
+if url_sync and keys_sync:
+    print("OK    rag.ollama.base_url in sync (%s); embed herd bound in sync (BATCH=%s CONCURRENT=%s ASYNC=%s)"
+          % (OLLAMA_URL, cur_ebs, cur_ecr, cur_ase))
 else:
     payload = {
         "RAG_EMBEDDING_ENGINE": emb.get("RAG_EMBEDDING_ENGINE", "ollama"),
         "RAG_EMBEDDING_MODEL": emb.get("RAG_EMBEDDING_MODEL", _emb_model),
-        "RAG_EMBEDDING_BATCH_SIZE": emb.get("RAG_EMBEDDING_BATCH_SIZE", 1),
-        "ENABLE_ASYNC_EMBEDDING": emb.get("ENABLE_ASYNC_EMBEDDING", True),
-        "RAG_EMBEDDING_CONCURRENT_REQUESTS": emb.get("RAG_EMBEDDING_CONCURRENT_REQUESTS", 0),
+        "RAG_EMBEDDING_BATCH_SIZE": EBS,
+        "ENABLE_ASYNC_EMBEDDING": ASE,
+        "RAG_EMBEDDING_CONCURRENT_REQUESTS": ECR,
         "ollama_config": {"url": OLLAMA_URL, "key": oc.get("key", "")},
     }
     st, txt = call("POST", "/api/v1/retrieval/embedding/update", payload)
     if st != 200:
-        sys.exit("FAIL  update rag.ollama.base_url -> HTTP %s: %s" % (st, txt[:200]))
+        sys.exit("FAIL  update embedding config -> HTTP %s: %s" % (st, txt[:200]))
     st, txt = call("GET", "/api/v1/retrieval/embedding")
-    new_url = ((parse_json(txt, "GET /api/v1/retrieval/embedding").get("ollama_config") or {}).get("url") or "").rstrip("/")
+    chk = parse_json(txt, "GET /api/v1/retrieval/embedding")
+    new_url = ((chk.get("ollama_config") or {}).get("url") or "").rstrip("/")
+    new_ebs = int(chk.get("RAG_EMBEDDING_BATCH_SIZE") or 0)
+    new_ecr = int(chk.get("RAG_EMBEDDING_CONCURRENT_REQUESTS") or 0)
+    new_ase = bool(chk.get("ENABLE_ASYNC_EMBEDDING"))
     if new_url != OLLAMA_URL:
         sys.exit("FAIL  rag.ollama.base_url did not sync: got %s expected %s" % (new_url, OLLAMA_URL))
-    print("OK    synced rag.ollama.base_url: %s -> %s" % (cur_url or "<unset>", OLLAMA_URL))
+    if not (new_ebs == EBS and new_ecr == ECR and new_ase == ASE):
+        sys.exit("FAIL  embed herd bound did not sync: got BATCH=%s CONCURRENT=%s ASYNC=%s, want BATCH=%s CONCURRENT=%s ASYNC=%s"
+                 % (new_ebs, new_ecr, new_ase, EBS, ECR, ASE))
+    print("OK    synced embedding config: base_url %s->%s, herd bound BATCH %s->%s CONCURRENT %s->%s ASYNC %s->%s"
+          % (cur_url or "<unset>", new_url, cur_ebs, new_ebs, cur_ecr, new_ecr, cur_ase, new_ase))
 PY
