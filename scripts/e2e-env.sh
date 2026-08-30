@@ -246,7 +246,7 @@ e2e_provision() {
 }
 
 # Create ONE ephemeral throwaway user for this clone env (admin key -> gateway
-# POST /admin/users via `make users-create`) and write its key as KB_API_KEY into
+# POST /admin/users via scripts/e2e_user.py) and write its key as KB_API_KEY into
 # the clone's .env.local. Tests read KB_API_KEY via load_env (tests/lib.sh
 # sources .env.local), so the key MUST be on disk -- an export alone is fragile
 # across the pytest->bash subprocess boundary + the nested clones test_08/12
@@ -257,7 +257,7 @@ e2e_provision() {
 # mints/deletes its own temp users). Call AFTER `make api-keys` (needs
 # OPENWEBUI_ADMIN_API_KEY in .env.local). Idempotent on .env.local (upsert).
 e2e_ephemeral_user() {
-  local domain email ujson ukey
+  local domain email
   domain="$(grep -E '^KB_DOMAIN=' .env | head -1 | cut -d= -f2- || true)"
   [ -n "$domain" ] || { echo "FAIL  KB_DOMAIN not set in the clone .env (ephemeral user email)" >&2; return 1; }
   email="temp-${E2E_STAMP}@${domain}"
@@ -274,40 +274,16 @@ e2e_ephemeral_user() {
     sleep 2
   done
   echo "==> create ephemeral test user $email (admin key -> gateway POST /admin/users)"
-  ujson="$(make users-create EMAIL="$email" NAME="E2E" ROLE=user)" \
-    || { echo "FAIL  ephemeral user create failed for $email (see make users-create output above)" >&2; return 1; }
-  ukey="$(printf '%s' "$ujson" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("kb_api_key") or "")')"
-  [ -n "$ukey" ] || { echo "FAIL  ephemeral user create returned no kb_api_key: $ujson" >&2; return 1; }
-  # Idempotent upsert of KB_API_KEY into the clone .env.local (atomic write,
-  # chmod 0600 preserved -- mirrors scripts/api-keys.sh's write pattern).
-  python3 - "$ukey" <<'PY'
-import os, sys, tempfile
-key = sys.argv[1]
-path = ".env.local"
-lines = open(path).read().splitlines() if os.path.exists(path) else []
-seen = False
-out = []
-for ln in lines:
-    if ln.startswith("KB_API_KEY="):
-        out.append("KB_API_KEY=" + key); seen = True
-    else:
-        out.append(ln)
-if not seen:
-    out.append("KB_API_KEY=" + key)
-tmp_fd, tmp_path = tempfile.mkstemp(dir=".", prefix=".env.local.", suffix=".tmp")
-try:
-    with os.fdopen(tmp_fd, "w") as f:
-        f.write("\n".join(out) + "\n")
-    os.chmod(tmp_path, 0o600)
-    os.replace(tmp_path, path)
-except Exception:
-    try:
-        os.unlink(tmp_path)
-    except OSError:
-        pass
-    raise
-PY
-  echo "OK    ephemeral user $email -> KB_API_KEY written to .env.local"
+  # The POST + JSON parse + kb_api_key extract + .env.local atomic upsert run in
+  # Python (scripts/e2e_user.py), NOT a shell capture of `make users-create`:
+  # under `make test-e2e-iso` a recursive make prints "Entering/Leaving
+  # directory" --print-directory banners to stdout, which a `$(make users-create
+  # ...)` capture pulls into the JSON and breaks json.load at char 0. Shell only
+  # sources the clone .env/.env.local (so Python sees KB_HOST +
+  # OPENWEBUI_ADMIN_API_KEY) and gates on the exit code.
+  ( set -a; . ./.env; . ./.env.local; set +a; \
+    python3 scripts/e2e_user.py --email "$email" --name "E2E" --role user --env-local .env.local ) \
+    || { echo "FAIL  ephemeral user create failed for $email (see e2e_user.py output above)" >&2; return 1; }
 }
 
 # --- teardown model (proliferation) ----------------------------------------
