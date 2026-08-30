@@ -17,6 +17,12 @@
 #     per-request k on /retrieval/query/collection overrides it): same .env
 #     single source + strict read + re-assert-over-DB discipline as
 #     CHUNK_MIN_SIZE_TARGET.
+#   - ENABLE_RAG_HYBRID_SEARCH, RAG_HYBRID_BM25_WEIGHT, RAG_TOP_K_RERANKER (the
+#     hybrid-retrieval master switch, the BM25/vector blend, and the reranker
+#     candidate cap): same .env single source + strict read + re-assert-over-DB
+#     discipline. OWUI's /retrieval/config key drops the RAG_ prefix for the
+#     latter two (HYBRID_BM25_WEIGHT, TOP_K_RERANKER); this script reads the
+#     .env (RAG_-prefixed) names and POSTs the unprefixed keys.
 #
 # Idempotent: re-running just re-asserts the same values.
 #
@@ -113,11 +119,26 @@ TOP_K = int(_tk)
 _emb_model = os.environ.get("RAG_EMBEDDING_MODEL")
 if not _emb_model:
     sys.exit("FAIL  RAG_EMBEDDING_MODEL not set -- declare it in .env.template")
+_hy = os.environ.get("ENABLE_RAG_HYBRID_SEARCH")
+if not _hy:
+    sys.exit("FAIL  ENABLE_RAG_HYBRID_SEARCH not set -- declare it in .env.template")
+HYBRID = _hy.strip().lower() in ("1", "true", "yes", "on")
+_bw = os.environ.get("RAG_HYBRID_BM25_WEIGHT")
+if not _bw:
+    sys.exit("FAIL  RAG_HYBRID_BM25_WEIGHT not set -- declare it in .env.template")
+BM25_W = float(_bw)
+_tkr = os.environ.get("RAG_TOP_K_RERANKER")
+if not _tkr:
+    sys.exit("FAIL  RAG_TOP_K_RERANKER not set -- declare it in .env.template")
+TOP_K_RR = int(_tkr)
 st, txt = call("POST", "/api/v1/retrieval/config/update",
                {"RAG_TEMPLATE": NEW, "CHUNK_MIN_SIZE_TARGET": MIN_SIZE,
-                "CHUNK_SIZE": CHUNK_SZ, "TOP_K": TOP_K})
+                "CHUNK_SIZE": CHUNK_SZ, "TOP_K": TOP_K,
+                "ENABLE_RAG_HYBRID_SEARCH": HYBRID,
+                "HYBRID_BM25_WEIGHT": BM25_W,
+                "TOP_K_RERANKER": TOP_K_RR})
 if st != 200:
-    sys.exit("FAIL  update RAG_TEMPLATE/CHUNK_MIN_SIZE_TARGET/CHUNK_SIZE/TOP_K -> HTTP %s: %s"
+    sys.exit("FAIL  update RAG config -> HTTP %s: %s"
              % (st, txt[:200]))
 
 st, txt = call("GET", "/api/v1/retrieval/config")
@@ -133,9 +154,20 @@ if d.get("CHUNK_SIZE") != CHUNK_SZ:
 if d.get("TOP_K") != TOP_K:
     sys.exit("FAIL  TOP_K did not stick (got %s, want %s)"
              % (d.get("TOP_K"), TOP_K))
+if d.get("ENABLE_RAG_HYBRID_SEARCH") != HYBRID:
+    sys.exit("FAIL  ENABLE_RAG_HYBRID_SEARCH did not stick (got %s, want %s)"
+             % (d.get("ENABLE_RAG_HYBRID_SEARCH"), HYBRID))
+if d.get("HYBRID_BM25_WEIGHT") != BM25_W:
+    sys.exit("FAIL  HYBRID_BM25_WEIGHT did not stick (got %s, want %s)"
+             % (d.get("HYBRID_BM25_WEIGHT"), BM25_W))
+if d.get("TOP_K_RERANKER") != TOP_K_RR:
+    sys.exit("FAIL  TOP_K_RERANKER did not stick (got %s, want %s)"
+             % (d.get("TOP_K_RERANKER"), TOP_K_RR))
 print("OK    strict-grounding RAG_TEMPLATE set (len=%d)" % len(d["RAG_TEMPLATE"]))
 print("      merge sanity: TOP_K=%s CHUNK_SIZE=%s CHUNK_MIN_SIZE_TARGET=%s"
       % (d.get("TOP_K"), d.get("CHUNK_SIZE"), d.get("CHUNK_MIN_SIZE_TARGET")))
+print("      hybrid: ENABLE_RAG_HYBRID_SEARCH=%s HYBRID_BM25_WEIGHT=%s TOP_K_RERANKER=%s"
+      % (d.get("ENABLE_RAG_HYBRID_SEARCH"), d.get("HYBRID_BM25_WEIGHT"), d.get("TOP_K_RERANKER")))
 
 # --- sync rag.ollama.base_url to OLLAMA_HOST ---------------------------------
 # Open WebUI persists rag.ollama.base_url in webui.db on first boot and ignores

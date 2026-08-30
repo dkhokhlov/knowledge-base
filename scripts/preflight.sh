@@ -27,6 +27,7 @@ secrets_present || fail ".env.local must contain non-empty WEBUI_SECRET_KEY (run
 ok "secrets present in .env.local"
 
 [ -d data/neo4j/data ] && [ -d data/neo4j/logs ] && [ -d data/openwebui ] \
+  && [ -d data/postgres ] \
   || fail "./data tree incomplete (run: make bootstrap)"
 ok "./data tree exists"
 
@@ -43,6 +44,35 @@ set -a; . ./.env; set +a
 # must not, rewrite COMPOSE_PROFILES).
 _ENV_OCR_ENABLED="${OCR_ENABLED:-true}"
 if [ -n "$_OCR_ENABLED_OVR" ]; then export OCR_ENABLED="$_OCR_ENABLED_OVR"; fi
+
+# --- pgvector config drift guards (.env values are literal: no ${} expansion) --
+# VECTOR_DB switches the OWUI vector store to Postgres+pgvector. The openwebui
+# compose service fails loud on a missing value (:?); preflight mirrors that and
+# adds two consistency checks the literal .env cannot express with ${}:
+#   1. PGVECTOR_DB_URL must match PGVECTOR_USER/PASSWORD/DB (hand-kept in sync).
+#   2. PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH must equal EMBEDDER_DIMENSIONS (the
+#      vector column width is fixed at table creation; a mismatch zero-pads or
+#      rejects inserts).
+# RAG_TOP_K_RERANKER must be >= KB_RETRIEVE_K_MAX or a large-k /retrieve request
+# is truncated by the reranker candidate cap.
+[ -n "${VECTOR_DB:-}" ] || fail "VECTOR_DB not set in .env (declare it in .env.template)"
+: "${PGVECTOR_USER:?PGVECTOR_USER required in .env}"
+: "${PGVECTOR_PASSWORD:?PGVECTOR_PASSWORD required in .env}"
+: "${PGVECTOR_DB:?PGVECTOR_DB required in .env}"
+: "${PGVECTOR_DB_URL:?PGVECTOR_DB_URL required in .env}"
+: "${PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH:?PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH required in .env}"
+: "${KB_RETRIEVE_K_MAX:?KB_RETRIEVE_K_MAX required in .env}"
+: "${RAG_TOP_K_RERANKER:?RAG_TOP_K_RERANKER required in .env}"
+_want="postgresql://${PGVECTOR_USER}:${PGVECTOR_PASSWORD}@postgres:5432/${PGVECTOR_DB}"
+[ "${PGVECTOR_DB_URL}" = "$_want" ] \
+  || fail "PGVECTOR_DB_URL does not match PGVECTOR_USER/PASSWORD/DB (.env values are literal; edit both)"
+ok "PGVECTOR_DB_URL agrees with PGVECTOR_USER/PASSWORD/DB"
+[ "${PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH}" = "${EMBEDDER_DIMENSIONS:-}" ] \
+  || fail "PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH=${PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH} != EMBEDDER_DIMENSIONS=${EMBEDDER_DIMENSIONS:-<unset>} (must equal the embedder dim)"
+ok "PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH == EMBEDDER_DIMENSIONS (${PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH})"
+[ "${RAG_TOP_K_RERANKER}" -ge "${KB_RETRIEVE_K_MAX}" ] \
+  || fail "RAG_TOP_K_RERANKER=${RAG_TOP_K_RERANKER} < KB_RETRIEVE_K_MAX=${KB_RETRIEVE_K_MAX} (large-k /retrieve requests would be truncated)"
+ok "RAG_TOP_K_RERANKER >= KB_RETRIEVE_K_MAX (${RAG_TOP_K_RERANKER} >= ${KB_RETRIEVE_K_MAX})"
 
 : "${OLLAMA_HOST:?OLLAMA_HOST is required (set in shell env or uncomment in .env; see .env.template)}"
 OLLAMA="${OLLAMA_HOST%/}"

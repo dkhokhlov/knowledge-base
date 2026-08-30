@@ -475,7 +475,9 @@ class TestMain(unittest.TestCase):
         self.fix = _build_fixture()
         self._orig_stores = kc.Stores
         self._orig_env = os.environ.get("OPENWEBUI_ADMIN_API_KEY")
+        self._orig_vdb = os.environ.get("VECTOR_DB")
         os.environ["OPENWEBUI_ADMIN_API_KEY"] = "ADM"
+        os.environ["VECTOR_DB"] = "chroma"
         kc.Stores = lambda *a, **k: _make_stores(self.fix, self.tmp, admin_key="ADM")
 
     def tearDown(self):
@@ -484,6 +486,10 @@ class TestMain(unittest.TestCase):
             os.environ.pop("OPENWEBUI_ADMIN_API_KEY", None)
         else:
             os.environ["OPENWEBUI_ADMIN_API_KEY"] = self._orig_env
+        if self._orig_vdb is None:
+            os.environ.pop("VECTOR_DB", None)
+        else:
+            os.environ["VECTOR_DB"] = self._orig_vdb
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -531,8 +537,14 @@ class TestRepair(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self._orig_vdb = os.environ.get("VECTOR_DB")
+        os.environ["VECTOR_DB"] = "chroma"
 
     def tearDown(self):
+        if self._orig_vdb is None:
+            os.environ.pop("VECTOR_DB", None)
+        else:
+            os.environ["VECTOR_DB"] = self._orig_vdb
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -700,6 +712,277 @@ class TestRealStoresRepair(unittest.TestCase):
 
     def test_repair_file_status_missing_row(self):
         self.assertFalse(self.stores.repair_file_status("nope"))
+
+
+# --- pgvector store: fake psycopg2 + FakePgStores (no real Postgres) -------
+
+class _FakePgCursor:
+    """Scriptable psycopg2 cursor stand-in. Dispatches on the SQL string so
+    call-order does not matter; mutates `conn._chunks` on DELETE to mirror the
+    real document_chunk table."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self._rows = []
+
+    def execute(self, sql, params=None):
+        self._conn.executed.append((sql, params))
+        s = sql.strip()
+        chunks = self._conn._chunks
+        if s.startswith("SELECT DISTINCT collection_name"):
+            self._rows = [(name,) for name in chunks]
+        elif s.startswith("SELECT count(*)"):
+            name = params[0]
+            if "vmetadata->>'file_id'" in s:
+                kb, fid = params
+                self._rows = [(sum(1 for c in chunks.get(kb, [])
+                                  if c[2].get("file_id") == fid),)]
+            else:
+                self._rows = [(len(chunks.get(name, [])),)]
+        elif s.startswith("SELECT vmetadata"):
+            name = params[0]
+            self._rows = [(c[2],) for c in chunks.get(name, [])]
+        elif s.startswith("SELECT id, text, vmetadata"):
+            name = params[0]
+            self._rows = list(chunks.get(name, []))
+        elif s.startswith("DELETE"):
+            if "vmetadata->>'file_id'" in s:
+                kb, fid = params
+                chunks[kb] = [c for c in chunks.get(kb, [])
+                             if c[2].get("file_id") != fid]
+            else:
+                name = params[0]
+                chunks.pop(name, None)
+            self._rows = []
+        else:
+            self._rows = []
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class FakePgConn:
+    """psycopg2 connection stand-in. `chunks` = {collection_name:
+    [(chunk_id, text, vmetadata_dict), ...]}. commit() is recorded."""
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.commits = 0
+        self.executed = []
+
+    def cursor(self):
+        return _FakePgCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+
+class FakePgStores(kc.PgVectorStores):
+    """PgVectorStores with the SQLite reads overridden by fixtures + a fake
+    Postgres connection (no real psycopg2, no real DB, no network)."""
+
+    def __init__(self, data_dir, files, junction, kb_ids, dir_ids, chunks):
+        super().__init__(data_dir, "http://owui", "ADM", "dsn")
+        self._pg = FakePgConn(chunks)   # bypass _pg_conn (no psycopg2 import)
+        self._files = files
+        self._junction = junction
+        self._kb_ids = kb_ids
+        self._dir_ids = dir_ids
+
+    # SQLite reads (backend-independent; mirror FakeStores)
+    def file_rows(self):
+        return dict(self._files)
+
+    def junction_rows(self):
+        return list(self._junction)
+
+    def knowledge_ids(self):
+        return dict(self._kb_ids)
+
+    def directory_ids(self):
+        return set(self._dir_ids)
+
+    def invalidate(self):
+        self._cache.clear()
+
+
+def _pg_fixture():
+    """Compact pgvector fixture. `chunks` = {collection_name:
+    [(id, text, vmetadata)]}. Synthetic ids only (no PII)."""
+    files = {
+        "f1": _fr("f1", status="completed"),
+        "f2": _fr("f2", status="completed"),   # class 4 (no file-f2 chunks)
+    }
+    junction = [
+        kc.JunctionRow("j1", "kb-1", "f1", "d1"),
+        kc.JunctionRow("j2", "kb-1", "f2", "d1"),
+    ]
+    kb_ids = {"kb-1": "KB One"}
+    dir_ids = {"d1"}
+    chunks = {
+        "kb-1": [
+            ("c1", "t1", {"file_id": "f1"}),
+            ("c2", "t2", {"file_id": "LEAK"}),       # not in junction -> class 5b
+            ("c3", "t3", {"knowledge_base_id": "kb-1"}),  # no file_id -> skipped
+        ],
+        "file-f1": [("c4", "t4", {"file_id": "f1"})],
+        "file-ORPHAN": [("c5", "t5", {"file_id": "o1"})],  # no file row -> class 3
+        "knowledge-bases": [("c6", "t6", {"knowledge_base_id": "kb-1"})],
+    }
+    return dict(files=files, junction=junction, kb_ids=kb_ids,
+                dir_ids=dir_ids, chunks=chunks)
+
+
+class TestBackendSelection(unittest.TestCase):
+    """VECTOR_DB selects the store; missing/unknown fail loud (exit 2)."""
+
+    def setUp(self):
+        self._snap = {k: os.environ.get(k) for k in
+                      ("VECTOR_DB", "PGVECTOR_USER", "PGVECTOR_PASSWORD",
+                       "PGVECTOR_DB", "PGVECTOR_DB_URL")}
+        for k in self._snap:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._snap.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_missing_vector_db_raises(self):
+        with self.assertRaises(RuntimeError):
+            kc.make_stores("/tmp", "http://owui", "ADM")
+
+    def test_unknown_vector_db_raises(self):
+        os.environ["VECTOR_DB"] = "redis"
+        with self.assertRaises(RuntimeError):
+            kc.make_stores("/tmp", "http://owui", "ADM")
+
+    def test_chroma_returns_stores(self):
+        os.environ["VECTOR_DB"] = "chroma"
+        s = kc.make_stores("/tmp", "http://owui", "ADM")
+        self.assertIsInstance(s, kc.Stores)
+        self.assertNotIsInstance(s, kc.PgVectorStores)
+
+    def test_pgvector_missing_pg_env_raises(self):
+        os.environ["VECTOR_DB"] = "pgvector"
+        with self.assertRaises(RuntimeError):
+            kc.make_stores("/tmp", "http://owui", "ADM")
+
+    def test_pgvector_returns_pgvectorstores(self):
+        os.environ["VECTOR_DB"] = "pgvector"
+        os.environ["PGVECTOR_USER"] = "u"
+        os.environ["PGVECTOR_PASSWORD"] = "p"
+        os.environ["PGVECTOR_DB"] = "d"
+        os.environ["PGVECTOR_DB_URL"] = "postgresql://u:p@postgres:5432/d"
+        s = kc.make_stores("/tmp", "http://owui", "ADM")
+        self.assertIsInstance(s, kc.PgVectorStores)
+
+
+class TestPgVectorStore(unittest.TestCase):
+    """pgvector store methods over a fake document_chunk (no real Postgres)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.fix = _pg_fixture()
+        self.stores = FakePgStores(self.tmp, **self.fix)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_distinct_collections(self):
+        colls = self.stores.chroma_collections()
+        self.assertEqual(set(colls),
+                         {"kb-1", "file-f1", "file-ORPHAN", "knowledge-bases"})
+        self.assertTrue(all(v is None for v in colls.values()))
+
+    def test_collection_count(self):
+        self.assertEqual(self.stores.collection_count("kb-1"), 3)
+        self.assertEqual(self.stores.collection_count("file-f1"), 1)
+        self.assertEqual(self.stores.collection_count("absent"), 0)
+
+    def test_collection_metadatas(self):
+        mds = self.stores.collection_metadatas("kb-1")
+        self.assertEqual([md.get("file_id") for md in mds],
+                         ["f1", "LEAK", None])
+
+    def test_collection_documents(self):
+        ids, texts, mets = self.stores.collection_documents("file-f1")
+        self.assertEqual(ids, ["c4"])
+        self.assertEqual(texts, ["t4"])
+        self.assertEqual(mets, [{"file_id": "f1"}])
+
+    def test_class11_na_empty_disk_and_segments(self):
+        self.assertEqual(self.stores.disk_dirs(), set())
+        self.assertEqual(self.stores.vector_segment_ids(), set())
+        self.assertIsNone(self.stores.segment_dir_for_collection("anything"))
+        self.assertEqual(self.stores.dir_size("x"), 0)
+
+    def test_delete_collection_removes_chunks(self):
+        self.assertTrue(self.stores.delete_collection("file-ORPHAN"))
+        self.assertNotIn("file-ORPHAN", self.stores._pg._chunks)
+        self.assertGreater(self.stores._pg.commits, 0)
+
+    def test_delete_kb_vectors_counts_before_delete(self):
+        n = self.stores.delete_kb_vectors_by_file("kb-1", "LEAK")
+        self.assertEqual(n, 1)   # count BEFORE delete
+        remaining = [c[2].get("file_id") for c in self.stores._pg._chunks["kb-1"]]
+        self.assertNotIn("LEAK", remaining)
+        self.assertIn("f1", remaining)
+        self.assertGreater(self.stores._pg.commits, 0)
+
+    def test_delete_kb_vectors_zero_delete_returns_zero(self):
+        n = self.stores.delete_kb_vectors_by_file("kb-1", "NOPE")
+        self.assertEqual(n, 0)
+        # nothing removed
+        self.assertEqual(len(self.stores._pg._chunks["kb-1"]), 3)
+
+    def test_rm_segment_dir_noop(self):
+        self.assertTrue(self.stores.rm_segment_dir("anything"))
+
+
+class TestPgVectorClassify(unittest.TestCase):
+    """classify() over a pgvector store: classes 3/4/5/6 via SQL over
+    document_chunk; class 11 N/A (empty)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.fix = _pg_fixture()
+        self.stores = FakePgStores(self.tmp, **self.fix)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_classes_over_pgvector(self):
+        c = kc.classify(self.stores)
+        # class 3: orphan file-{id} collections (no file row)
+        self.assertEqual(c["orphan_file_collections"].count, 1)
+        self.assertIn("file-ORPHAN", c["orphan_file_collections"].ids)
+        # knowledge-bases never flagged
+        self.assertNotIn("knowledge-bases", c["orphan_file_collections"].ids)
+        # class 4: completed file, no file-{id} collection in document_chunk
+        self.assertEqual(c["missing_file_collections"].count, 1)
+        self.assertIn("f2", c["missing_file_collections"].ids)
+        # class 5: orphan KB vectors (file_id not in junction); LEAK leaked
+        self.assertEqual(c["orphan_kb_vectors"].count, 1)
+        self.assertEqual(c["orphan_kb_vectors"].detail["leaked"], 1)
+        self.assertEqual(c["orphan_kb_vectors"].detail["leaked_pairs"],
+                         [("kb-1", "LEAK")])
+        # class 6: completed + linked + 0 vectors in KB collection
+        self.assertEqual(c["missing_kb_vectors"].count, 1)
+        self.assertIn("f2", c["missing_kb_vectors"].ids)
+        # class 11: N/A for pgvector (no on-disk segment dirs)
+        self.assertEqual(c["dangling_segment_dirs"].count, 0)
+        # totals: vector_segment_dirs + vector_segments = 0
+        self.assertEqual(c["_totals"]["vector_segment_dirs"], 0)
+        self.assertEqual(c["_totals"]["vector_segments"], 0)
+        self.assertEqual(c["_totals"]["chroma_collections"], 4)
 
 
 if __name__ == "__main__":

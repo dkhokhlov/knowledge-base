@@ -63,6 +63,13 @@ def _index_timeout():
     return float(os.environ.get("OWUI_INDEX_TIMEOUT", "300"))
 
 
+def _retrieve_timeout():
+    """Timeout for a single /retrieve (OWUI query/collection forward). Query
+    embedding can wait on a cold Ollama model load (~30s), so the 15s identity
+    timeout is too short. Tunable via OWUI_RETRIEVE_TIMEOUT (default 60s)."""
+    return float(os.environ.get("OWUI_RETRIEVE_TIMEOUT", "60"))
+
+
 def _req(method, path, token=None, body=None, timeout=None):
     url = _base() + path
     data = json.dumps(body).encode() if body is not None else None
@@ -131,6 +138,28 @@ def rag(api_key, messages, files):
         raise OwuiError("rag -> HTTP %s: %s" % (code, (txt or "")[:200]), code=code)
     content = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
     return {"content": content}
+
+
+def query_collection(api_key, kb_id, query, hybrid, hybrid_bm25_weight, k):
+    """POST /api/v1/retrieval/query/collection, forwarded with the CALLER's key
+    so OWUI enforces KB read access natively (_validate_collection_access;
+    403 on deny — no gateway-side authz replication, same posture as rag()). The
+    gateway maps mode -> {hybrid, hybrid_bm25_weight} and forwards a SINGLE
+    collection_name ([kb_id]) so every hit attributes to that KB. `hybrid` is
+    always sent; `hybrid_bm25_weight` is sent only when not None (omitted ->
+    OWUI applies the configured RAG_HYBRID_BM25_WEIGHT, the single source in
+    .env; patch 7 honors the per-request value over the global). Returns the raw
+    {documents, distances, metadatas} (the gateway flattens). Raises
+    OwuiError(code) on a non-200 (the gateway maps code -> 4xx/502/503) and
+    OwuiError (no code, -> 503) on transport/timeout."""
+    body = {"collection_names": [kb_id], "query": query, "k": k, "hybrid": hybrid}
+    if hybrid_bm25_weight is not None:
+        body["hybrid_bm25_weight"] = hybrid_bm25_weight
+    code, data, txt = _j("POST", "/api/v1/retrieval/query/collection", api_key,
+                         body, timeout=_retrieve_timeout())
+    if code != 200 or not isinstance(data, dict):
+        raise OwuiError("query_collection -> HTTP %s: %s" % (code, (txt or "")[:200]), code=code)
+    return data
 
 
 def signin(email, password):

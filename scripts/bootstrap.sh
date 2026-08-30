@@ -214,8 +214,8 @@ done
 chmod 600 .env.local
 printf '  set .env.local permissions to 0600\n'
 
-mkdir -p data/neo4j/data data/neo4j/logs data/openwebui
-printf '  ensured ./data/{neo4j/data,neo4j/logs,openwebui} exist\n'
+mkdir -p data/neo4j/data data/neo4j/logs data/openwebui data/postgres
+printf '  ensured ./data/{neo4j/data,neo4j/logs,openwebui,postgres} exist\n'
 
 printf '\nBootstrap done. Next: make preflight && make start\n'
 printf 'After start: make admin-signup (admin %s; password in .env.local OPENWEBUI_FIRST_PASSWORD),\n' "admin@${KB_DOMAIN}"

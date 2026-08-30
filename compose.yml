@@ -40,6 +40,40 @@ services:
       retries: 10
       start_period: 30s
 
+  postgres:
+    # pgvector-enabled Postgres: the Open WebUI vector store (VECTOR_DB=pgvector).
+    # Replaces the embedded Chroma store so retrieval can use server-side BM25
+    # full-text search (to_tsvector('simple', ...) + a GIN index) next to the
+    # vector index. Open WebUI creates the extension, the document_chunk table,
+    # the vector index, and the FTS index at client init, so no init SQL is
+    # needed here. This holds VECTORS ONLY; webui.db (SQLite) stays the app DB.
+    image: pgvector/pgvector:${PGVECTOR_IMAGE_TAG:?PGVECTOR_IMAGE_TAG required in .env}
+    container_name: kb-postgres
+    restart: unless-stopped
+    networks: [owui_net]
+    security_opt:
+      - no-new-privileges:true
+    # No cap_drop:ALL here — the Postgres entrypoint needs CAP_CHOWN/DAC_OVERRIDE
+    # to chown the host-owned ./data bind mount to the postgres user on startup
+    # (same reason as neo4j above).
+    # Internal to owui_net only. Deliberately NO `ports:` mapping; Open WebUI is
+    # the sole client.
+    environment:
+      - POSTGRES_USER=${PGVECTOR_USER:?PGVECTOR_USER required in .env}
+      - POSTGRES_PASSWORD=${PGVECTOR_PASSWORD:?PGVECTOR_PASSWORD required in .env}
+      - POSTGRES_DB=${PGVECTOR_DB:?PGVECTOR_DB required in .env}
+    volumes:
+      - ${DATA_ROOT:?DATA_ROOT required in .env}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      # Bare ${PGVECTOR_USER}/${PGVECTOR_DB} (no :?) inside CMD-SHELL: the
+      # environment block above already fails loud on a missing value, and a :?
+      # inside a CMD-SHELL string is ambiguous between compose and shell.
+      test: ["CMD-SHELL", "pg_isready -U ${PGVECTOR_USER} -d ${PGVECTOR_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
   graphiti:
     # graphiti REST server (graph_service FastAPI app). The image's default
     # Graphiti client uses OpenAIClient (OpenAI Responses API), which Ollama
@@ -203,6 +237,11 @@ services:
       # sync/cleanup, list files). The 15s identity timeout is too short for a
       # large manifest diff or a drained cleanup. Bump for a huge tree.
       - OWUI_INDEX_TIMEOUT=${OWUI_INDEX_TIMEOUT:?OWUI_INDEX_TIMEOUT required in .env}
+      # POST /retrieve: forward timeout + the k bounds the route enforces.
+      - OWUI_RETRIEVE_TIMEOUT=${OWUI_RETRIEVE_TIMEOUT:?OWUI_RETRIEVE_TIMEOUT required in .env}
+      - KB_RETRIEVE_K_DEFAULT=${KB_RETRIEVE_K_DEFAULT:?KB_RETRIEVE_K_DEFAULT required in .env}
+      - KB_RETRIEVE_K_MAX=${KB_RETRIEVE_K_MAX:?KB_RETRIEVE_K_MAX required in .env}
+      - KB_MAX_QUERY=${KB_MAX_QUERY:?KB_MAX_QUERY required in .env}
     # Stateless: no persisted data. The read-only gdrive mount is an INPUT
     # (source files to index), not state. The gateway never writes to it.
     volumes:
@@ -217,18 +256,21 @@ services:
       start_period: 30s
 
   openwebui:
-    # Custom overlay image: the official Open WebUI image + two build-time
-    # patches (path-aware dedup hash in retrieval.py; upload idempotency in
-    # files.py) that stop KB-sync re-upload churn. Built locally from
-    # open-webui/; see open-webui/PATCH.md. The GHCR ref is a local tag (not
-    # pushed), so pull_policy: never — `make pull` skips this service;
-    # `docker compose build openwebui` (or `make start` on first run) builds it.
+    # Custom overlay image: the official Open WebUI image + build-time patches
+    # (KB-sync re-upload churn, retrieval ranking, reranker gating). Built
+    # locally from open-webui/; see open-webui/PATCH.md for the full patch list.
+    # The GHCR ref is a local tag (not pushed), so pull_policy: never — `make
+    # pull` skips this service; `docker compose build openwebui` (or `make start`
+    # on first run) builds it.
     image: ghcr.io/dkhokhlov/open-webui:${OPENWEBUI_IMAGE_TAG:?OPENWEBUI_IMAGE_TAG required in .env}
     build:
       context: open-webui
     pull_policy: never
     container_name: kb-openwebui
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     # Chroma 1.5.x (rust backend) opens a SQLite db per RAG collection. Bulk
     # ingest (api-gateway /index syncing the gdrive tree) creates 100s of collections and
     # exhausts the default 1024 fd soft limit -> SQLITE_CANTOPEN "unable to open
@@ -270,6 +312,11 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_HOST:?OLLAMA_HOST is required (shell env or uncomment in .env)}
       - RAG_EMBEDDING_ENGINE=ollama
       - RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:?RAG_EMBEDDING_MODEL required in .env}
+      # --- Vector DB (pgvector; startup env, NOT a /retrieval/config key) ---
+      - VECTOR_DB=${VECTOR_DB:?VECTOR_DB required in .env}
+      - PGVECTOR_DB_URL=${PGVECTOR_DB_URL:?PGVECTOR_DB_URL required in .env}
+      - PGVECTOR_CREATE_EXTENSION=${PGVECTOR_CREATE_EXTENSION:?PGVECTOR_CREATE_EXTENSION required in .env}
+      - PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH=${PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH:?PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH required in .env}
       # --- Attack-surface reduction (defaults locked to False; see .env) ---
       - USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS=${USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS:?USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS required in .env}
       - USER_PERMISSIONS_WORKSPACE_TOOLS_IMPORT=${USER_PERMISSIONS_WORKSPACE_TOOLS_IMPORT:?USER_PERMISSIONS_WORKSPACE_TOOLS_IMPORT required in .env}

@@ -4,6 +4,7 @@
 #   /memory/*          -> api-gateway:8010  (memory/facts; gateway serves /memory/*)
 #   POST /admin/users  -> api-gateway:8010  (admin user provisioning; POST only)
 #   POST /index        -> api-gateway:8010  (gdrive index sync drive; admin only)
+#   POST /retrieve     -> api-gateway:8010  (KB retrieval; hybrid/lexical/vector)
 #   GET  /status       -> api-gateway:8010  (gdrive index status; read)
 #   GET  /openapi.json -> api-gateway:8010  (gateway surface; ungated)
 #   /health            -> api-gateway:8010  (aggregated; probes OWUI; ungated)
@@ -32,6 +33,10 @@
 		method GET
 		path /openapi.json
 	}
+	@retrieve {
+		method POST
+		path /retrieve
+	}
 	handle /memory/* {
 		reverse_proxy api-gateway:8010
 	}
@@ -45,6 +50,9 @@
 		reverse_proxy api-gateway:8010
 	}
 	handle @openapi {
+		reverse_proxy api-gateway:8010
+	}
+	handle @retrieve {
 		reverse_proxy api-gateway:8010
 	}
 	handle /health {

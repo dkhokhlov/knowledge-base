@@ -182,38 +182,48 @@ class OwuiTests(_Assertions):
                                      {"id": "k2", "name": "KB2"}]})
 
     def test_retrieve(self):
-        chroma = {"documents": [["t1", "t2"]],
-                  "distances": [[0.1, 0.2]],
-                  "metadatas": [[{"file_name": "f1", "file_id": "fid1", "page": 3,
-                                  "start_index": 0, "source": "upload",
-                                  "mtime": "2025-10-30T16:50:57Z"},
-                                 {"file_name": "f2"}]]}
-        ns = mock.Mock(kb="k1", query="q", k=4, no_hybrid=False)
-        # Canned File.meta.data.gdrive record for fid1, so the gdrive-join in
-        # cmd_retrieve (one GET per unique file_id) is exercised without network.
-        # hits[1] has file_id="" -> no GET -> gdrive stays None.
+        # cmd_retrieve POSTs the gateway-mediated /retrieve {kb_id, query, k,
+        # mode}; the gateway flattens the OWUI response into 8-key hits and
+        # returns {hits, score_order}. The wrapper keeps the gdrive join
+        # (File.meta.data.gdrive, file-level, one GET per file_id) and echoes
+        # the resolved kb_id + kb_name + mode + score_order. ns MUST set
+        # mode=None: _mode(a) reads a.mode, and an unset Mock attr is truthy
+        # (would forward a Mock, not "hybrid").
+        ns = mock.Mock(kb="k1", query="q", k=4, mode=None, no_hybrid=False)
+        hits = [{"distance": 0.1, "file": "f1", "file_id": "fid1", "page": 3,
+                 "start_index": 0, "source": "upload",
+                 "mtime": "2025-10-30T16:50:57Z", "text": "t1"},
+                {"distance": 0.2, "file": "f2", "file_id": "", "page": None,
+                 "start_index": None, "source": "", "mtime": None, "text": "t2"}]
+        resp = {"hits": hits, "score_order": "desc"}
+        # Canned File.meta.data.gdrive record for fid1: the gdrive-join in
+        # cmd_retrieve (one GET per unique file_id) runs without network.
+        # hits[1] has file_id="" -> not fetched -> gdrive stays None.
         gdrive = {"grounded": True, "labels": ["spec"],
                   "approval": {"status": "approved",
                                "complete_time": "2026-01-01T00:00:00Z"},
                   "comments": ["c1"], "description": "desc",
                   "modified_time": "2026-01-02T00:00:00Z"}
-        # _resolve_kb supplies the provenance (kb_id, kb_name); jget serves the
-        # Chroma collection query; _file_gdrive serves the per-file gdrive meta.
-        # retrieve no longer trusts a hand-copied id.
+        # _resolve_kb supplies provenance (kb_id, kb_name); jget serves the
+        # /retrieve response; _file_gdrive serves the per-file gdrive meta.
+        jget = mock.Mock(return_value=resp)
         out = _run([(owui, "_resolve_kb", ("k1", "KB1")),
-                   (owui, "jget", chroma),
+                   (owui, "jget", jget),
                    (owui, "_file_gdrive", gdrive)], owui.cmd_retrieve, ns)
         d = self.assert_json(out); self.assert_compact(out)
-        # top-level provenance (#3): resolved kb_id + kb_name echo, plus hits.
-        self.assertEqual(set(d), {"kb_id", "kb_name", "hits"})
+        self.assertEqual(set(d), {"kb_id", "kb_name", "mode", "score_order", "hits"})
         self.assertEqual(d["kb_id"], "k1")
         self.assertEqual(d["kb_name"], "KB1")
+        self.assertEqual(d["mode"], "hybrid")
+        self.assertEqual(d["score_order"], "desc")
         self.assertEqual(len(d["hits"]), 2)
-        # file_id/page/start_index/source/mtime propagate from Chroma metadata
-        # so the agent can round-trip a hit to the original page (file <file_id>
-        # + pdftotext/pdftoppm -f <page>) and see the source mtime; absent
-        # metadata defaults to None / "". The chunk `id` is NOT emitted: OWUI
-        # returns no `ids` array, so it was always "" and non-actionable.
+        # jget called ONCE for POST /retrieve (resolve is patched, not jget).
+        self.assertEqual(jget.call_count, 1)
+        args, _ = jget.call_args
+        self.assertEqual(args[:4], (BASE, KEY, "POST", "/retrieve"))
+        self.assertEqual(args[4], {"kb_id": "k1", "query": "q", "k": 4,
+                                    "mode": "hybrid"})
+        # the 8 hit keys come from the gateway flatten; gdrive joined per file_id
         self.assertEqual(set(d["hits"][0]),
                          {"distance", "file", "file_id", "page",
                           "start_index", "source", "mtime", "text", "gdrive"})
@@ -221,14 +231,58 @@ class OwuiTests(_Assertions):
         self.assertEqual(d["hits"][0]["file_id"], "fid1")
         self.assertEqual(d["hits"][0]["page"], 3)
         self.assertEqual(d["hits"][0]["mtime"], "2025-10-30T16:50:57Z")
-        # gdrive-join: fid1 has gdrive meta -> curated view (grounded carries
-        # through); hits[1] has no file_id -> gdrive None.
+        # gdrive-join: fid1 -> curated view (grounded carries through); hits[1]
+        # has file_id="" -> not fetched -> gdrive None.
         self.assertEqual(d["hits"][0]["gdrive"]["grounded"], True)
         self.assertEqual(d["hits"][0]["gdrive"]["approval_status"], "approved")
         self.assertIsNone(d["hits"][1]["page"])
         self.assertIsNone(d["hits"][1]["mtime"])
         self.assertIsNone(d["hits"][1]["gdrive"])
         self.assertEqual(d["hits"][1]["file_id"], "")
+
+    def test_retrieve_mode_aliases(self):
+        # cmd_retrieve forwards the resolved mode in both the printed object
+        # and the POST body. --mode lexical / --mode vector pass through; bare
+        # --no-hybrid resolves to vector (deprecated alias); --no-hybrid +
+        # --mode vector is redundant but ACCEPTED (consistent, not a conflict).
+        cases = [("lexical", False, "lexical"),
+                 ("vector", False, "vector"),
+                 (None, True, "vector"),        # --no-hybrid alias
+                 ("vector", True, "vector")]     # --no-hybrid --mode vector
+        for mode_arg, no_hybrid, expect in cases:
+            ns = mock.Mock(kb="k1", query="q", k=4, mode=mode_arg,
+                           no_hybrid=no_hybrid)
+            jget = mock.Mock(return_value={"hits": [], "score_order": "desc"})
+            out = _run([(owui, "_resolve_kb", ("k1", "KB1")),
+                       (owui, "jget", jget)], owui.cmd_retrieve, ns)
+            d = self.assert_json(out)
+            self.assertEqual(d["mode"], expect, (mode_arg, no_hybrid))
+            body = jget.call_args.args[4]
+            self.assertEqual(body["mode"], expect, (mode_arg, no_hybrid))
+
+    def test_mode_resolution(self):
+        # _mode resolves --mode + the deprecated --no-hybrid alias. --no-hybrid
+        # is an alias for --mode vector; it conflicts with an explicit
+        # --mode hybrid/lexical (exit) but is redundant-but-accepted with
+        # --mode vector. A bare --no-hybrid emits a deprecation line to stderr.
+        def _m(mode, no_hybrid):
+            return owui._mode(mock.Mock(mode=mode, no_hybrid=no_hybrid))
+
+        self.assertEqual(_m(None, False), "hybrid")   # bare default
+        self.assertEqual(_m("hybrid", False), "hybrid")
+        self.assertEqual(_m("lexical", False), "lexical")
+        self.assertEqual(_m("vector", False), "vector")
+        with self.assertRaises(SystemExit):
+            _m("hybrid", True)   # --no-hybrid conflicts with --mode hybrid
+        with self.assertRaises(SystemExit):
+            _m("lexical", True)  # --no-hybrid conflicts with --mode lexical
+        self.assertEqual(_m("vector", True), "vector")  # redundant, accepted
+        # bare --no-hybrid -> vector + stderr deprecation
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertEqual(owui._mode(mock.Mock(mode=None, no_hybrid=True)),
+                             "vector")
+        self.assertIn("deprecation", buf.getvalue())
 
     def test_resolve_kb(self):
         # Resolution order: exact id; valid-but-unknown UUID FAILS (no
@@ -466,30 +520,69 @@ class OwuiTests(_Assertions):
 
     def test_retrieve_projects(self):
         ns = mock.Mock(query="q", host=None, project=None, account=None,
-                       kb_glob=None, k=4, no_hybrid=False)
+                       kb_glob=None, k=4, mode=None, no_hybrid=False)
         hits = [{"distance": 0.1, "file": "f", "text": "t"}]
         items = [{"id": "k1", "name": "testhost--p", "user": {"email": "a@b"},
                   "description": "repo=r"}]
         patches = [
             (owui, "_whoami", {"email": "a@b"}),
             (owui, "jget", {"items": items}),
-            (owui, "_search_one_kb", (hits, None)),
+            (owui, "_search_one_kb", (hits, "desc", None)),
         ]
         out = _run(patches, owui.cmd_retrieve_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["kbs"], 1)
+        self.assertEqual(d["score_order"], "desc")
         self.assertEqual(len(d["hits"]), 1)
         self.assertEqual(d["hits"][0]["kb_name"], "testhost--p")
         self.assertEqual(d["hits"][0]["repo"], "r")
 
     def test_retrieve_projects_empty(self):
         ns = mock.Mock(query="q", host=None, project=None, account=None,
-                       kb_glob=None, k=4, no_hybrid=False)
+                       kb_glob=None, k=4, mode=None, no_hybrid=False)
         patches = [(owui, "_whoami", {"email": "a@b"}),
                    (owui, "jget", {"items": []})]
         out = _run(patches, owui.cmd_retrieve_projects, ns)
         d = self.assert_json(out); self.assert_compact(out)
-        self.assertEqual(d, {"kbs": 0, "hits": [], "errors": []})
+        self.assertEqual(d, {"kbs": 0, "score_order": "asc",
+                             "hits": [], "errors": []})
+
+    def test_retrieve_projects_sort_order(self):
+        # score_order drives the merge sort: hybrid/lexical return an RRF score
+        # (higher=better, desc); vector returns a cosine distance (lower=better,
+        # asc). Sorting ascending unconditionally reverses hybrid ranking — this
+        # guards that fix. Two KBs each return 3 hits at fixed distances.
+        items = [{"id": "k1", "name": "h--p1", "user": {"email": "a@b"},
+                  "description": "repo=r1"},
+                 {"id": "k2", "name": "h--p2", "user": {"email": "a@b"},
+                  "description": "repo=r2"}]
+        kb1 = [{"distance": 0.9, "text": "a"}, {"distance": 0.1, "text": "b"},
+               {"distance": 0.5, "text": "c"}]
+        kb2 = [{"distance": 0.8, "text": "d"}, {"distance": 0.2, "text": "e"},
+               {"distance": 0.6, "text": "f"}]
+
+        def _search(base, key, kb_id, query, k, mode):
+            return (list(kb1 if kb_id == "k1" else kb2), self._order, None)
+
+        def _run_proj(order):
+            self._order = order
+            ns = mock.Mock(query="q", host=None, project=None, account=None,
+                           kb_glob=None, k=10, mode=None, no_hybrid=False)
+            patches = [(owui, "_whoami", {"email": "a@b"}),
+                       (owui, "jget", {"items": items}),
+                       (owui, "_search_one_kb", mock.Mock(side_effect=_search))]
+            return _run(patches, owui.cmd_retrieve_projects, ns)
+
+        # desc: highest distance first (RRF score, higher=better)
+        d = self.assert_json(_run_proj("desc"))
+        self.assertEqual(d["score_order"], "desc")
+        self.assertEqual([h["distance"] for h in d["hits"]],
+                         [0.9, 0.8, 0.6, 0.5, 0.2, 0.1])
+        # asc: lowest distance first (cosine distance, lower=better)
+        d = self.assert_json(_run_proj("asc"))
+        self.assertEqual(d["score_order"], "asc")
+        self.assertEqual([h["distance"] for h in d["hits"]],
+                         [0.1, 0.2, 0.5, 0.6, 0.8, 0.9])
 
     def test_status_projects_success(self):
         ns = mock.Mock(project="p", host=None, wait=False)

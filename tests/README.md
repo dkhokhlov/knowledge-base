@@ -75,6 +75,8 @@ regenerate with `--out gdrive/.tests/chunkq`). test_13 runs it with
 | `test_10_ocr_auth` | `tests/test_10_ocr_auth.sh` | `integration` |
 | `test_11_gdrive_index_fixture` | `tests/test_11_gdrive_index_fixture.sh` | `integration` |
 | `test_13_chunk_quality` | `tests/test_13_chunk_quality.sh` | `integration` |
+| `test_14_rag_config` | `tests/test_14_rag_config.sh` | `integration` |
+| `test_15_retrieve` | `tests/test_15_retrieve.sh` | `integration` |
 | `test_12_kb_check` | `tests/test_12_kb_check.sh` | `e2e` |
 | `test_e2e_iso` | `scripts/test-e2e-iso.sh` | `e2e long` |
 | (native UT) | `test_gateway_unit.py` | `unit` |

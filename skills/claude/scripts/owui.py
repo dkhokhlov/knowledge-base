@@ -82,31 +82,6 @@ def jget(base, key, method, path, body=None):
         sys.exit("FAIL  non-JSON response from %s %s: %s" % (method, path, txt[:300]))
 
 
-def flatten_chroma(d):
-    """Chroma response: {documents:[[…]], distances:[[…]], metadatas:[[…]]}
-    — one inner list per collection_name. OWUI returns no `ids` (verified for
-    both hybrid and pure-vector paths); a chunk is identified by metadata
-    file_id + start_index. Flatten to hit dicts."""
-    docs = d.get("documents", [[]])
-    dists = d.get("distances", [[]])
-    metas = d.get("metadatas", [[]])
-    out = []
-    for sub_docs, sub_d, sub_m in zip(docs, dists, metas):
-        for j, t in enumerate(sub_docs or []):
-            m = (sub_m[j] if j < len(sub_m or []) else {}) or {}
-            out.append({
-                "distance": sub_d[j] if j < len(sub_d or []) else None,
-                "file": m.get("file_name") or m.get("name") or "",
-                "file_id": m.get("file_id") or "",
-                "page": m.get("page"),
-                "start_index": m.get("start_index"),
-                "source": m.get("source") or "",
-                "mtime": m.get("mtime"),
-                "text": t,
-            })
-    return out
-
-
 def _file_gdrive(base, key, file_id):
     """Read File.meta.data.gdrive for one file — the Drive record (description,
     labels, grounded flag, approval, comments) the gateway stored at upload from
@@ -215,21 +190,42 @@ def _resolve_kb(base, key, arg):
              % (arg, "; ".join(cands)))
 
 
+def _mode(a):
+    """Resolve the retrieval mode from --mode + the deprecated --no-hybrid alias.
+    --no-hybrid is a deprecated alias for --mode vector (pure vector, no hybrid
+    search). --no-hybrid conflicts with an explicit --mode hybrid/lexical and
+    exits non-zero; --no-hybrid + --mode vector is redundant but accepted. A bare
+    --no-hybrid (no --mode) emits a deprecation line to stderr."""
+    mode = a.mode or "hybrid"
+    if getattr(a, "no_hybrid", False):
+        if a.mode is None or a.mode == "vector":
+            if a.mode is None:
+                sys.stderr.write(
+                    "deprecation: --no-hybrid is an alias for --mode vector; use --mode vector\n")
+            return "vector"
+        sys.exit("FAIL  --no-hybrid conflicts with --mode %r (use --mode vector)" % a.mode)
+    return mode
+
+
 def cmd_retrieve(base, key, a):
+    mode = _mode(a)
     kb_id, kb_name = _resolve_kb(base, key, a.kb)
-    body = {"collection_names": [kb_id], "query": a.query, "k": a.k, "hybrid": not a.no_hybrid}
-    d = jget(base, key, "POST", "/api/v1/retrieval/query/collection", body)
-    hits = flatten_chroma(d)
-    # Join File.meta.data.gdrive per unique file_id so the file-level Drive record
-    # (grounded/labels/approval/comments/description/modified_time) travels with
-    # each chunk at retrieval time. gdrive is file-level (not in chunk metadata),
-    # so one GET per unique file_id; missing gdrive -> None (never aborts).
+    # Gateway-mediated retrieve: POST /retrieve (Caddy -> api-gateway) maps mode
+    # -> {hybrid, hybrid_bm25_weight} and forwards to OWUI with the caller's key
+    # (OWUI enforces KB read access natively). The gateway flattens the OWUI
+    # {documents,distances,metadatas} response into 8-key hits; the gdrive join
+    # stays here (File.meta.data.gdrive is file-level, one GET per file_id).
+    body = {"kb_id": kb_id, "query": a.query, "k": a.k, "mode": mode}
+    d = jget(base, key, "POST", "/retrieve", body)
+    hits = d.get("hits", [])
+    score_order = d.get("score_order", "asc")
     gcache = {}
     for fid in {h.get("file_id") for h in hits if h.get("file_id")}:
         gcache[fid] = _gdrive_view(_file_gdrive(base, key, fid))
     for h in hits:
         h["gdrive"] = gcache.get(h.get("file_id"))
-    print(json.dumps({"kb_id": kb_id, "kb_name": kb_name, "hits": hits}))
+    print(json.dumps({"kb_id": kb_id, "kb_name": kb_name, "mode": mode,
+                      "score_order": score_order, "hits": hits}))
 
 
 def cmd_rag(base, key, a):
@@ -483,18 +479,20 @@ def _delete_file(base, key, file_id):
     return True, None
 
 
-def _search_one_kb(base, key, kb_id, query, k, hybrid):
-    """POST /api/v1/retrieval/query/collection with a SINGLE collection_name so
-    every hit is attributable to this KB (hit metadata carries no knowledge_id;
-    one call per KB is the reliable attribution). Returns (hits, err)."""
-    body = {"collection_names": [kb_id], "query": query, "k": k, "hybrid": hybrid}
-    code, txt = call(base, key, "POST", "/api/v1/retrieval/query/collection", body)
+def _search_one_kb(base, key, kb_id, query, k, mode):
+    """POST /retrieve (gateway-mediated) for a SINGLE KB. The gateway forwards a
+    single collection_name to OWUI, flattens the response, and returns
+    {hits, score_order}. Returns (hits, score_order, err); score_order is 'asc'
+    on error (cosine distance convention, the safer default)."""
+    body = {"kb_id": kb_id, "query": query, "k": k, "mode": mode}
+    code, txt = call(base, key, "POST", "/retrieve", body)
     if code != 200:
-        return [], "HTTP %s: %s" % (code, (txt or "")[:200])
-    hits = flatten_chroma(json.loads(txt))
+        return [], "asc", "HTTP %s: %s" % (code, (txt or "")[:200])
+    d = json.loads(txt)
+    hits = d.get("hits", [])
     for h in hits:
         h["kb_id"] = kb_id
-    return hits, None
+    return hits, d.get("score_order", "asc"), None
 
 
 def _parse_repo(desc):
@@ -671,6 +669,7 @@ def cmd_index_projects(base, key, a):
 def cmd_retrieve_projects(base, key, a):
     me = _whoami(base, key)
     account = a.account or me.get("email", "?")
+    mode = _mode(a)
     d = jget(base, key, "GET", "/api/v1/knowledge/")
     items = d.get("items", []) if isinstance(d, dict) else d
     selected = []
@@ -690,18 +689,28 @@ def cmd_retrieve_projects(base, key, a):
         selected.append((k["id"], name, repo))
     all_hits = []
     errors = []
+    score_order = "asc"  # every KB call uses the same mode; capture the first
     for kb_id, name, repo in selected:
-        hits, err = _search_one_kb(base, key, kb_id, a.query, a.k, not a.no_hybrid)
+        hits, so, err = _search_one_kb(base, key, kb_id, a.query, a.k, mode)
         if err:
             errors.append({"kb_name": name, "error": err})
             continue
+        if not errors and not all_hits:
+            score_order = so
         for h in hits:
             h["kb_name"] = name
             h["repo"] = repo
             all_hits.append(h)
-    all_hits.sort(key=lambda h: h["distance"] if isinstance(h.get("distance"), (int, float)) else 1.0)
+    # Sort by score_order: hybrid/lexical return an RRF score (higher=better,
+    # desc); vector returns a cosine distance (lower=better, asc). Sorting
+    # ascending unconditionally reverses the hybrid ranking — this fixes that.
+    reverse = score_order == "desc"
+    fill = float("-inf") if reverse else float("inf")
+    all_hits.sort(key=lambda h: h["distance"] if isinstance(h.get("distance"), (int, float)) else fill,
+                  reverse=reverse)
     all_hits = all_hits[:a.k]
-    print(json.dumps({"kbs": len(selected), "hits": all_hits, "errors": errors}))
+    print(json.dumps({"kbs": len(selected), "score_order": score_order,
+                      "hits": all_hits, "errors": errors}))
 
 
 def cmd_status_projects(base, key, a):
@@ -768,7 +777,11 @@ def main():
 
     sp = sub.add_parser("retrieve", help="retrieve documents from a KB by name or id (semantic)")
     sp.add_argument("kb", help="KB name or id"); sp.add_argument("query")
-    sp.add_argument("--k", type=int, default=5); sp.add_argument("--no-hybrid", action="store_true")
+    sp.add_argument("--k", type=int, default=5)
+    sp.add_argument("--mode", choices=["hybrid", "lexical", "vector"], default=None,
+                    help="retrieval mode (default hybrid; lexical = pure FTS, vector = pure vector)")
+    sp.add_argument("--no-hybrid", action="store_true",
+                    help="deprecated alias for --mode vector (pure vector)")
 
     sp = sub.add_parser("rag", help="RAG chat grounded on one or more KBs (proxied by api-gateway /memory/rag)")
     sp.add_argument("question"); sp.add_argument("--kb", action="append", default=[])
@@ -795,7 +808,10 @@ def main():
     sp.add_argument("--mine", action="store_true", help="alias for the default (account = caller)")
     sp.add_argument("--kb-glob", default=None, help="fnmatch glob on the KB name")
     sp.add_argument("--k", type=int, default=5, help="top-k hits after merge")
-    sp.add_argument("--no-hybrid", action="store_true", help="pure vector search (no hybrid)")
+    sp.add_argument("--mode", choices=["hybrid", "lexical", "vector"], default=None,
+                    help="retrieval mode (default hybrid; lexical = pure FTS, vector = pure vector)")
+    sp.add_argument("--no-hybrid", action="store_true",
+                    help="deprecated alias for --mode vector (pure vector)")
 
     sp = sub.add_parser("status-projects",
                         help="drain status of the current repo's project-memory KB (walks up cwd)")

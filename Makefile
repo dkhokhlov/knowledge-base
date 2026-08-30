@@ -194,17 +194,24 @@ kb-public-read: ## Grant public read (user:*) on EVERY knowledge base + enable s
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
 	@./scripts/kb-public-read.sh
 
-kb-check: ## Cross-DB health check (OWUI SQLite + Chroma): audit both DBs, report 12 inconsistency classes, advise purge. PURGE=1 to purge safe classes (1 ghosts, 3 orphan file-{id}, 11 dangling dirs; BACKUP=1 default exports first). PURGE=1 MAINT=1 stops OWUI to also purge maint classes (5b leaked KB vectors, 7 orphan junction, 8 dead-KB junction). REPAIR=1 stops OWUI to repair class-9 stuck-processing-while-linked files (linked + content + vectors, but status stuck at processing) -> completed; combine with PURGE/MAINT to do both. KB=<id> scopes the KB-tagged classes; JSON=1 machine-readable; SHOW_NAMES=1 prints filenames (default ids-only).
+kb-check: ## Cross-DB health check (OWUI SQLite + vector store: Chroma or pgvector, selected by VECTOR_DB). Audit both stores, report 12 inconsistency classes, advise purge. PURGE=1 to purge safe classes (1 ghosts, 3 orphan file-{id}, 11 dangling dirs; BACKUP=1 default exports first). PURGE=1 MAINT=1 stops OWUI to also purge maint classes (5b leaked KB vectors, 7 orphan junction, 8 dead-KB junction). REPAIR=1 stops OWUI to repair class-9 stuck-processing-while-linked files (linked + content + vectors, but status stuck at processing) -> completed; combine with PURGE/MAINT to do both. KB=<id> scopes the KB-tagged classes; JSON=1 machine-readable; SHOW_NAMES=1 prints filenames (default ids-only).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  OWUI="$${OWUI_CONTAINER:-kb-openwebui}"; \
+	  VENV="-e VECTOR_DB"; \
+	  PG_ENV=; NET=; \
+	  if [ "$${VECTOR_DB:-}" = "pgvector" ]; then \
+	    PG_ENV="-e PGVECTOR_USER -e PGVECTOR_PASSWORD -e PGVECTOR_DB -e PGVECTOR_DB_URL"; \
+	    NET="--network $${COMPOSE_PROJECT_NAME:-knowledgebase}_owui_net"; \
+	  fi; \
 	  if [ "$${MAINT:-0}" = "1" ] || [ "$${REPAIR:-0}" = "1" ]; then \
-	    echo "==> maintenance window: stopping $$OWUI (direct Chroma/SQLite writes)"; \
+	    echo "==> maintenance window: stopping $$OWUI (direct vector/SQLite writes)"; \
 	    docker stop $$OWUI >/dev/null; \
 	    trap 'echo "==> restarting $$OWUI"; docker start $$OWUI >/dev/null' EXIT; \
-	    docker run --rm --entrypoint /usr/local/bin/python3 \
+	    docker run --rm --entrypoint /usr/local/bin/python3 $$NET \
 	      -v "$$(readlink -f "$${DATA_ROOT:-./data}")/openwebui:/app/backend/data" \
 	      -v "$(CURDIR)/scripts/kb_check.py:/app/kb_check.py:ro" \
+	      $$VENV $$PG_ENV \
 	      ghcr.io/dkhokhlov/open-webui:"$${OPENWEBUI_IMAGE_TAG:?OPENWEBUI_IMAGE_TAG required in .env}" \
 	      /app/kb_check.py $${KB:+--kb $$KB} $${JSON:+--json} $${SHOW_NAMES:+--show-names} \
 	        $${PURGE:+--purge} $${MAINT:+--maint} $${REPAIR:+--repair} \
@@ -213,7 +220,7 @@ kb-check: ## Cross-DB health check (OWUI SQLite + Chroma): audit both DBs, repor
 	    KEY_ENV=; if [ "$${PURGE:-0}" = "1" ]; then \
 	      [ -n "$${OPENWEBUI_ADMIN_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (PURGE=1 ghost delete needs it)"; exit 1; }; \
 	      KEY_ENV="-e OPENWEBUI_ADMIN_API_KEY"; fi; \
-	    docker exec -i $$KEY_ENV $$OWUI python3 - < scripts/kb_check.py \
+	    docker exec -i $$KEY_ENV $$VENV $$PG_ENV $$OWUI python3 - < scripts/kb_check.py \
 	      $${KB:+--kb $$KB} $${JSON:+--json} $${SHOW_NAMES:+--show-names} \
 	      $${PURGE:+--purge} $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
 	  fi

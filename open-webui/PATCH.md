@@ -1,6 +1,6 @@
-# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete + offset-aware chunking + resilient terminal status
+# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete + offset-aware chunking + resilient terminal status + per-request hybrid mode + top-k preservation + skip-cosine-reranker
 
-This directory builds a thin-overlay custom Open WebUI image that applies six
+This directory builds a thin-overlay custom Open WebUI image that applies nine
 build-time patches to the backend. Patches 1–2 target the **2b churn**: the
 gdrive-indexer (oikb) re-uploading files every sync cycle. Patch 3 propagates
 the source file mtime into chunk metadata so a retrieve hit can report it.
@@ -11,6 +11,11 @@ document text (served by `/data/content`) so a retrieved chunk is sliceable by
 offset, via a span-preserving chunker that does not mutate content. Patch 6
 makes the terminal file-status write (`status='completed'`) resilient so a
 transient commit failure cannot leave a file linked-but-stuck-`processing`.
+Patches 7–9 fix retrieval ranking: patch 7 honors a per-request `hybrid` +
+`hybrid_bm25_weight` over the global (so `mode=vector`/`lexical` work), patch 8
+stops the reranker candidate cap truncating below the requested `k`, and patch
+9 stops the cosine-reranker fallback re-burying exact FTS/BM25 matches when no
+real reranker is configured.
 
 - **Patch 1 — path-aware dedup hash** (`retrieval.py`): OWUI rejected same-content
   files at different paths as `DUPLICATE_CONTENT`; oikb re-uploaded them every cycle.
@@ -127,23 +132,28 @@ tag is provenance only — the `@sha256:` digest binds the build, not the tag.
 
 The `:0.11.0` release tag is a **separate build artifact** (manifest-list
 digest `sha256:72c0ba64…`), same 0.11.0 content. This pin keeps the `:main`
-build the three patches were validated against; switching to the `:0.11.0`
+build the nine patches were validated against; switching to the `:0.11.0`
 release digest would change the base artifact and require re-validating all
-five apply scripts against its source (see Rebase procedure).
+nine apply scripts against its source (see Rebase procedure).
 
 ## Rebase procedure (when bumping the base image)
 
 1. Pick the new base digest:
    `docker image inspect ghcr.io/open-webui/open-webui:<tag> --format '{{index .RepoDigests 0}}'`
-2. Extract both patched router files:
-   `docker create --name x <new-ref> && docker cp x:/app/backend/open_webui/routers/retrieval.py /tmp/r.py && docker cp x:/app/backend/open_webui/routers/files.py /tmp/f.py && docker rm x`
-3. Test all five apply scripts against the extracted files:
+2. Extract the patched files (`routers/retrieval.py`, `routers/files.py`,
+   `retrieval/utils.py`, `models/files.py`):
+   `docker create --name x <new-ref> && docker cp x:/app/backend/open_webui/routers/retrieval.py /tmp/r.py && docker cp x:/app/backend/open_webui/routers/files.py /tmp/f.py && docker cp x:/app/backend/open_webui/retrieval/utils.py /tmp/u.py && docker cp x:/app/backend/open_webui/models/files.py /tmp/mf.py && docker rm x`
+3. Test all nine apply scripts against the extracted files (in build order):
    `OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_path_hash.py`
    `OWUI_FILES_PY=/tmp/f.py python3 open-webui/apply_upload_idempotency.py`
    `OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_mtime_to_chunks.py`
    `OWUI_FILES_PY=/tmp/f.py python3 open-webui/apply_vector_cleanup_on_delete.py`
    `OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_offset_aware_chunking.py`
-   - If all print `OK ...` and `python3 -m py_compile /tmp/r.py /tmp/f.py`
+   `OWUI_RETRIEVAL_PY=/tmp/r.py OWUI_MODELS_FILES_PY=/tmp/mf.py python3 open-webui/apply_terminal_status.py`
+   `OWUI_UTILS_PY=/tmp/u.py OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_query_mode.py`
+   `OWUI_UTILS_PY=/tmp/u.py OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_query_top_k.py`
+   `OWUI_UTILS_PY=/tmp/u.py python3 open-webui/apply_skip_cosine_reranker.py`
+   - If all print `OK ...` and `python3 -m py_compile /tmp/r.py /tmp/f.py /tmp/u.py /tmp/mf.py`
      passes → the anchors still match; bump `OPENWEBUI_BASE_DIGEST` in
      `Dockerfile`, rebuild.
    - If any fails (`expected exactly 1 occurrence ...`) → that anchor
@@ -934,3 +944,180 @@ re-index is required for the patch itself.
   (retryable by reconcile + caught by `make kb-check --repair`). Not
   stuck-forever-linked. Quad coverage: retry → abort-before-link → reconcile →
   kb-check repair.
+
+---
+
+# Patch 7 — per-request hybrid-mode override (`retrieval/utils.py` + `routers/retrieval.py`)
+
+## Problem (patch 7)
+
+`query_collection()` (`retrieval/utils.py`) re-reads the **global**
+`rag.enable_hybrid_search` and ignores the per-request `hybrid` flag:
+
+```python
+if request and config.get('rag.enable_hybrid_search'):
+    # -> query_collection_with_hybrid_search(... hybrid_bm25_weight=config.get(...))
+```
+
+So `hybrid=False` (pure vector) is a no-op when the global is on — the api-gateway
+`/retrieve` `mode=vector` cannot override the global. The handler's else-branch
+(non-hybrid) also never passes `hybrid`/`hybrid_bm25_weight` into
+`query_collection`, so the per-request value is dropped before it can be honored.
+
+## Fix (patch 7)
+
+1. Add `hybrid: bool|None=None` + `hybrid_bm25_weight: float|None=None` params to
+   `query_collection`.
+2. Resolve an effective flag + weight (per-request overrides global):
+   `hybrid=False` → pure vector; `hybrid=True, weight=1.0` → pure FTS (lexical);
+   `hybrid=True, weight omitted` → the global `RAG_HYBRID_BM25_WEIGHT`; `hybrid`
+   omitted → the global. Gate on the effective flag.
+3. Thread the resolved weight into `query_collection_with_hybrid_search`.
+4. Pass `hybrid`/`hybrid_bm25_weight` from the handler else-branch so the
+   per-request flag reaches `query_collection` (vector mode lands here).
+
+`QueryCollectionsForm` (`routers/retrieval.py`) already has `hybrid`,
+`hybrid_bm25_weight`, `k`, `k_reranker` — no new OWUI field.
+
+## What patch 7 changes (3 sites in `retrieval/utils.py` + 1 in `routers/retrieval.py`)
+
+`apply_query_mode.py` does four targeted replacements, each asserting its anchor
+occurs exactly once (fail loud on drift):
+
+- Site 1 — `query_collection` signature: add the two per-request params.
+- Site 2 — the global-only gate: replace
+  `if request and config.get('rag.enable_hybrid_search'):` with the
+  `_hybrid_enabled` / `_effective_bm25_weight` resolution block + an
+  `if request and _hybrid_enabled:` gate.
+- Site 3 — the hybrid-search call kwarg: replace
+  `hybrid_bm25_weight=config.get('rag.hybrid_bm25_weight'),` with
+  `hybrid_bm25_weight=_effective_bm25_weight,`.
+- Site 4 (`routers/retrieval.py`) — the `/query/collection` handler else-branch:
+  add `hybrid=form_data.hybrid,` + `hybrid_bm25_weight=form_data.hybrid_bm25_weight,`
+  to the `query_collection(...)` call.
+
+Anchors come from the **running image** `kb-openwebui`, NOT the upstream clone
+— the image uses `ThreadPoolExecutor` +
+f-string logging; the clone uses `asyncio.gather` + `%s`, and the clone anchors
+fail the count check. Test override: `OWUI_UTILS_PY=… OWUI_RETRIEVAL_PY=…`.
+
+## No KB reset on cutover (patch 7)
+
+Patch 7 changes routing logic, not chunk content or embeddings. Existing
+vectors are untouched. The per-request override takes effect on the next
+`docker compose build openwebui` + restart. `mode=vector` is inert until this
+patch ships — land P7/P8/P9 + the gateway `/retrieve` route in the same release.
+
+---
+
+# Patch 8 — top-k preservation (`retrieval/utils.py` + `routers/retrieval.py`)
+
+## Problem (patch 8)
+
+The reranker candidate cap `k_reranker` is set to the **global** `TOP_K_RERANKER`
+(default 3) regardless of the request `k`. A request with `k=10` gets its
+hybrid/lexical result truncated to 3. The api-gateway `/retrieve` route honors a
+per-request `k` up to `KB_RETRIEVE_K_MAX`, so the cap must never fall below the
+request `k`.
+
+## Fix (patch 8)
+
+`k_reranker = max(k, global)` — the reranker never truncates below the requested
+`k`. The global still raises the cap when it is larger (e.g. 50). With patch 9
+(skip the cosine reranker when no real reranker is configured) the cap is moot in
+the no-reranker case, but `max()` keeps the contract correct when a real
+reranker IS configured. `or 0` guards a `None` config value (`max()` raises
+`TypeError` on `None`).
+
+## What patch 8 changes (1 site in `retrieval/utils.py` + 2 in `routers/retrieval.py`)
+
+`apply_query_top_k.py` replaces the `k_reranker=` kwarg:
+
+- `retrieval/utils.py` (the `query_collection_with_hybrid_search` call, 1
+  occurrence): `k_reranker=config.get('rag.top_k_reranker'),` →
+  `k_reranker=max(k, config.get('rag.top_k_reranker') or 0),`.
+- `routers/retrieval.py` (the single-doc `/query` + the `/query/collection`
+  handlers, 2 identical occurrences): `k_reranker=form_data.k_reranker or
+  config.TOP_K_RERANKER,` → `k_reranker=max(form_data.k if form_data.k else
+  config.TOP_K, form_data.k_reranker or config.TOP_K_RERANKER),`.
+
+The utils anchor is independent of patch 7's site-3 kwarg (different line in the
+same call), so the build order P7→P8 is safe. Test override:
+`OWUI_UTILS_PY=… OWUI_RETRIEVAL_PY=…`.
+
+## No KB reset on cutover (patch 8)
+
+Routing logic only; no chunk/embedding change. Takes effect on rebuild + restart.
+
+---
+
+# Patch 9 — skip cosine reranker when no real reranker (`retrieval/utils.py`)
+
+## Problem (patch 9)
+
+When no real reranker is configured (`RAG_RERANKING_ENGINE=""`),
+`RerankCompressor.acompress_documents` falls back to embedding-cosine: it
+re-embeds the query + every candidate and re-sorts by pure-semantic similarity.
+That is an **extra embedding pass** (a cost, not a perf hack), reused unchanged
+on the hybrid path where it defeats lexical ranking: the cosine fallback re-sorts
+the BM25/RRF-fused results and buries the exact keyword/register chunks BM25
+surfaced (measured: `CAP_ENGAGE` exact chunk dropped to rank 10, `0x1c05`
+absent). The fallback exists to keep the langchain
+`ContextualCompressionRetriever` pipeline uniform, not because cosine rerank
+helps. **No rerank means no rerank.**
+
+## Fix (patch 9)
+
+A **single-site** patch to the compressor's `else:` branch (the cosine
+fallback). When `reranking_function is None`, do NOT cosine-rerank. Preserve the
+input (RRF-fused) order: keep any existing per-doc `score` (the native pgvector
+path and BM25 both attach one via `_search_result_to_documents` /
+`merge_and_sort_query_results`), else assign a decreasing rank score
+`float(len(documents) - idx)` so the downstream sort-by-distance preserves this
+order. Cap at `self.top_n` (≥ `k` via patch 8). Return the pass-through directly.
+
+A single-site patch (not gating the two call sites) is the safer choice: the
+legacy ensemble path's `ainvoke` may not set `metadata['score']`, so gating at
+the call sites would yield `None` distances downstream (`TypeError` on sort).
+Patching the compressor else-branch covers BOTH the native pgvector path and the
+legacy ensemble path uniformly, and the pass-through keeps/assigns a `score` in
+both.
+
+## What patch 9 changes (1 site in `retrieval/utils.py`)
+
+`apply_skip_cosine_reranker.py` replaces the cosine-fallback body (12-space
+indent) inside `acompress_documents`:
+
+```python
+# before
+            from sentence_transformers import util as st_util
+
+            query_embedding = await self.embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
+            doc_texts = [doc.page_content for doc in documents]
+            document_embedding = await self.embedding_function(doc_texts, RAG_EMBEDDING_CONTENT_PREFIX)
+            scores = st_util.cos_sim(query_embedding, document_embedding)[0]
+# after
+            final_results = []
+            for idx, doc in enumerate(documents[: self.top_n]):
+                metadata = doc.metadata
+                if 'score' not in metadata:
+                    metadata['score'] = float(len(documents) - idx)
+                final_results.append(
+                    Document(page_content=doc.page_content, metadata=metadata)
+                )
+            return final_results
+```
+
+The `else:` returns early, so the trailing `if scores is not None:` block (the
+real-reranker sort + truncate) is now reached only when `reranking=True` (scores
+set). The pre-existing unreachable trailing `else:` (`log.warning` + `return
+documents`) is left untouched. `Document` is already imported in the file.
+Anchor comes from the running image; the clone's `sentence_transformers` import
+line differs. Test override: `OWUI_UTILS_PY=…`.
+
+## No KB reset on cutover (patch 9)
+
+Routing logic only; no chunk/embedding change. Takes effect on rebuild + restart.
+With `RAG_RERANKING_ENGINE=""` (the default), retrieval now returns the
+RRF-fused (hybrid/lexical) or cosine-distance (vector) order the upstream search
+produced — no extra embedding pass, no re-burying of exact matches.

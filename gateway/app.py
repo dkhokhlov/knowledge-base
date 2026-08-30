@@ -15,6 +15,7 @@ import os
 import secrets
 import threading
 import time
+import uuid
 import hashlib
 import urllib.error
 import urllib.parse
@@ -28,6 +29,22 @@ import owui
 
 MAX_BODY = int(os.environ.get("KB_MAX_BODY", str(256 * 1024)))
 MAX_CONCURRENCY = int(os.environ.get("KB_MAX_CONCURRENCY", "16"))
+
+# /retrieve: gateway-mediated retrieval over an OWUI KB. `mode` lives only at
+# the gateway boundary; OWUI's QueryCollectionsForm already has hybrid +
+# hybrid_bm25_weight + k, so the gateway maps mode -> those and forwards a
+# single collection_name. RETRIEVE_MODES: mode -> (hybrid, hybrid_bm25_weight);
+# `hybrid` weight is None (omitted -> OWUI applies RAG_HYBRID_BM25_WEIGHT, the
+# single source in .env), `lexical` is literal 1.0 (mode definition, not a
+# tunable), `vector` is hybrid=False. RETRIEVE_ORDER: hybrid/lexical return an
+# RRF score (higher=better, desc); vector returns a cosine distance
+# (lower=better, asc) — the wrapper sorts by this so it does not reverse the
+# hybrid ranking.
+RETRIEVE_K_DEFAULT = int(os.environ.get("KB_RETRIEVE_K_DEFAULT", "5"))
+RETRIEVE_K_MAX = int(os.environ.get("KB_RETRIEVE_K_MAX", "50"))
+RETRIEVE_MODES = {"hybrid": (True, None), "lexical": (True, 1.0), "vector": (False, None)}
+RETRIEVE_ORDER = {"hybrid": "desc", "lexical": "desc", "vector": "asc"}
+MAX_QUERY = int(os.environ.get("KB_MAX_QUERY", "4096"))
 
 # Whether this Open WebUI image supports the admin user-provisioning flow
 # (probed from /openapi.json at startup; mutable image tag).
@@ -217,6 +234,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/memory/rag" and method == "POST":
             identity = self._auth()
             return self._rag(identity, self._read_body())
+        if path == "/retrieve" and method == "POST":
+            identity = self._auth()
+            return self._retrieve_kb(identity, self._read_body())
         if path == "/admin/users" and method == "POST":
             identity = self._auth()
             return self._create_user(identity, self._read_body())
@@ -302,6 +322,55 @@ class Handler(BaseHTTPRequestHandler):
                 raise GatewayError(e.code, "RAG upstream: %s" % e)
             raise GatewayError(502, "RAG upstream: %s" % e)
         self._ok(result)
+
+    # -- retrieve: gateway-mediated KB retrieval (caller key enforces KB read) --
+
+    def _retrieve_kb(self, identity, body):
+        """POST /retrieve: retrieve raw chunks from an OWUI KB. Body
+        {kb_id, query, mode, k}. mode in {hybrid,lexical,vector} (default
+        hybrid) maps to {hybrid, hybrid_bm25_weight} forwarded to OWUI
+        /api/v1/retrieval/query/collection with the CALLER's key, so OWUI
+        enforces KB read access natively (403 on deny — same posture as _rag;
+        no gateway-side authz). Response {kb_id, mode, k, score_order, hits}
+        where hits are the 8-key flattened chunks (the wrapper joins
+        File.meta.data.gdrive per file_id client-side, as today). score_order
+        tells the consumer how to sort: hybrid/lexical return an RRF score
+        (desc); vector returns a cosine distance (asc). Errors map
+        OwuiError.code -> 4xx (echo, esp. 403 = KB read denied) / 5xx -> 502 /
+        None -> 503."""
+        kb_id = _req(body, "kb_id")
+        if not _is_uuid(kb_id):
+            raise GatewayError(400, "kb_id must be a UUID")
+        query = _req(body, "query")
+        if not isinstance(query, str):
+            raise GatewayError(400, "query must be a string")
+        query = query.strip()
+        if not query:
+            raise GatewayError(400, "query must not be empty")
+        if len(query) > MAX_QUERY:
+            raise GatewayError(400, "query too long (max %d chars)" % MAX_QUERY)
+        mode = body.get("mode") or "hybrid"
+        if mode not in RETRIEVE_MODES:
+            raise GatewayError(400, "mode must be one of hybrid, lexical, vector, got %r" % mode)
+        k = body.get("k", RETRIEVE_K_DEFAULT)
+        # Reject bool (bool is a subclass of int) + str + non-int + out of range.
+        if isinstance(k, bool) or not isinstance(k, int):
+            raise GatewayError(400, "k must be an integer, got %r" % k)
+        if k < 1 or k > RETRIEVE_K_MAX:
+            raise GatewayError(400, "k must be 1..%d, got %s" % (RETRIEVE_K_MAX, k))
+        hybrid, hybrid_bm25_weight = RETRIEVE_MODES[mode]
+        key = self.headers.get("Authorization", "")[len("Bearer "):].strip()
+        try:
+            raw = owui.query_collection(key, kb_id, query, hybrid, hybrid_bm25_weight, k)
+        except owui.OwuiError as e:
+            if e.code is None:
+                raise GatewayError(503, "retrieve upstream unavailable: %s" % e)
+            if 400 <= e.code < 500:
+                raise GatewayError(e.code, "retrieve upstream: %s" % e)
+            raise GatewayError(502, "retrieve upstream: %s" % e)
+        hits = _flatten_hits(raw)
+        self._ok({"kb_id": kb_id, "mode": mode, "k": k,
+                  "score_order": RETRIEVE_ORDER[mode], "hits": hits})
 
     # -- admin: agent-driven user provisioning --
     def _create_user(self, identity, body):
@@ -910,6 +979,47 @@ def _req(body, key):
     return val
 
 
+def _is_uuid(s):
+    """True only if `s` is a valid UUID string. Rejects a non-UUID kb_id before
+    it becomes a collection_name forwarded to OWUI."""
+    if not isinstance(s, str):
+        return False
+    try:
+        uuid.UUID(s)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def _flatten_hits(d):
+    """OWUI /query/collection response: {documents:[[...]], distances:[[...]],
+    metadatas:[[...]]} — one inner list per collection_name (the gateway sends a
+    single collection, so one inner list). OWUI returns no `ids`; a chunk is
+    identified by metadata file_id + start_index. Flatten to 8-key hit dicts:
+    {distance, file, file_id, page, start_index, source, mtime, text}. Absent
+    metadata -> None / "" (the wrapper joins gdrive per file_id client-side, as
+    today; the gateway does not add gdrive here). Same shape the skill wrapper's
+    flatten_chroma produced, so existing consumers do not break."""
+    docs = d.get("documents", [[]])
+    dists = d.get("distances", [[]])
+    metas = d.get("metadatas", [[]])
+    out = []
+    for sub_docs, sub_d, sub_m in zip(docs, dists, metas):
+        for j, t in enumerate(sub_docs or []):
+            m = (sub_m[j] if j < len(sub_m or []) else {}) or {}
+            out.append({
+                "distance": sub_d[j] if j < len(sub_d or []) else None,
+                "file": m.get("file_name") or m.get("name") or "",
+                "file_id": m.get("file_id") or "",
+                "page": m.get("page"),
+                "start_index": m.get("start_index"),
+                "source": m.get("source") or "",
+                "mtime": m.get("mtime"),
+                "text": t,
+            })
+    return out
+
+
 def _probe(url, timeout=3):
     """True only if a GET returns 2xx (the host is reachable AND healthy). Used
     by /health to confirm the identity dependency is up; a 4xx/5xx means
@@ -1000,7 +1110,28 @@ OPENAPI_SPEC = {
         "/memory/forget": {"post": {"summary": "Clear a Group", "security": [{"bearerAuth": []}]}},
         "/memory/delete-edge": {"post": {"summary": "Delete an edge", "security": [{"bearerAuth": []}]}},
         "/memory/delete-episode": {"post": {"summary": "Delete an episode", "security": [{"bearerAuth": []}]}},
-        "/memory/rag": {"post": {"summary": "RAG chat grounded on an OWUI KB (gateway inserts the chat model from OPENWEBUI_MODEL; caller's key enforces KB read access)", "security": [{"bearerAuth": []}]}}},
+        "/memory/rag": {"post": {"summary": "RAG chat grounded on an OWUI KB (gateway inserts the chat model from OPENWEBUI_MODEL; caller's key enforces KB read access)", "security": [{"bearerAuth": []}]}},
+        "/retrieve": {"post": {
+            "summary": "Retrieve raw chunks from an OWUI KB (gateway maps mode -> hybrid/hybrid_bm25_weight; caller's key enforces KB read access)",
+            "security": [{"bearerAuth": []}],
+            "requestBody": {"required": True, "content": {"application/json": {"schema": {
+                "type": "object",
+                "required": ["kb_id", "query"],
+                "properties": {
+                    "kb_id": {"type": "string", "format": "uuid"},
+                    "query": {"type": "string", "maxLength": 4096},
+                    "mode": {"type": "string", "enum": ["hybrid", "lexical", "vector"], "default": "hybrid"},
+                    "k": {"type": "integer", "minimum": 1, "maximum": 50, "default": 5}
+                }
+            }}}},
+            "responses": {
+                "200": {"description": "{kb_id, mode, k, score_order, hits[]}"},
+                "400": {"description": "bad kb_id / query / mode / k"},
+                "403": {"description": "KB read denied (OWUI native authz)"},
+                "502": {"description": "OWUI upstream 5xx"},
+                "503": {"description": "OWUI upstream unreachable"}
+            }
+        }}},
     "components": {"securitySchemes": {"bearerAuth": {
         "type": "http", "scheme": "bearer", "description": "KB_API_KEY (OWUI API key)"}}},
 }

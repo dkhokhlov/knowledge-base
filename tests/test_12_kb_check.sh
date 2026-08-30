@@ -73,6 +73,11 @@ e2e_resolve_ollama || { fail "OLLAMA_HOST resolution failed"; finish; exit 1; }
 e2e_isolate "$NAME" "$PORT" "$OCR" || { fail "e2e_isolate failed"; finish; exit 1; }
 ISOLATED=1
 pass "clone + isolation env ready ($E2E_CLONE)"
+# This e2e exercises the Chroma store path (orphan file-{id} collections +
+# on-disk segment dirs). The live .env has VECTOR_DB=pgvector; override the
+# clone's .env (seeded by e2e_isolate's bootstrap) so the isolated OWUI runs
+# on Chroma. kb_check.py requires VECTOR_DB explicitly (no silent default).
+sed -i 's/^VECTOR_DB=.*/VECTOR_DB=chroma/' "$E2E_CLONE/.env"
 e2e_provision || { fail "e2e_provision failed (start/admin-signup/api-keys)"; finish; exit 1; }
 pass "isolated stack up + admin/agent keys provisioned"
 

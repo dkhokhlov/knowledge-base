@@ -48,7 +48,7 @@
 #
 # Globals set by e2e_isolate (for the caller): E2E_NAME, E2E_PORT, E2E_CLONE,
 # E2E_KB_HOST, E2E_STAMP, plus exported COMPOSE_PROJECT_NAME, COMPOSE_FILE,
-# OWUI_CONTAINER, MARKITDOWN_CONTAINER, KB_HOST, OLLAMA_HOST. The caller runs its
+# OWUI_CONTAINER, MARKITDOWN_CONTAINER, POSTGRES_CONTAINER, KB_HOST, OLLAMA_HOST. The caller runs its
 # test body inside $E2E_CLONE; the quick tests call e2e_down in an EXIT trap.
 #
 # Requires: OLLAMA_HOST resolvable (shell env, the live .env, or the live
@@ -152,6 +152,7 @@ e2e_isolate() {
   export COMPOSE_FILE="compose.yml:compose.$name.override.yml"
   export OWUI_CONTAINER="kb-$name-$stamp-openwebui"
   export MARKITDOWN_CONTAINER="kb-$name-$stamp-markitdown-ocr"
+  export POSTGRES_CONTAINER="kb-$name-$stamp-postgres"
   export KB_HOST="$kb_host"
 
   # Clone from the LOCAL repo (origin may be behind; this repo's HEAD is

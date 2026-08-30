@@ -86,6 +86,16 @@ def test_13_chunk_quality(run_sh):
     """Chunk-QUALITY audit over generated fixtures for all 10 allowlisted types (sliceability, span/page metadata, coalescing, offsets, fidelity)."""
     run_sh("tests/test_13_chunk_quality.sh")
 
+@pytest.mark.integration
+def test_14_rag_config(run_sh):
+    """rag-config.sh re-asserts the hybrid retrieval keys over webui.db and OWUI runs the pgvector backend."""
+    run_sh("tests/test_14_rag_config.sh")
+
+@pytest.mark.integration
+def test_15_retrieve(run_sh):
+    """gateway-mediated POST /retrieve: Caddy route + validation matrix + all three modes 200 + lexical exact-token acceptance (pgvector FTS)."""
+    run_sh("tests/test_15_retrieve.sh")
+
 @pytest.mark.e2e
 def test_12_kb_check(run_sh):
     """Isolated e2e for make kb-check: throwaway stack, upload synthetic files, create the file-{id} leak, then detect -> PURGE=1 export+purge -> re-audit 0 orphans."""

@@ -36,6 +36,21 @@ else
   pass "neo4j :7474 is not reachable on the host"
 fi
 
+section "postgres (pgvector) healthy + NOT published on the host"
+# kb-postgres is internal-only (no host port). Healthy = pg_isready exits 0;
+# compose healthcheck mirrors this. Host :5432 must not be reachable.
+PG_CTN="${POSTGRES_CONTAINER:-kb-postgres}"
+if docker exec "$PG_CTN" pg_isready -U "${PGVECTOR_USER:-}" -d "${PGVECTOR_DB:-}" >/dev/null 2>&1; then
+  pass "kb-postgres pg_isready -> 0 (healthy)"
+else
+  fail "kb-postgres pg_isready -> non-zero (unhealthy)"
+fi
+if curl -s -o /dev/null --connect-timeout 2 "http://localhost:5432" 2>/dev/null; then
+  fail "postgres :5432 is reachable on the host (should be internal-only)"
+else
+  pass "postgres :5432 is not reachable on the host"
+fi
+
 section "api-gateway auth gate (via Caddy)"
 # A gateway authed endpoint without Authorization must be rejected with 401.
 code=$(curl -s -o /dev/null -w '%{http_code}' "$H/memory/whoami")

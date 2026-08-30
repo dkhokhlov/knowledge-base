@@ -141,8 +141,9 @@ class EntryMtimeTests(unittest.TestCase):
 class _Resp:
     """Fake urllib urlopen context manager returning a fixed JSON body."""
 
-    def __init__(self, body_bytes):
+    def __init__(self, body_bytes, status=200):
         self._b = body_bytes
+        self.status = status
 
     def __enter__(self):
         return self
@@ -231,6 +232,259 @@ class UploadFileMtimeTests(unittest.TestCase):
         body = self._capture_upload(None)
         meta = json.loads(_multipart_fields(body)["metadata"].decode())
         self.assertNotIn("gdrive", meta)
+
+
+class _FakeHeaders:
+    """Minimal Header-get for Handler tests (only Authorization is read)."""
+
+    def __init__(self, auth="Bearer caller-key"):
+        self._auth = auth
+
+    def get(self, key, default=""):
+        return self._auth if key == "Authorization" else default
+
+
+class _FakeHandler:
+    """A stand-in for app.Handler so _retrieve_kb can run without an HTTP
+    socket. Captures the _ok result; GatewayError propagates to the caller
+    (the test catches it and asserts status/message)."""
+
+    def __init__(self, body, auth="Bearer caller-key"):
+        self.headers = _FakeHeaders(auth)
+        self._body = body
+        self.sent = None  # ("ok", obj)
+
+    def _read_body(self):
+        return self._body
+
+    def _ok(self, obj):
+        self.sent = ("ok", obj)
+
+
+# A synthetic OWUI /query/collection raw response (one collection, 2 chunks).
+_RAW = {
+    "documents": [["reg text", "more text"]],
+    "distances": [[0.12, 0.40]],
+    "metadatas": [[
+        {"file_id": "fid-1", "file_name": "regs.pdf", "page": 3,
+         "start_index": 100, "source": "regs.pdf", "mtime": "2026-01-02T00:00:00Z"},
+        {},
+    ]],
+}
+
+
+class TestRetrieveRoute(unittest.TestCase):
+    """POST /retrieve: validation, mode->forwarded-args mapping, error map,
+    _flatten_hits, score_order. Mocks owui.query_collection (handler) and
+    owui.urllib.request.urlopen (forwarder body). No stack needed."""
+
+    KB = "550e8400-e29b-41d4-a716-446655440000"
+
+    def _run(self, body, qc_return=_RAW, qc_raises=None):
+        """Invoke Handler._retrieve_kb on a _FakeHandler; mock owui.query_collection
+        to return qc_return or raise qc_raises. Returns ("ok", obj) or
+        ("err", status, message)."""
+        h = _FakeHandler(body)
+
+        def _qc(*a, **kw):
+            if qc_raises is not None:
+                raise qc_raises
+            return qc_return
+
+        with mock.patch.object(owui, "query_collection", side_effect=_qc):
+            try:
+                app.Handler._retrieve_kb(h, None, body)
+            except app.GatewayError as e:
+                return ("err", e.status, e.message)
+        return h.sent
+
+    # -- mode -> forwarded args (handler -> owui.query_collection) --
+
+    def test_mode_maps_to_hybrid_and_weight(self):
+        cases = {  # mode -> (hybrid, bm25_weight)
+            "hybrid": (True, None), "lexical": (True, 1.0), "vector": (False, None),
+        }
+        for mode, (hy, bw) in cases.items():
+            captured = {}
+
+            def _qc(api_key, kb_id, query, hybrid, hybrid_bm25_weight, k):
+                captured.update(api_key=api_key, kb_id=kb_id, query=query,
+                                hybrid=hybrid, hybrid_bm25_weight=hybrid_bm25_weight, k=k)
+                return _RAW
+
+            with mock.patch.object(owui, "query_collection", side_effect=_qc):
+                h = _FakeHandler({"kb_id": self.KB, "query": "CAP_ENGAGE",
+                                  "mode": mode, "k": 7})
+                body = {"kb_id": self.KB, "query": "CAP_ENGAGE", "mode": mode, "k": 7}
+                app.Handler._retrieve_kb(h, None, body)
+            self.assertEqual(captured["hybrid"], hy, mode)
+            self.assertEqual(captured["hybrid_bm25_weight"], bw, mode)
+            self.assertEqual(captured["kb_id"], self.KB, mode)
+            self.assertEqual(captured["k"], 7, mode)
+            self.assertEqual(captured["api_key"], "caller-key", mode)
+            self.assertIs(captured["query"], "CAP_ENGAGE", mode)
+
+    def test_mode_omitted_defaults_hybrid(self):
+        captured = {}
+
+        def _qc(api_key, kb_id, query, hybrid, hybrid_bm25_weight, k):
+            captured["hybrid"] = hybrid
+            captured["bm25"] = hybrid_bm25_weight
+            return _RAW
+
+        with mock.patch.object(owui, "query_collection", side_effect=_qc):
+            app.Handler._retrieve_kb(_FakeHandler({"kb_id": self.KB, "query": "x"}),
+                                     None,
+                                     {"kb_id": self.KB, "query": "x"})
+        self.assertTrue(captured["hybrid"])
+        self.assertIsNone(captured["bm25"])
+
+    # -- forwarder body (owui.query_collection -> OWUI HTTP) --
+
+    def _capture_forwarded_body(self, mode):
+        captured = {}
+
+        def _urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            captured["auth"] = req.headers.get("Authorization")
+            captured["url"] = req.full_url
+            return _Resp(b'{"documents":[["t"]],"distances":[[0.1]],"metadatas":[[{}]]}')
+
+        with mock.patch.object(owui.urllib.request, "urlopen", _urlopen):
+            owui.query_collection("caller-key", self.KB, "q", *app.RETRIEVE_MODES[mode], 5)
+        return captured
+
+    def test_forwarder_body_hybrid_omits_weight(self):
+        c = self._capture_forwarded_body("hybrid")
+        self.assertEqual(c["body"]["collection_names"], [self.KB])
+        self.assertEqual(c["body"]["hybrid"], True)
+        self.assertEqual(c["body"]["k"], 5)
+        self.assertEqual(c["body"]["query"], "q")
+        self.assertNotIn("hybrid_bm25_weight", c["body"])
+        self.assertEqual(c["auth"], "Bearer caller-key")
+
+    def test_forwarder_body_lexical_sends_weight_one(self):
+        c = self._capture_forwarded_body("lexical")
+        self.assertEqual(c["body"]["hybrid"], True)
+        self.assertEqual(c["body"]["hybrid_bm25_weight"], 1.0)
+
+    def test_forwarder_body_vector_hybrid_false(self):
+        c = self._capture_forwarded_body("vector")
+        self.assertEqual(c["body"]["hybrid"], False)
+        self.assertNotIn("hybrid_bm25_weight", c["body"])
+
+    def test_forwarder_raises_owuierror_on_non200(self):
+        def _urlopen(req, timeout=None):
+            raise owui.urllib.error.HTTPError(req.full_url, 403, "forbidden",
+                                               {}, io.BytesIO(b'{"detail":"no"}'))
+        with mock.patch.object(owui.urllib.request, "urlopen", _urlopen):
+            with self.assertRaises(owui.OwuiError) as cm:
+                owui.query_collection("k", self.KB, "q", True, None, 5)
+        self.assertEqual(cm.exception.code, 403)
+
+    # -- validation matrix --
+
+    def test_missing_kb_id_400(self):
+        self.assertEqual(self._run({"query": "x"})[0], "err")
+        self.assertEqual(self._run({"query": "x"})[1], 400)
+
+    def test_non_uuid_kb_id_400(self):
+        r = self._run({"kb_id": "not-a-uuid", "query": "x"})
+        self.assertEqual(r[0], "err")
+        self.assertEqual(r[1], 400)
+
+    def test_empty_query_400(self):
+        for q in ["", "   "]:
+            r = self._run({"kb_id": self.KB, "query": q})
+            self.assertEqual(r[1], 400, q)
+
+    def test_missing_query_400(self):
+        self.assertEqual(self._run({"kb_id": self.KB})[1], 400)
+
+    def test_bad_mode_400(self):
+        r = self._run({"kb_id": self.KB, "query": "x", "mode": "fuzzy"})
+        self.assertEqual(r[1], 400)
+
+    def test_k_rejects_bad_values(self):
+        for bad in [0, 999, True, "5", 1.5, None]:
+            r = self._run({"kb_id": self.KB, "query": "x", "k": bad})
+            self.assertEqual(r[1], 400, bad)
+
+    def test_k_omitted_uses_default(self):
+        captured = {}
+
+        def _qc(*a, **kw):
+            captured["k"] = a[-1]
+            return _RAW
+
+        with mock.patch.object(owui, "query_collection", side_effect=_qc):
+            app.Handler._retrieve_kb(_FakeHandler({"kb_id": self.KB, "query": "x"}),
+                                     None,
+                                     {"kb_id": self.KB, "query": "x"})
+        self.assertEqual(captured["k"], app.RETRIEVE_K_DEFAULT)
+
+    def test_query_too_long_400(self):
+        r = self._run({"kb_id": self.KB, "query": "x" * (app.MAX_QUERY + 1)})
+        self.assertEqual(r[1], 400)
+
+    # -- error map (OwuiError.code -> gateway status) --
+
+    def test_error_map_403_echoed(self):
+        r = self._run({"kb_id": self.KB, "query": "x"},
+                      qc_raises=owui.OwuiError("denied", code=403))
+        self.assertEqual(r[0], "err")
+        self.assertEqual(r[1], 403)
+
+    def test_error_map_401_echoed(self):
+        r = self._run({"kb_id": self.KB, "query": "x"},
+                      qc_raises=owui.OwuiError("badkey", code=401))
+        self.assertEqual(r[1], 401)
+
+    def test_error_map_500_to_502(self):
+        r = self._run({"kb_id": self.KB, "query": "x"},
+                      qc_raises=owui.OwuiError("boom", code=500))
+        self.assertEqual(r[1], 502)
+
+    def test_error_map_transport_to_503(self):
+        r = self._run({"kb_id": self.KB, "query": "x"},
+                      qc_raises=owui.OwuiError("unreachable"))  # code=None
+        self.assertEqual(r[1], 503)
+
+    # -- success response shape + score_order + flatten --
+
+    def test_success_response_keys(self):
+        r = self._run({"kb_id": self.KB, "query": "CAP_ENGAGE", "mode": "hybrid", "k": 3})
+        self.assertEqual(r[0], "ok")
+        obj = r[1]
+        self.assertEqual(obj["kb_id"], self.KB)
+        self.assertEqual(obj["mode"], "hybrid")
+        self.assertEqual(obj["k"], 3)
+        self.assertEqual(obj["score_order"], "desc")
+        self.assertEqual(len(obj["hits"]), 2)
+        # first hit carries the metadata; second hit (empty meta) -> defaults
+        self.assertEqual(obj["hits"][0]["file"], "regs.pdf")
+        self.assertEqual(obj["hits"][0]["file_id"], "fid-1")
+        self.assertEqual(obj["hits"][1]["file"], "")
+        self.assertIsNone(obj["hits"][1]["page"])
+
+    def test_score_order_per_mode(self):
+        for mode, order in [("hybrid", "desc"), ("lexical", "desc"), ("vector", "asc")]:
+            r = self._run({"kb_id": self.KB, "query": "x", "mode": mode})
+            self.assertEqual(r[1]["score_order"], order, mode)
+
+    def test_flatten_hits_eight_keys(self):
+        hits = app._flatten_hits(_RAW)
+        self.assertEqual(len(hits), 2)
+        for h in hits:
+            self.assertEqual(set(h),
+                             {"distance", "file", "file_id", "page", "start_index",
+                              "source", "mtime", "text"})
+        self.assertEqual(hits[0]["distance"], 0.12)
+        self.assertEqual(hits[1]["distance"], 0.40)
+        # second chunk has empty metadata -> defaults (file "", page None)
+        self.assertEqual(hits[1]["file"], "")
+        self.assertIsNone(hits[1]["page"])
+        self.assertEqual(hits[1]["text"], "more text")
 
 
 if __name__ == "__main__":

@@ -45,20 +45,25 @@ the local model is adequate and the token cost of returning chunks matters.
 
 ### Retrieve (default)
 
-`POST /api/v1/retrieval/query/collection` — body
-`{collection_names:[<kb-id>], query, k, hybrid:true}` → Chroma
-`{documents, distances, metadatas}` (nested arrays; the wrapper flattens
-them; OWUI omits the Chroma `ids` array, so chunk ids are unavailable — each
-chunk is identified by `file_id` + `start_index` in its metadata). Pure vector
-retrieval — no LLM call. Lower distance = better match
-(cosine; 0 best). Wrapper: `retrieve <kb-name-or-id> "<query>" [--k N] [--no-hybrid]`
-(`--k` default 5; use 10–20 for broader recall — the agent synthesizes from
-raw chunks, so more chunks serve it better than a one-shot `rag`.
-`--no-hybrid` = pure vector, no hybrid search). The wrapper
-resolves the name to a KB id via `GET /api/v1/knowledge/` (exact name or exact
-id; a valid UUID that is not a real id FAILS — no silent fallthrough, so a
-wrong hand-copied id cannot query the wrong KB) and prints the resolved
-`kb_id` + `kb_name` alongside the hits.
+`POST /retrieve` (gateway-mediated; Caddy → api-gateway → OWUI) — body
+`{kb_id, query, k, mode}`. The gateway maps `mode` → `{hybrid, hybrid_bm25_weight}`
+and forwards a single `collection_name` to OWUI `/api/v1/retrieval/query/collection`
+with the caller's key, so OWUI enforces KB read access natively (403 on deny).
+The gateway flattens the OWUI `{documents, distances, metadatas}` response into
+8-key hits (`distance, file, file_id, page, start_index, source, mtime, text`);
+the wrapper joins `File.meta.data.gdrive` per `file_id` (file-level, one GET per
+id). `score_order` in the response tells the consumer how to sort: `hybrid`/
+`lexical` return an RRF score (higher=better, `desc`); `vector` returns a cosine
+distance (lower=better, `asc`). No LLM call. Wrapper:
+`retrieve <kb-name-or-id> "<query>" [--k N] [--mode hybrid|lexical|vector]`
+(`--k` default 5; use 10–20 for broader recall — the agent synthesizes from raw
+chunks, so more chunks serve it better than a one-shot `rag`. `--mode` default
+`hybrid`; `lexical` = pure FTS/BM25 (server-side, indexed — the mode for exact
+register/signal/keyword queries); `vector` = pure vector. `--no-hybrid` is a
+deprecated alias for `--mode vector`). The wrapper resolves the name to a KB id
+via `GET /api/v1/knowledge/` (exact name or exact id; a valid UUID that is not a
+real id FAILS — no silent fallthrough, so a wrong hand-copied id cannot query the
+wrong KB) and prints the resolved `kb_id` + `kb_name` alongside the hits.
 
 - **To confirm a specific file is searchable**, retrieve by its **literal
   filename stem** with a higher `--k` (e.g. 20). A generic concept query can be
@@ -115,7 +120,7 @@ python3 "$S" whoami                    # verify key + role
 python3 "$S" kbs                       # list KBs visible to this key
 python3 "$S" kb <kb-id>                 # one KB's metadata
 python3 "$S" search-kbs "main"         # find a KB by name
-python3 "$S" retrieve <kb-name-or-id> "XSL streaming"   # raw chunks, you synthesize (default)
+python3 "$S" retrieve <kb-name-or-id> "XSL streaming"   # raw chunks, you synthesize (default; --mode hybrid|lexical|vector)
 python3 "$S" rag "What is XSL?" --kb <kb-id>     # one-shot RAG answer (via api-gateway)
 python3 "$S" file <file-id>             # file's extracted text content (full doc)
 python3 "$S" file <file-id> --raw       # original bytes instead of extracted text (binary saved to /tmp)
@@ -191,10 +196,12 @@ defaults), `--wait`.
 `retrieve-projects`: `--host` (name starts with `<host>--`), `--project`
 (substring in the project part), `--account` (KB owner email, or fnmatch glob
 like `*@corp.com` / `*` for all visible; default = caller, aka `--mine`),
-`--kb-glob` (fnmatch on the KB name), `--k` (default 5), `--no-hybrid`. No
+`--kb-glob` (fnmatch on the KB name), `--k` (default 5), `--mode
+hybrid|lexical|vector` (default hybrid), `--no-hybrid` (deprecated alias for
+`--mode vector`). No
 filters = all KBs you own. It makes one retrieval call per KB (hit metadata
 carries no `knowledge_id`, so one-call-per-KB is the reliable attribution) and
-prints compact JSON `{"kbs":N,"hits":[...],"errors":[...]}`.
+prints compact JSON `{"kbs":N,"score_order":"...","hits":[...],"errors":[...]}`.
 
 Note: "search projects memory for X" maps to `retrieve-projects` (semantic). Do
 not reach for `search-kbs` (KB-name lexical lookup only).

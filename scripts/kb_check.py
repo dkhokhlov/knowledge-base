@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
-"""KB cross-DB health check: reconcile OWUI SQLite + embedded Chroma, report
-inconsistencies, and (opt-in) export-then-purge orphans.
+"""KB cross-DB health check: reconcile OWUI SQLite + a vector store (embedded
+Chroma or pgvector), report inconsistencies, and (opt-in) export-then-purge
+orphans.
 
 The KB stack has two stores that are NOT ACID across each other:
   - OWUI SQLite  (webui.db: file, knowledge_file, knowledge_directory, knowledge).
-  - embedded Chroma (/app/backend/data/vector_db: file-{id} + <knowledge_id>
-    collections, plus the OWUI-internal `knowledge-bases` collection).
+  - vector store, selected by VECTOR_DB (chroma|pgvector):
+    * chroma   -- embedded Chroma (/app/backend/data/vector_db: file-{id} +
+      <knowledge_id> collections, plus the OWUI-internal `knowledge-bases`
+      collection).
+    * pgvector -- Postgres table document_chunk(collection_name, text,
+      vmetadata jsonb, vector). collection_name holds the OWUI knowledge_id
+      or `file-{id}`. Class 11 (dangling on-disk segment dirs) is N/A: pgvector
+      has no HNSW segment dirs, so disk_dirs()/vector_segment_ids() return empty.
 
 Drift this tool detects + clears: ghost rows, orphan file-{id} collections (the
-files.py `delete()` no-op leak), dangling HNSW segment dirs, orphan KB vectors,
-dead-KB junction rows, and more (12 classes). See the class table in the report.
+files.py `delete()` no-op leak), dangling HNSW segment dirs (Chroma only),
+orphan KB vectors, dead-KB junction rows, and more (12 classes). See the class
+table in the report.
 
-`chromadb` lives only in the kb-openwebui image, so this tool runs INSIDE that
-container via `docker exec -i kb-openwebui python3 - < scripts/kb_check.py` (host
-script piped to container python on stdin; opts after `-`). For the maintenance
-window (`--maint`) the Makefile stops kb-openwebui and runs a throwaway container
-from the same image with the data dir mounted, so direct Chroma/SQLite writes
-are safe (no OWUI process contention). `chromadb` is lazy-imported so the
-argparse/classify/report logic imports cleanly on the host for unit tests.
+`chromadb` and `psycopg2` live only in the kb-openwebui image, so this tool runs
+INSIDE that container via `docker exec -i kb-openwebui python3 - < scripts/kb_check.py`
+(host script piped to container python on stdin; opts after `-`). For the
+maintenance window (`--maint`) the Makefile stops kb-openwebui and runs a
+throwaway container from the same image with the data dir mounted, so direct
+vector/SQLite writes are safe (no OWUI process contention); for pgvector that
+throwaway container also joins the owui_net network to reach `postgres`. Both
+`chromadb` and `psycopg2` are lazy-imported so the argparse/classify/report
+logic imports cleanly on the host for unit tests.
 
 Default = audit + report + advise (zero mutation). `--purge` consents to purge
 the safe classes (1, 3, 11); `--purge --maint` purges the maintenance-window
@@ -393,6 +403,150 @@ class Stores:
             (json.dumps(data), int(time.time()), file_id))
         self._webui_rw().commit()
         return True
+
+
+# --- pgvector store (Postgres document_chunk; mirrors the Chroma vector
+#     side; inherits SQLite + OWUI REST + repair from Stores) -------------
+
+class PgVectorStores(Stores):
+    """pgvector backend: vectors + chunk text live in the Postgres
+    `document_chunk(collection_name, text, vmetadata jsonb, vector)` table.
+    Inherits the backend-independent parts (webui.db reads, OWUI REST delete,
+    repair gate) from Stores. Overrides the vector-side methods to query
+    document_chunk.
+
+    Class 11 (dangling HNSW segment dirs) is N/A: pgvector has no on-disk
+    segment dirs, so disk_dirs() and vector_segment_ids() return empty sets
+    and the Chroma on-disk checks become no-ops.
+
+    Mutations (delete_collection, delete_kb_vectors_by_file) run ONLY in the
+    maintenance window (OWUI stopped), same as the Chroma branch.
+    `delete_kb_vectors_by_file` counts matching rows BEFORE the DELETE so a
+    zero-delete (wrong filter key/type) surfaces in the purge manifest."""
+
+    def __init__(self, data_dir, owui_base, admin_key, pg_dsn):
+        super().__init__(data_dir, owui_base, admin_key)
+        self._pg_dsn = pg_dsn
+        self._pg = None
+
+    def _pg_conn(self):
+        if self._pg is None:
+            import psycopg2  # lazy: host has no psycopg2 (unit tests stub this)
+            from psycopg2.extras import register_default_jsonb
+            self._pg = psycopg2.connect(self._pg_dsn)
+            # vmetadata jsonb -> Python dict (NULL stays None).
+            register_default_jsonb(self._pg)
+        return self._pg
+
+    def _q(self, sql, params=None):
+        cur = self._pg_conn().cursor()
+        cur.execute(sql, params)
+        return cur
+
+    # --- vector-side reads (mirror the Chroma Stores methods) -------------
+
+    def chroma_collections(self):
+        """{collection_name: None} for every DISTINCT collection_name.
+        The uuid value is a Chroma concept; pgvector has none, so None."""
+        if "colls" not in self._cache:
+            cur = self._q("SELECT DISTINCT collection_name FROM document_chunk")
+            self._cache["colls"] = {r[0]: None for r in cur}
+        return self._cache["colls"]
+
+    def collection_count(self, name):
+        """Number of chunks in a collection (0 if the collection is gone)."""
+        try:
+            return self._q(
+                "SELECT count(*) FROM document_chunk WHERE collection_name=%s",
+                (name,)).fetchone()[0]
+        except Exception:
+            return 0
+
+    def collection_metadatas(self, name):
+        """[vmetadata dict] for every chunk in a collection."""
+        try:
+            cur = self._q(
+                "SELECT vmetadata FROM document_chunk WHERE collection_name=%s",
+                (name,))
+            return [r[0] for r in cur if r[0] is not None]
+        except Exception:
+            return []
+
+    def collection_documents(self, name):
+        """All chunk ids + texts + metadata for export (read once)."""
+        try:
+            cur = self._q(
+                "SELECT id, text, vmetadata FROM document_chunk "
+                "WHERE collection_name=%s", (name,))
+            rows = list(cur)
+        except Exception:
+            return [], [], []
+        return ([r[0] for r in rows],
+                [r[1] for r in rows],
+                [r[2] for r in rows])
+
+    # --- on-disk segment dirs: N/A for pgvector ---------------------------
+
+    def vector_segment_ids(self):
+        return set()
+
+    def segment_dir_for_collection(self, coll_uuid):
+        return None
+
+    def disk_dirs(self):
+        return set()
+
+    def dir_size(self, name):
+        return 0
+
+    # --- mutating: safe + maintenance tiers -------------------------------
+
+    def delete_collection(self, name):
+        """DELETE every chunk in a collection (drops the logical collection)."""
+        cur = self._pg_conn().cursor()
+        cur.execute("DELETE FROM document_chunk WHERE collection_name=%s", (name,))
+        self._pg_conn().commit()
+        return True
+
+    def rm_segment_dir(self, dir_name):
+        """No-op: pgvector has no on-disk segment dirs."""
+        return True
+
+    def delete_kb_vectors_by_file(self, kb_name, file_id):
+        """DELETE chunks in a KB collection filtered by vmetadata file_id.
+        Maintenance window only (OWUI stopped). Counts matching rows BEFORE
+        the DELETE so a zero-delete (wrong filter key/type) surfaces in the
+        purge manifest. Returns the pre-delete count (int)."""
+        cur = self._pg_conn().cursor()
+        cur.execute(
+            "SELECT count(*) FROM document_chunk WHERE collection_name=%s "
+            "AND vmetadata->>'file_id'=%s", (kb_name, file_id))
+        n = cur.fetchone()[0]
+        cur.execute(
+            "DELETE FROM document_chunk WHERE collection_name=%s "
+            "AND vmetadata->>'file_id'=%s", (kb_name, file_id))
+        self._pg_conn().commit()
+        return n
+
+
+# --- backend selection ----------------------------------------------------
+
+def make_stores(data_dir, owui_base, admin_key):
+    """Select the vector store backend from VECTOR_DB (chroma|pgvector).
+    Fail loud on missing/unknown -- NO silent Chroma default."""
+    vector_db = os.environ.get("VECTOR_DB")
+    if vector_db == "chroma":
+        return Stores(data_dir, owui_base, admin_key)
+    if vector_db == "pgvector":
+        for v in ("PGVECTOR_USER", "PGVECTOR_PASSWORD", "PGVECTOR_DB",
+                  "PGVECTOR_DB_URL"):
+            if not os.environ.get(v):
+                raise RuntimeError(
+                    "%s unset (VECTOR_DB=pgvector requires it)" % v)
+        return PgVectorStores(data_dir, owui_base, admin_key,
+                              os.environ["PGVECTOR_DB_URL"])
+    raise RuntimeError(
+        "VECTOR_DB=%r (must be 'chroma' or 'pgvector')" % vector_db)
 
 
 # --- classification (pure logic over Stores) ------------------------------
@@ -851,7 +1005,8 @@ def repair(stores, classes):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="KB cross-DB health check (OWUI SQLite + Chroma): audit + purge.")
+        description="KB cross-DB health check (OWUI SQLite + vector store: Chroma or "
+                    "pgvector, selected by VECTOR_DB): audit + purge.")
     ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
                     help="OWUI data dir (webui.db + vector_db/); default " + DEFAULT_DATA_DIR)
     ap.add_argument("--owui-base", default=DEFAULT_OWUI_BASE,
@@ -875,7 +1030,11 @@ def main(argv=None):
 
     _configure_logging()
     admin_key = os.environ.get("OPENWEBUI_ADMIN_API_KEY") or None
-    stores = Stores(args.data_dir, args.owui_base, admin_key)
+    try:
+        stores = make_stores(args.data_dir, args.owui_base, admin_key)
+    except RuntimeError as e:
+        log.error("%s", e)
+        return 2
 
     log.info("auditing (scope=%s)...", args.kb or "ALL")
     classes = classify(stores, args.kb)
