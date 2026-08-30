@@ -352,11 +352,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
   provisioning backend; covered by `test_07`). The four `SKILL.md` copies drop
   the "KB user provisioning (admin)" section, the `create user` trigger, and the
   `user-create` reference; per-account key issuance now points to
-  `make users-create`. **`KB_API_KEY` in `~/.api_keys` switched from the admin
-  key (`OPENWEBUI_ADMIN_API_KEY`) to the read-scoped agent key
-  (`OPENWEBUI_USER_API_KEY`)** — the skill is agent-scoped; the dropped
-  `user-create` would 403 under the agent key anyway. Owner-scoped destructive
-  ops (`forget`/`delete-edge`/`delete-episode`) stay allowed for the agent key.
+  `make users-create`. **`KB_API_KEY` in `~/.api_keys` is the operator's own
+  non-admin user key (issued via `make users-create`)** — the skill is
+  agent-scoped; the dropped `user-create` would 403 under a non-admin user key
+  anyway. Owner-scoped destructive ops (`forget`/`delete-edge`/`delete-episode`)
+  stay allowed for the user key.
 
 - **Agentic-first JSON output.** The `/kb` skill scripts
   (`skills/claude/scripts/{owui.py,kb_gateway.py}`) and `make gdrive-status` now
@@ -391,8 +391,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 - **Configurable `KB_DOMAIN` + first-user credential rename (BREAKING for
   existing `.env.local`).** A new `KB_DOMAIN` var in `.env` (default
   `local.test`) drives the email domain of provisioned accounts: the first
-  (admin) user is `admin@<KB_DOMAIN>` and the agent user is
-  `agent@<KB_DOMAIN>` (was hardcoded `agent@local.test`). `make bootstrap`
+  (admin) user is `admin@<KB_DOMAIN>`. `make bootstrap`
   now writes `OPENWEBUI_FIRST_USER=admin@<KB_DOMAIN>` + a generated
   `OPENWEBUI_FIRST_PASSWORD` into `.env.local` (was: operator hand-filled). The
   first-user display name is `admin` (was `Admin`). A `make <target>
@@ -409,7 +408,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
   admin-signup && make api-keys`. Changing `KB_DOMAIN` later likewise requires
   `clean-all && bootstrap` to recompute the first-user email (or edit
   `.env.local` by hand). The kb skill is unaffected (auth via `KB_API_KEY`, not
-  user/password); only illustrative `agent@local.test` prose was generalized.
+  user/password).
 - **OCR is now a config flag (`OCR_ENABLED`), not a runtime toggle (BREAKING for
   existing stacks).** The `MARKITDOWN_OCR_PROVISIONED` runtime marker +
   `make ocr-bootstrap` + `make ocr-disable` are removed. Replaced by an

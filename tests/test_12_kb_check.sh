@@ -79,13 +79,12 @@ pass "clone + isolation env ready ($E2E_CLONE)"
 # on Chroma. kb_check.py requires VECTOR_DB explicitly (no silent default).
 sed -i 's/^VECTOR_DB=.*/VECTOR_DB=chroma/' "$E2E_CLONE/.env"
 e2e_provision || { fail "e2e_provision failed (start/admin-signup/api-keys)"; finish; exit 1; }
-pass "isolated stack up + admin/agent keys provisioned"
+pass "isolated stack up + admin key + ephemeral user provisioned"
 
 # Load the clone's secrets (admin key) the standard way (lib.sh load_env, but in
 # the clone cwd -- it reads ./.env + ./.env.local relative to cwd=$E2E_CLONE).
 load_env
 AK="$OPENWEBUI_ADMIN_API_KEY"
-UK="$OPENWEBUI_USER_API_KEY"
 [ -n "$AK" ] || { fail "OPENWEBUI_ADMIN_API_KEY not set in the clone .env.local"; finish; exit 1; }
 H="$(kb_host)"
 ADM=(-H "Authorization: Bearer $AK")
@@ -97,7 +96,7 @@ KB_ID=$(curl -s -X POST "$H/api/v1/knowledge/create" "${ADM[@]}" -H 'Content-Typ
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
 [ -n "$KB_ID" ] && pass "KB id: $KB_ID" || { fail "KB create failed"; finish; exit 1; }
 
-# Grant '*' read so the agent key could retrieve (not asserted here, but kept
+# Grant '*' read so a user key could retrieve (not asserted here, but kept
 # consistent with the rest of the test suite's fixture KBs).
 curl -sf -X POST "$H/api/v1/knowledge/${KB_ID}/access/update" "${ADM[@]}" -H 'Content-Type: application/json' \
   -d "{\"access_grants\":[{\"resource_type\":\"knowledge\",\"resource_id\":\"${KB_ID}\",\"principal_type\":\"user\",\"principal_id\":\"*\",\"permission\":\"read\"}]}" \

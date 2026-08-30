@@ -95,16 +95,17 @@ set +e
   # DESTRUCTIVE clean-state deploy + full integration test suite:
   #   wipe -> bootstrap -> restore admin creds -> [pull OCR model] -> preflight
   #   -> [build markitdown-ocr] -> start -> wait healthy -> admin-signup ->
-  #   api-keys -> rag-config -> gdrive-index-bootstrap -> gdrive-sync (rclone +
-  #   POST /index) -> test -> test_09 (full real-gdrive drain).
+  #   api-keys -> ephemeral user (KB_API_KEY) -> rag-config ->
+  #   gdrive-index-bootstrap -> gdrive-sync (rclone + POST /index) ->
+  #   integration suite (not e2e/long) -> test_09 (full real-gdrive drain).
   # OCR is provisioned BEFORE the gdrive set ingests so image-bearing documents
   # are OCR'd (non-empty), not orphaned. Extraction + embedding drain async, so
   # test_09 polls GET /status for the real drain terminal state
   # (pending+processing=0 AND completed+failed>=source). The cold first
   # extraction runs per-figure OCR through deepseek-ocr, so the pending-drain
   # budget is raised (E2E_INDEXER_WAIT, default 2400s -> GDRIVE_TEST_WAIT).
-  # Stashes OPENWEBUI_FIRST_USER/PASSWORD (+OPENWEBUI_USER) before the wipe and
-  # restores them after bootstrap (clean-all deletes .env.local). No fallback:
+  # Stashes OPENWEBUI_FIRST_USER/PASSWORD before the wipe and restores them
+  # after bootstrap (clean-all deletes .env.local). No fallback:
   # any step failing aborts (set -e); an empty extraction result orphans the file
   # (by design -- the operator sees the outage).
   echo "==> DESTRUCTIVE: wipes all data and re-provisions from scratch."
@@ -123,8 +124,7 @@ set +e
     || { echo "REFUSING: OPENWEBUI_FIRST_USER/PASSWORD not set in .env.local (admin account) — fill them first" >&2; exit 1; }
 
   stash=$(mktemp); chmod 600 "$stash"
-  { printf 'OPENWEBUI_FIRST_USER=%s\nOPENWEBUI_FIRST_PASSWORD=%s\n' "$OPENWEBUI_FIRST_USER" "$OPENWEBUI_FIRST_PASSWORD"
-    [ -n "${OPENWEBUI_USER:-}" ] && printf 'OPENWEBUI_USER=%s\n' "$OPENWEBUI_USER" || true; } > "$stash"
+  { printf 'OPENWEBUI_FIRST_USER=%s\nOPENWEBUI_FIRST_PASSWORD=%s\n' "$OPENWEBUI_FIRST_USER" "$OPENWEBUI_FIRST_PASSWORD"; } > "$stash"
   trap 'rm -f "$stash"' EXIT
 
   make clean-all
@@ -164,14 +164,25 @@ set +e
 
   make admin-signup
   make api-keys
+  e2e_ephemeral_user
   make projects-bootstrap
   make rag-config
   make gdrive-index-bootstrap
   make gdrive-sync
-  GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" make test
-  # test_09 (full real-gdrive drain) is not in the `make test` glob (it is slow
-  # and coupled to the live rclone-synced corpus); run it explicitly here,
-  # where the gdrive KB is provisioned and the corpus is freshly synced above.
+  # Integration suite (the single gate, now that live `make test` is unit-only).
+  # Direct pytest -- NOT `make test` (retargeted to unit-only) -- with the same
+  # marker the old in-clone `make test` used: "not e2e and not long". This runs
+  # the integration-not-long tests (test_01-07,10,11,13,14,15) + the unit tests,
+  # and EXCLUDES test_e2e_iso (e2e -> would re-invoke this script: infinite
+  # recursion), test_08/test_12 (e2e -> self-isolate nested clones on fixed
+  # ports), and test_09 (long -> run explicitly below on the freshly-synced
+  # corpus, so it is not double-drained). `make ci` provisions the clone's .venv
+  # (a fresh git clone has none; the old `make test: ci` prereq did this).
+  make ci
+  GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" .venv/bin/python -m pytest -m "not e2e and not long" -v
+  # test_09 (full real-gdrive drain) is not in the suite above (it is long and
+  # coupled to the live rclone-synced corpus); run it explicitly here, where the
+  # gdrive KB is provisioned and the corpus is freshly synced above.
   echo "==> full real-gdrive drain (test_09)"
   GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" bash tests/test_09_gdrive_index.sh
   echo "==> test-e2e PASS"

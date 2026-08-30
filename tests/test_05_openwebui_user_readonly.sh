@@ -10,17 +10,17 @@
 # then cleans up (deletes the temp KB + file via the admin key).
 #
 # Requires `make api-keys` to have populated .env.local with:
-#   OPENWEBUI_ADMIN_API_KEY, OPENWEBUI_USER_API_KEY.
+#   OPENWEBUI_ADMIN_API_KEY, KB_API_KEY.
 set -u
 . "$(dirname "$0")/lib.sh"
 load_env
 require_stack_up
-require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; }
+require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }
 
 # OWUI REST is at the KB_HOST root (/api/* via Caddy catch-all -> openwebui:8080).
 O="$(kb_host)"
 AK="$OPENWEBUI_ADMIN_API_KEY"   # admin key (full access) — setup + cleanup
-UK="$OPENWEBUI_USER_API_KEY"    # agent key (read-scoped) — subject under test
+UK="$KB_API_KEY"    # user key (read-scoped) — subject under test
 MARKER="kbrouser-9c4f1-piezoresistor"
 TMP_TXT="$(mktemp)"
 KB_ID=""; FID=""
@@ -47,6 +47,26 @@ who=$(curl -s "$O/api/v1/auths/" "${U[@]}")
 urole=$(printf '%s' "$who" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("role",""))' 2>/dev/null)
 uemail=$(printf '%s' "$who" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("email",""))' 2>/dev/null)
 if [ "$urole" = "user" ]; then pass "user key -> $uemail (role=user)"; else fail "user key -> role=${urole:-<none>} (expected user)"; finish; exit 1; fi
+
+# --- 1b. user key can CREATE a KB (workspace.knowledge) ----------------------
+# Replaces the projects-index-bootstrap probe: bootstrap enables
+# workspace.knowledge once (admin); this asserts a non-admin user key can
+# actually create a KB (the permission propagated to the user record). The user
+# owns what it creates, so the user key can delete it; self-contained (no trap
+# dependency -- the admin-owned $KB_ID/$FID below are separate).
+section "user key: KB create succeeds (workspace.knowledge)"
+ukb_code=$(curl -s -o /tmp/kbrouser_ukb.out -w '%{http_code}' -X POST "$O/api/v1/knowledge/create" "${U[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"ro-user-wk-test","description":"integration test: user-key KB create (workspace.knowledge)"}')
+ukb_id=$(python3 -c 'import sys,json;print(json.load(open("/tmp/kbrouser_ukb.out")).get("id",""))' 2>/dev/null || true)
+rm -f /tmp/kbrouser_ukb.out
+if [ "${ukb_code:-0}" -ge 200 ] && [ "${ukb_code:-0}" -lt 300 ] && [ -n "$ukb_id" ]; then
+  pass "user key created KB $ukb_id (workspace.knowledge verified)"
+  curl -sf -X DELETE "$O/api/v1/knowledge/${ukb_id}/delete" "${U[@]}" >/dev/null 2>&1 \
+    || curl -sf -X DELETE "$O/api/v1/knowledge/${ukb_id}/delete" "${A[@]}" >/dev/null 2>&1 || true
+else
+  fail "user-key KB create -> http=${ukb_code} (workspace.knowledge not enabled? run: make projects-bootstrap)"; finish; exit 1
+fi
 
 # --- 2. admin sets up a temp KB with '*' read grant --------------------------
 section "admin: create KB + upload + embed + grant '*' read"

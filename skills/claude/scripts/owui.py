@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """CLI wrapper for a self-hosted Open WebUI knowledge base.
 
-Two surfaces, one key (the non-admin agent key, KB_API_KEY):
+Two surfaces, one key (your non-admin user key, KB_API_KEY):
 
   * KB surface (read-scoped): list/search KBs, retrieve (semantic) from a KB, RAG chat
-    grounded on a KB, read file content. The agent key is read-only here: it
+    grounded on a KB, read file content. The key is read-only here: it
     cannot upload, modify, or delete KBs/files it does not own.
 
   * Projects-memory surface (user-key writes to OWNED KBs): index
@@ -766,7 +766,7 @@ def cmd_status_projects(base, key, a):
 def main():
     p = argparse.ArgumentParser(
         prog="owui.py",
-        description="Read-scoped Open WebUI REST wrapper (non-admin agent key).",
+        description="Read-scoped Open WebUI REST wrapper (non-admin user key).",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 

@@ -68,9 +68,9 @@ elif [ "$gn_count" -gt 0 ]; then
   exit 1
 fi
 
-require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; }
+require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }
 AK="$OPENWEBUI_ADMIN_API_KEY"
-UK="$OPENWEBUI_USER_API_KEY"
+UK="$KB_API_KEY"
 ADM=(-H "Authorization: Bearer $AK")
 RD=(-H "Authorization: Bearer $UK")
 KB_ID=""

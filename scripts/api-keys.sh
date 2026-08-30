@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Provision Open WebUI API keys for the admin and a dedicated non-admin agent
-# user, and persist them to .env.local. Idempotent (re-running keeps existing
-# keys/passwords; set FORCE=1 to rotate the API keys).
+# Provision the Open WebUI admin API key and persist it to .env.local.
+# Idempotent (re-running keeps the existing key; set FORCE=1 to rotate it).
 #
 # Preconditions:
 #   - Stack running and healthy (`make start`).
@@ -10,26 +9,24 @@
 #
 # What it does:
 #   1. Enables API keys stack-wide (auth.enable_api_keys) if disabled.
-#   2. Enables the non-admin API-key permission (user.permissions.features.api_keys).
-#   3. Creates a non-admin agent user (OPENWEBUI_USER) if missing, by briefly
-#      re-enabling signup (ENABLE_SIGNUP) with DEFAULT_USER_ROLE=user, then
-#      restoring both to their prior values. Signup ends disabled.
-#   4. Gets or generates an API key for the admin and for the agent user.
-#   5. Writes into .env.local (chmod 0600 preserved):
-#        OPENWEBUI_USER, OPENWEBUI_USER_PASSWORD,
-#        OPENWEBUI_ADMIN_API_KEY, OPENWEBUI_USER_API_KEY
+#   2. Enables the non-admin API-key permission (user.permissions.features.api_keys)
+#      so operator-created users (make users-create) can hold API keys.
+#   3. Grants '*' read on the chat model so any non-admin user can RAG chat.
+#   4. Gets or generates the admin API key.
+#   5. Writes OPENWEBUI_ADMIN_API_KEY into .env.local (chmod 0600 preserved).
+#
+# No dedicated agent user is provisioned. Operator users (and per-run ephemeral
+# test users) are created separately via `make users-create`; their keys are the
+# operator's KB_API_KEY, not a provisioned identity.
 #
 # Security note: OPENWEBUI_ADMIN_API_KEY grants full admin (bypasses access
-# control). Hand agents the OPENWEBUI_USER_API_KEY (non-admin, read-scoped via
-# the existing '*' KB read grants; cannot write to the admin's KBs).
+# control). Do not hand it to agents.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # .env (config of record) + .env.local (secrets + test creds) -> exported env.
-# Capture `make api-keys KB_DOMAIN=<d>` / `OCR_ENABLED=<val>` overrides before
-# `set -a; . ./.env` (which would clobber them with .env's values); restore
-# after sourcing.
-_KB_DOMAIN_OVR="${KB_DOMAIN:-}"
+# Capture a `make api-keys OCR_ENABLED=<val>` override before `set -a; . ./.env`
+# (which would clobber it with .env's value); restore after sourcing.
 _OCR_ENABLED_OVR="${OCR_ENABLED:-}"
 set -a
 # shellcheck source=/dev/null
@@ -37,11 +34,10 @@ set -a
 # shellcheck source=/dev/null
 . ./.env.local
 set +a
-if [ -n "$_KB_DOMAIN_OVR" ]; then export KB_DOMAIN="$_KB_DOMAIN_OVR"; fi
 if [ -n "$_OCR_ENABLED_OVR" ]; then export OCR_ENABLED="$_OCR_ENABLED_OVR"; fi
 
 python3 - <<'PY'
-import os, json, secrets, tempfile, time, urllib.request, urllib.error, sys
+import os, json, tempfile, urllib.request, urllib.error, sys
 
 # OWUI is fronted by Caddy at the KB_HOST root; reach its /api/* there.
 _kb_host = os.environ.get("KB_HOST")
@@ -50,11 +46,6 @@ if not _kb_host:
 O = _kb_host.rstrip("/")
 ADMIN_USER = os.environ.get("OPENWEBUI_FIRST_USER", "")
 ADMIN_PASS = os.environ.get("OPENWEBUI_FIRST_PASSWORD", "")
-_kb_domain = os.environ.get("KB_DOMAIN")
-if not _kb_domain:
-    sys.exit("FAIL  KB_DOMAIN not set -- declare it in .env.template")
-AGENT_USER = os.environ.get("OPENWEBUI_USER") or "agent@" + _kb_domain
-AGENT_NAME = os.environ.get("OPENWEBUI_USER_NAME") or "Agent"
 FORCE = os.environ.get("FORCE", "") == "1"
 
 if not ADMIN_USER or not ADMIN_PASS:
@@ -78,7 +69,7 @@ def req(method, path, token=None, body=None):
     except urllib.error.URLError as e:
         # Transport error (connection refused, timeout, DNS). Return a non-200
         # code so callers fail gracefully instead of raising past a finally
-        # block (e.g. the temp-signup restore below).
+        # block.
         return 0, "URLError: %s" % e
 
 def jget(method, path, token=None, body=None):
@@ -135,10 +126,10 @@ if not feat.get("api_keys"):
 else:
     out("OK    features.api_keys already enabled")
 
-# --- 3b. grant '*' read on the chat model so the agent user can RAG chat -----
+# --- 3b. grant '*' read on the chat model so any non-admin user can RAG chat --
 # Without a model access grant, a non-admin user sees 0 models and
 # /api/chat/completions returns "Model not found". Same '*' pattern as KB grants.
-# Grant the chat model the agent actually requests: OPENWEBUI_MODEL (inserted by
+# Grant the chat model the api-gateway requests: OPENWEBUI_MODEL (inserted by
 # the api-gateway for POST /memory/rag). Declared in .env.template (independent
 # from GRAPHITI_MODEL/extraction); it must be a model `make pull-models` creates.
 _chat_model = os.environ.get("OPENWEBUI_MODEL")
@@ -150,80 +141,26 @@ mids = []
 if code == 200 and isinstance(ml, dict):
     mids = [m.get("id") for m in (ml.get("data") or []) if isinstance(m, dict)]
 if CHAT_MODEL not in mids:
-    sys.exit("FAIL  chat model %s not found in admin's model list (run: make pull-models); not granting — agent RAG chat would fail" % CHAT_MODEL)
+    sys.exit("FAIL  chat model %s not found in admin's model list (run: make pull-models); not granting — non-admin RAG chat would fail" % CHAT_MODEL)
 grant = {"resource_type": "model", "resource_id": CHAT_MODEL,
          "principal_type": "user", "principal_id": "*", "permission": "read"}
 code, md, txt = jget("POST", "/api/v1/models/model/access/update", admin_jwt,
                      {"id": CHAT_MODEL, "name": CHAT_MODEL, "access_grants": [grant]})
 if code != 200:
-    sys.exit("FAIL  model access grant on %s -> %s %s (agent RAG chat would fail)" % (CHAT_MODEL, code, txt[:160]))
-out("OK    granted '*' read on chat model %s (agent can RAG chat)" % CHAT_MODEL)
+    sys.exit("FAIL  model access grant on %s -> %s %s (non-admin RAG chat would fail)" % (CHAT_MODEL, code, txt[:160]))
+out("OK    granted '*' read on chat model %s (non-admin users can RAG chat)" % CHAT_MODEL)
 
-# --- 4. ensure the non-admin agent user exists -------------------------------
-agent_pass = os.environ.get("OPENWEBUI_USER_PASSWORD", "")
-agent_jwt = signin(AGENT_USER, agent_pass) if agent_pass else ""
-if agent_jwt:
-    out("OK    agent user %s exists (signin ok)" % AGENT_USER)
-else:
-    # Need to create it. The admin user-create API (POST /api/v1/auths/add)
-    # exists, but it can set a new account to 'pending' (unable to sign in) on
-    # some builds. The signup path with DEFAULT_USER_ROLE=user is the proven
-    # way to get a signable non-admin agent account here. Per-account provisioning
-    # via auths/add (with a signin + api_key flow) is done by the api-gateway's
-    # admin endpoint (POST /admin/users) — see README "KB user provisioning".
-    if not agent_pass:
-        agent_pass = secrets.token_hex(16)
-    code, cfg2, _ = jget("GET", "/api/v1/auths/admin/config", admin_jwt)
-    snap_signup = cfg2.get("ENABLE_SIGNUP")
-    snap_role = cfg2.get("DEFAULT_USER_ROLE")
-    cfg2["ENABLE_SIGNUP"] = True
-    cfg2["DEFAULT_USER_ROLE"] = "user"
-    code, d, txt = jget("POST", "/api/v1/auths/admin/config", admin_jwt, cfg2)
-    if code != 200:
-        sys.exit("FAIL  temp-enable signup -> %s %s" % (code, txt[:200]))
-    code, sd, txt = jget("POST", "/api/v1/auths/signup", None,
-                         {"name": AGENT_NAME, "email": AGENT_USER, "password": agent_pass})
-    # Restore signup/role regardless of signup outcome, retrying transport
-    # errors (a URLError here must not leave signup enabled), then verify it
-    # actually took effect.
-    cfg2["ENABLE_SIGNUP"] = snap_signup
-    cfg2["DEFAULT_USER_ROLE"] = snap_role
-    last_err = ""
-    for attempt in range(3):
-        rcode, _, rtxt = jget("POST", "/api/v1/auths/admin/config", admin_jwt, cfg2)
-        if rcode == 200:
-            break
-        last_err = "%s %s" % (rcode, (rtxt or "")[:160])
-        time.sleep(1 + attempt)
-    else:
-        sys.exit("FAIL  restore signup config after retries: %s (signup may still be ENABLED — check the admin UI)" % last_err)
-    vcode, vcfg, _ = jget("GET", "/api/v1/auths/admin/config", admin_jwt)
-    if vcode != 200 or not isinstance(vcfg, dict) \
-       or vcfg.get("ENABLE_SIGNUP") != snap_signup \
-       or vcfg.get("DEFAULT_USER_ROLE") != snap_role:
-        sys.exit("FAIL  signup config did not restore to ENABLE_SIGNUP=%s DEFAULT_USER_ROLE=%s (got %s) — check the admin UI"
-                 % (snap_signup, snap_role, vcfg))
-    if code != 200 or not sd:
-        sys.exit("FAIL  signup %s -> %s %s" % (AGENT_USER, code, txt[:200]))
-    agent_jwt = sd.get("token", "")
-    if not agent_jwt:
-        agent_jwt = signin(AGENT_USER, agent_pass)
-    out("OK    created agent user %s (signup re-enabled then restored)" % AGENT_USER)
-
-# --- 5. get-or-generate API keys ---------------------------------------------
-def key_for(jwt, label, existing, expect_email, expect_role=None):
+# --- 4. get-or-generate the admin API key ------------------------------------
+def key_for(jwt, label, existing, expect_email):
     """Return a working API key for the account that owns `jwt`. Keep `existing`
-    only if it authenticates AND belongs to the expected account (and role, if
-    given); otherwise generate a fresh key for this account (rotates/replaces).
-    This prevents a valid admin key sitting in the non-admin slot from being
-    kept as the read-scoped agent key."""
+    only if it authenticates AND belongs to the expected account; otherwise
+    generate a fresh key for this account (rotates/replaces)."""
     if existing and not FORCE:
         code, d, _ = jget("GET", "/api/v1/auths/", existing)
         if code == 200 and d \
-           and (d.get("email") or "").casefold() == (expect_email or "").casefold() \
-           and (expect_role is None or d.get("role") == expect_role):
+           and (d.get("email") or "").casefold() == (expect_email or "").casefold():
             return existing, "kept"
-        out("WARN  existing %s key did not match expected account/role; regenerating" % label)
+        out("WARN  existing %s key did not match expected account; regenerating" % label)
     code, d, txt = jget("POST", "/api/v1/auths/api_key", jwt)
     if code != 200 or not d:
         sys.exit("FAIL  generate %s api key -> %s %s" % (label, code, txt[:200]))
@@ -233,18 +170,10 @@ admin_existing = os.environ.get("OPENWEBUI_ADMIN_API_KEY", "")
 admin_key, admin_act = key_for(admin_jwt, "admin", admin_existing, expect_email=ADMIN_USER)
 out("OK    %s ADMIN api key (%s)" % (admin_act, admin_key[:10] + "..."))
 
-user_existing = os.environ.get("OPENWEBUI_USER_API_KEY", "")
-user_key, user_act = key_for(agent_jwt, "agent", user_existing,
-                             expect_email=AGENT_USER, expect_role="user")
-out("OK    %s USER  api key (%s)" % (user_act, user_key[:10] + "..."))
-
-# --- 6. upsert .env.local (chmod 0600 preserved) -----------------------------
+# --- 5. upsert .env.local (chmod 0600 preserved) -----------------------------
 env_path = ".env.local"
 new_vals = {
-    "OPENWEBUI_USER": AGENT_USER,
-    "OPENWEBUI_USER_PASSWORD": agent_pass,
     "OPENWEBUI_ADMIN_API_KEY": admin_key,
-    "OPENWEBUI_USER_API_KEY": user_key,
 }
 lines = []
 if os.path.exists(env_path):
@@ -279,13 +208,10 @@ except Exception:
 
 out("")
 out("Wrote to .env.local (chmod 0600):")
-out("  OPENWEBUI_USER=%s" % AGENT_USER)
-out("  OPENWEBUI_USER_PASSWORD=<%d chars>" % len(agent_pass))
 out("  OPENWEBUI_ADMIN_API_KEY=<full admin>  (do NOT give to agents)")
-out("  OPENWEBUI_USER_API_KEY=<read-scoped>  (hand this to agents)")
 out("")
-out("Verify:")
-out("  curl -s -H \"Authorization: Bearer $OPENWEBUI_USER_API_KEY\" %s/api/v1/knowledge/" % O)
+out("Verify (with your own user key in KB_API_KEY, set via `make users-create`):")
+out("  curl -s -H \"Authorization: Bearer $KB_API_KEY\" %s/api/v1/knowledge/" % O)
 PY
 
 # When OCR is enabled, point OWUI at the markitdown-ocr external engine (the

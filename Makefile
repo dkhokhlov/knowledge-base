@@ -47,7 +47,7 @@ provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + adm
 	    || { echo "stack did not become healthy in 120s ($$H/health)" >&2; exit 1; }; sleep 2; done; \
 	  echo "  stack healthy ($$H/health)"; \
 	  echo "==> 4/8 admin-signup (creates the admin@<KB_DOMAIN> account)"; make admin-signup; \
-	  echo "==> 5/8 api-keys (admin + agent keys; auto-configures OWUI -> markitdown-ocr when OCR_ENABLED=true)"; make api-keys; \
+	  echo "==> 5/8 api-keys (admin key; auto-configures OWUI -> markitdown-ocr when OCR_ENABLED=true)"; make api-keys; \
 	  echo "==> 6/8 projects-bootstrap (one-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs)"; make projects-bootstrap; \
 	  echo "==> 7/8 rag-config (strict-grounding RAG template + rag.ollama.base_url sync)"; make rag-config; \
 	  echo "==> 8/8 gdrive-index-bootstrap (creates the gdrive KB + grants public read + writes GDRIVE_KB_ID)"; make gdrive-index-bootstrap; \
@@ -83,7 +83,7 @@ ps: ## Show container status (with health)
 
 config: ## Render effective compose config incl. the ocr sidecar (COMPOSE_PROFILES=ocr in .env; secrets redacted)
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
-	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OPENWEBUI_USER_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_USER_PASSWORD|OPENWEBUI_FIRST_PASSWORD): .*/\1: <redacted>/'
+	  $(COMPOSE) config | sed -E 's/(WEBUI_SECRET_KEY|OPENWEBUI_ADMIN_API_KEY|OPEN_WEBUI_API_KEY|OCR_SERVICE_TOKEN|OPENWEBUI_FIRST_PASSWORD): .*/\1: <redacted>/'
 
 health: ## Probe the stack /health (Caddy -> api-gateway aggregated, reflects OWUI)
 	@set -a; . ./.env; set +a; \
@@ -94,8 +94,8 @@ health: ## Probe the stack /health (Caddy -> api-gateway aggregated, reflects OW
 ci: ## Provision the .venv: uv sync (Python 3.12 from .python-version + locked deps from uv.lock). Idempotent; prereq for every test target.
 	uv sync
 
-test: ci ## Run the fast set: python unit tests + live-stack integration tests (excludes e2e + long). Requires: make start (for the integration tests).
-	@$(PYTEST) -m "not e2e and not long" -v
+test: ci ## Run the python unit tests only (no stack needed). Integration + e2e run in the isolated clone via `make test-e2e-iso`.
+	@$(PYTEST) -m unit -v
 
 test-unit: ci ## Run only the python unit tests (no stack needed).
 	@$(PYTEST) -m unit -v
@@ -117,7 +117,7 @@ clean-test: ## Tear down ONE isolated e2e run + remove its clone. NAME=<name> (d
 clean-tests: ## Manual hygiene flush: remove EVERY .test-*/<stamp>/ clone + legacy un-stamped clones + stranded stamped e2e docker. Prints each clone's HEAD + unmerged commits before removing (a warning, not a hard refuse). NAME=<name> flushes only .test-<name>/. Run periodically -- stamped clones accumulate per e2e run (no autoclean). Delegates to scripts/e2e-env.sh.
 	@bash -c '. scripts/e2e-env.sh; e2e_clean_tests "$${NAME:-}"'
 
-api-keys: ## Provision admin + agent-user API keys into .env.local (run after `make start` + admin signup)
+api-keys: ## Provision the admin API key into .env.local (run after `make start` + admin signup)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_FIRST_USER=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_FIRST_USER/PASSWORD in .env.local (the admin account)"; exit 1; }
@@ -230,18 +230,16 @@ gdrive-status: ## Show gdrive index status via api-gateway GET /status (complete
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:?KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}; \
 	  [ -n "$${GDRIVE_KB_ID:-}" ] || { echo "MISSING GDRIVE_KB_ID in .env.local (run: make gdrive-index-bootstrap)"; exit 1; }; \
-	  [ -n "$${OPENWEBUI_USER_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
+	  [ -n "$${KB_API_KEY:-}" ] || { echo "MISSING KB_API_KEY in the shell env (source ~/.api_keys, or run: make users-create EMAIL=...)"; exit 1; }; \
 	  q="source=gdrive&kb_id=$$GDRIVE_KB_ID"; [ -n "$${SCOPE_PATH:-}" ] && q="$$q&path=$$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$$SCOPE_PATH")"; \
 	  curl -sS "$$H/status?$$q&json=1" \
-	    -H "Authorization: Bearer $$OPENWEBUI_USER_API_KEY" \
+	    -H "Authorization: Bearer $$KB_API_KEY" \
 	    | python3 -m json.tool --indent 2
 
 projects-bootstrap: ## One-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
-	@grep -qE '^OPENWEBUI_USER_API_KEY=.+$$' .env.local \
-	  || { echo "MISSING OPENWEBUI_USER_API_KEY in .env.local (the caller key that owns project KBs; run: make api-keys)"; exit 1; }
 	@./scripts/projects-index-bootstrap.sh
 
 shell-owui: ## Shell into the Open WebUI container

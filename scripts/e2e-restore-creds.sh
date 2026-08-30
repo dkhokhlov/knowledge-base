@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restore admin (and optional agent) credentials into .env.local after a
+# Restore admin credentials into .env.local after a
 # `make clean-all` + `make bootstrap` wiped them. `make bootstrap` recreates
 # .env.local from .env.local.template with a fresh WEBUI_SECRET_KEY and writes
 # admin@<KB_DOMAIN> + a generated OPENWEBUI_FIRST_PASSWORD; this script
@@ -13,7 +13,7 @@
 #
 # Usage: e2e-restore-creds.sh <stash-file>
 #   stash-file = 0600 file with KEY=VALUE lines (OPENWEBUI_FIRST_USER,
-#                OPENWEBUI_FIRST_PASSWORD, optional OPENWEBUI_USER).
+#                OPENWEBUI_FIRST_PASSWORD).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

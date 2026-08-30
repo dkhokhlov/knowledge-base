@@ -46,12 +46,12 @@ def test_04_openwebui_rag(run_sh):
 
 @pytest.mark.integration
 def test_05_openwebui_user_readonly(run_sh):
-    """The agent (non-admin) API key is read-scoped (temp KB, '*' read grant, write/delete deny assertions)."""
+    """The non-admin user API key is read-scoped (user-key KB create via workspace.knowledge; temp KB, '*' read grant, write/delete deny assertions)."""
     run_sh("tests/test_05_openwebui_user_readonly.sh")
 
 @pytest.mark.integration
 def test_06_gateway(run_sh):
-    """api-gateway authorization matrix (admin + agent keys; personal write, read-all, cross-user deny, admin override, spoof/claim deny, shared-group)."""
+    """api-gateway authorization matrix (admin + non-admin user keys; personal write, read-all, cross-user deny, admin override, spoof/claim deny, shared-group)."""
     run_sh("tests/test_06_gateway.sh")
 
 @pytest.mark.integration

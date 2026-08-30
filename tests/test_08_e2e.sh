@@ -83,13 +83,13 @@ e2e_isolate "$NAME" "$PORT" || { fail "e2e_isolate failed"; finish; exit 1; }
 ISOLATED=1
 pass "clone + isolation env ready ($E2E_CLONE)"
 e2e_provision || { fail "e2e_provision failed (start/admin-signup/api-keys)"; finish; exit 1; }
-pass "isolated stack up + admin/agent keys provisioned"
+pass "isolated stack up + admin key + ephemeral user provisioned"
 
-# Load the clone's secrets (agent key) the standard way (lib.sh load_env, but in
+# Load the clone's secrets (user key) the standard way (lib.sh load_env, but in
 # the clone cwd -- it reads ./.env + ./.env.local relative to cwd=$E2E_CLONE).
 # e2e_provision already waited for /health, so no separate require_stack_up.
 load_env
-require_env OPENWEBUI_USER_API_KEY || { finish; exit 1; }
+require_env KB_API_KEY || { finish; exit 1; }
 
 # --- 2. agent-surface body (verbatim from the non-isolated original) --------
 # Drives skills/claude/scripts/kb_gateway.py through every gateway endpoint the
@@ -103,12 +103,13 @@ require_env OPENWEBUI_USER_API_KEY || { finish; exit 1; }
 G="$(kb_host)"
 KB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The wrapper is a thin client: it reads ONLY KB_HOST + KB_API_KEY from the
-# shell env (no --env-file / --key / --base-url flags). Inline `env` sets both
-# per invocation. KB = agent key. KB_ROOT resolves to the CLONE root here (cwd
-# is the clone after e2e_isolate), so the clone's kb_gateway.py is the code under
-# test -- NOT the live repo's copy (clean-tree guard guarantees they are at the
-# same commit, but the clone is the code being verified).
-KB="env KB_API_KEY=${OPENWEBUI_USER_API_KEY} KB_HOST=${G} python3 ${KB_ROOT}/skills/claude/scripts/kb_gateway.py"
+# shell env (no --env-file / --key / --base-url flags). load_env exports both
+# from the clone .env.local; inline `env` overrides only KB_HOST per invocation
+# (KB_API_KEY is inherited). KB = user key. KB_ROOT resolves to the CLONE root
+# here (cwd is the clone after e2e_isolate), so the clone's kb_gateway.py is the
+# code under test -- NOT the live repo's copy (clean-tree guard guarantees they
+# are at the same commit, but the clone is the code being verified).
+KB="env KB_HOST=${G} python3 ${KB_ROOT}/skills/claude/scripts/kb_gateway.py"
 
 # kbrun <cmd...>: print stdout; record a failure (and return 1) if the cmd
 # exits non-zero. Does not exit the script (lib.sh uses pass/fail/finish).

@@ -9,7 +9,7 @@ set -u
 . "$(dirname "$0")/lib.sh"
 load_env
 require_stack_up
-require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; }
+require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }
 # Hybrid keys are .env single-source (no literal defaults); rag-config.sh fails
 # loudly if any is missing. Fail here too so the test does not mask an unset var.
 require_env ENABLE_RAG_HYBRID_SEARCH RAG_HYBRID_BM25_WEIGHT RAG_TOP_K_RERANKER VECTOR_DB \

@@ -130,13 +130,17 @@ e2e_isolate() {
 
   # Isolate the clone tree from the operator's shell profile. The operator's
   # ~/.bash_env (sourced by BASH_ENV in EVERY non-interactive child bash) re-
-  # exports KB_HOST=<live stack> + OLLAMA_HOST for the live deployment. Re-
-  # sourcing it in the clone clobbers the KB_HOST make-tunable at bootstrap-
+  # exports KB_HOST=<live stack> + OLLAMA_HOST for the live deployment, and
+  # ~/.api_keys exports KB_API_KEY (the operator's live user key). Re-sourcing
+  # ~/.bash_env in the clone clobbers the KB_HOST make-tunable at bootstrap-
   # CAPTURE time. Unsetting BASH_ENV stops the re-source; OLLAMA_HOST reaches
   # children via the export above + normal inheritance, and KB_HOST via the
   # make-tunable persisted to .env. unset KB_HOST drops the live value inherited
-  # from the wrapper's own startup source of ~/.bash_env.
-  unset BASH_ENV KB_HOST
+  # from the wrapper's own startup source of ~/.bash_env. unset KB_API_KEY drops
+  # the operator's live key -- a leaked key would satisfy the clone's
+  # ${KB_API_KEY:?} with the WRONG identity (401 against the clone DB); the clone
+  # gets its own ephemeral user key via e2e_ephemeral_user (written to .env.local).
+  unset BASH_ENV KB_HOST KB_API_KEY
 
   # The stamped clone is unique per run (above), so a leftover clone from a
   # prior run does NOT block this one -- it lives at a different stamp. A prior
@@ -221,9 +225,11 @@ e2e_isolate() {
 }
 
 # Non-destructive provision of the isolated stack: start, wait for /health, then
-# create the admin account + provision admin/agent API keys. Call AFTER
-# e2e_isolate. Does NOT run rag-config, projects-bootstrap, or gdrive (a test
-# that needs those calls them itself). OCR is honored per e2e_isolate's bootstrap.
+# create the admin account + provision the admin API key + one ephemeral
+# throwaway user (its key written to the clone .env.local as KB_API_KEY by
+# e2e_ephemeral_user). Call AFTER e2e_isolate. Does NOT run rag-config,
+# projects-bootstrap, or gdrive (a test that needs those calls them itself). OCR
+# is honored per e2e_isolate's bootstrap.
 e2e_provision() {
   echo "==> make start (isolated project $COMPOSE_PROJECT_NAME, port $E2E_PORT)"
   make start || return 1
@@ -236,6 +242,60 @@ e2e_provision() {
   echo "stack healthy ($h/health)"
   make admin-signup || return 1
   make api-keys || return 1
+  e2e_ephemeral_user || return 1
+}
+
+# Create ONE ephemeral throwaway user for this clone env (admin key -> gateway
+# POST /admin/users via `make users-create`) and write its key as KB_API_KEY into
+# the clone's .env.local. Tests read KB_API_KEY via load_env (tests/lib.sh
+# sources .env.local), so the key MUST be on disk -- an export alone is fragile
+# across the pytest->bash subprocess boundary + the nested clones test_08/12
+# load_env from. The user is destroyed with the clone (teardown root-rms the
+# clone + its DB); no per-user clean-delete is needed. One role=user ephemeral
+# user satisfies every test (test_05 needs role=user + a *-granted KB it creates
+# itself with the admin key; test_06 cross-user is admin-vs-user; test_07
+# mints/deletes its own temp users). Call AFTER `make api-keys` (needs
+# OPENWEBUI_ADMIN_API_KEY in .env.local). Idempotent on .env.local (upsert).
+e2e_ephemeral_user() {
+  local domain email ujson ukey
+  domain="$(grep -E '^KB_DOMAIN=' .env | head -1 | cut -d= -f2- || true)"
+  [ -n "$domain" ] || { echo "FAIL  KB_DOMAIN not set in the clone .env (ephemeral user email)" >&2; return 1; }
+  email="temp-${E2E_STAMP}@${domain}"
+  echo "==> create ephemeral test user $email (admin key -> gateway POST /admin/users)"
+  ujson="$(make users-create EMAIL="$email" NAME="E2E" ROLE=user 2>/dev/null)" \
+    || { echo "FAIL  ephemeral user create failed for $email" >&2; return 1; }
+  ukey="$(printf '%s' "$ujson" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("kb_api_key") or "")')"
+  [ -n "$ukey" ] || { echo "FAIL  ephemeral user create returned no kb_api_key: $ujson" >&2; return 1; }
+  # Idempotent upsert of KB_API_KEY into the clone .env.local (atomic write,
+  # chmod 0600 preserved -- mirrors scripts/api-keys.sh's write pattern).
+  python3 - "$ukey" <<'PY'
+import os, sys, tempfile
+key = sys.argv[1]
+path = ".env.local"
+lines = open(path).read().splitlines() if os.path.exists(path) else []
+seen = False
+out = []
+for ln in lines:
+    if ln.startswith("KB_API_KEY="):
+        out.append("KB_API_KEY=" + key); seen = True
+    else:
+        out.append(ln)
+if not seen:
+    out.append("KB_API_KEY=" + key)
+tmp_fd, tmp_path = tempfile.mkstemp(dir=".", prefix=".env.local.", suffix=".tmp")
+try:
+    with os.fdopen(tmp_fd, "w") as f:
+        f.write("\n".join(out) + "\n")
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, path)
+except Exception:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    raise
+PY
+  echo "OK    ephemeral user $email -> KB_API_KEY written to .env.local"
 }
 
 # --- teardown model (proliferation) ----------------------------------------

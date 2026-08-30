@@ -20,8 +20,9 @@ One URL, one key.
 - A running, healthy Open WebUI + api-gateway you can reach.
 - **KB_HOST** — required, no default (e.g. `http://localhost:3000` for a local
   stack). The wrapper exits if it is unset.
-- **KB_API_KEY** — an Open WebUI agent key with read grants on the KBs you
-  query (write scope on your own project KBs). The wrapper exits if it is unset.
+- **KB_API_KEY** — your Open WebUI non-admin user key, with read grants on the
+  KBs you query (write scope on your own project KBs). The wrapper exits if it
+  is unset.
 - For RAG chat, a strict RAG template (answer only from KB context) and a synced
   embedding URL must be configured server-side — without them the model falls
   back to its own knowledge and confabulates. That server-side setup is operator
@@ -114,7 +115,7 @@ skill (default `~/.claude/skills/kb/scripts/owui.py`).
 ```
 S=~/.claude/skills/kb/scripts/owui.py
 export KB_HOST=http://localhost:3000   # your stack URL (required)
-export KB_API_KEY=...                  # your Open WebUI agent key (required)
+export KB_API_KEY=...                  # your Open WebUI user key (required; make users-create)
 
 python3 "$S" whoami                    # verify key + role
 python3 "$S" kbs                       # list KBs visible to this key

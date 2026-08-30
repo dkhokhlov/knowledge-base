@@ -15,11 +15,11 @@ set -u
 . "$(dirname "$0")/lib.sh"
 load_env
 require_stack_up
-require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; }
+require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }
 
 G="$(kb_host)"
 AK="$OPENWEBUI_ADMIN_API_KEY"
-UK="$OPENWEBUI_USER_API_KEY"
+UK="$KB_API_KEY"
 ADM=(-H "Authorization: Bearer $AK")
 RD=(-H "Authorization: Bearer $UK")
 CT="Content-Type: application/json"

@@ -14,7 +14,7 @@ set -u
 . "$(dirname "$0")/lib.sh"
 load_env
 require_stack_up
-require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; }
+require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }
 
 # G = gateway (KB_HOST; /memory/* + /admin/users + /health via Caddy).
 # O = OWUI REST (KB_HOST root /api/* via Caddy catch-all) — used for cleanup.
@@ -22,7 +22,7 @@ H="$(kb_host)"
 G="$H"
 O="$H"
 ADMIN_KEY="$OPENWEBUI_ADMIN_API_KEY"
-USER_KEY="$OPENWEBUI_USER_API_KEY"
+USER_KEY="$KB_API_KEY"
 
 EMAIL_A="t07-$(date +%s)-$$@example.com"     # success + duplicate target
 EMAIL_R="t07rb-$(date +%s)-$$@example.com"  # rollback target

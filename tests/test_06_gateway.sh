@@ -14,11 +14,11 @@ set -u
 . "$(dirname "$0")/lib.sh"
 load_env
 require_stack_up
-require_env OPENWEBUI_ADMIN_API_KEY OPENWEBUI_USER_API_KEY || { finish; exit 1; }
+require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }
 
 G="$(kb_host)"
 ADMIN="Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}"
-USER="Authorization: Bearer ${OPENWEBUI_USER_API_KEY}"
+USER="Authorization: Bearer ${KB_API_KEY}"
 CT="Content-Type: application/json"
 
 whoami_email() {  # whoami_email <auth-header> -> email

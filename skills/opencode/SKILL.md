@@ -3,10 +3,10 @@ name: kb
 description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, or to remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "remember …", "what do we know about …", and "forget …". Covers list/search KBs, retrieve (semantic search) from a KB, RAG chat grounded on a KB, and Graphiti facts memory (add/retrieve/episodes/forget via the api-gateway). One URL (KB_HOST) fronts OWUI REST (root /api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the api-gateway for facts memory). Includes zero-dependency Python CLI wrappers (scripts/owui.py for OWUI KBs, scripts/kb_gateway.py for Graphiti facts memory).
 ---
 
-# Open WebUI REST (agent / read-scoped)
+# Open WebUI REST (non-admin / read-scoped)
 
-Drive a self-hosted Open WebUI knowledge base over REST with the **non-admin
-agent API key** — read-only scope. This skill covers only what an agent can do:
+Drive a self-hosted Open WebUI knowledge base over REST with a **non-admin
+user API key** — read-only scope. This skill covers only the read path:
 list/search KBs, retrieve (semantic) from a KB, RAG chat grounded on a KB, and read file
 content. Write/delete/admin operations are out of scope (see [Admin surface](#admin-surface)).
 
@@ -19,9 +19,11 @@ key.
 
 - The stack is running and healthy (`make start && make health` in the
   knowledgebase repo).
-- The agent key exists: produced by `make api-keys`, which writes
-  `OPENWEBUI_USER_API_KEY` into the gitignored `.env.local` and grants the agent
-  `*` read on the chat model so RAG chat works.
+- You have a non-admin user key (KB_API_KEY): create your own user with
+  `make users-create EMAIL=... NAME=...` (needs the admin key; prints the
+  `kb_api_key` to relay). `make api-keys` enables non-admin API keys + grants
+  `*` read on the chat model so a non-admin user's RAG chat works. Store your
+  key in `~/.api_keys` as `KB_API_KEY` (the operator's single source).
 - Grounded RAG is configured: `make rag-config` has been run. It sets the strict
   `RAG_TEMPLATE` (answer only from the KB context — without it, ~12B models
   confabulate from their own knowledge) and syncs `rag.ollama.base_url` to `.env`
@@ -30,14 +32,14 @@ key.
   re-run `make rag-config` to fix, and after any DB reset/rebuild.
 - Set `KB_HOST` and `KB_API_KEY` in your shell env (`export KB_HOST=...`,
   `export KB_API_KEY=...`). The wrapper is a thin client: it reads ONLY those two
-  env vars and does not read `.env` / `.env.local`. The agent key is
-  `OPENWEBUI_USER_API_KEY` (written to the gitignored `.env.local` by `make api-keys`).
+  env vars and does not read `.env` / `.env.local`. KB_API_KEY is your own
+  non-admin user key (set via `make users-create`); store it in `~/.api_keys`.
 
 ## Auth
 
-- Header: `Authorization: Bearer $KB_API_KEY` (the agent key is also stored as
-  `OPENWEBUI_USER_API_KEY` in `.env.local`).
-- The key belongs to a `user`-role account (`agent@<KB_DOMAIN>`, default `agent@local.test`), not admin.
+- Header: `Authorization: Bearer $KB_API_KEY`.
+- The key belongs to a `user`-role account (your own, created via
+  `make users-create`), not admin.
 - Read scope: sees KBs via their `*` (public) read grants; `write_access=false`
   on every KB it does not own. It cannot `file/add`, remove files, or delete a KB.
 
@@ -112,7 +114,7 @@ path in your installed copy of this skill.
 ```
 S=~/.config/opencode/skills/kb/scripts/owui.py
 export KB_HOST=http://localhost:3000            # or your KB_HOST
-export KB_API_KEY="$OPENWEBUI_USER_API_KEY"     # from .env.local (make api-keys)
+export KB_API_KEY=...                           # your non-admin user key (~/.api_keys; make users-create EMAIL=...)
 
 python3 "$S" whoami                             # verify key + role
 python3 "$S" kbs                                # list visible KBs

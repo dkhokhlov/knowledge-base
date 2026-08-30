@@ -20,8 +20,8 @@
 #   - OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys).
 #
 # Reads OPENWEBUI_ADMIN_API_KEY (Bearer) + KB_HOST from the sourced
-# .env / .env.local. Does NOT use the shell KB_API_KEY (the agent key
-# in ~/.api_keys) — admin ops need the admin key.
+# .env / .env.local. Does NOT use the shell KB_API_KEY (the operator's
+# user key in ~/.api_keys) — admin ops need the admin key.
 #
 # Usage:
 #   make users-create EMAIL=alice@example.com NAME=Alice

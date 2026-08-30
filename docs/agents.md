@@ -16,18 +16,20 @@ under `/memory/*`, `POST /admin/users`, and `/health`. An agent holds only
 | health | `KB_HOST/health` | none | read-only stack probe |
 
 `KB_API_KEY` is an Open WebUI per-account API key. The admin key
-(`OPENWEBUI_ADMIN_API_KEY`) grants admin role + override; the agent key
-(`OPENWEBUI_USER_API_KEY`) is read-scoped for KBs. Per-account keys are issued by
-the admin via `make users-create`. `KB_API_KEY` is a bearer — `KB_HOST` MUST be HTTPS or
-VPN/tunnel for any non-local agent.
+(`OPENWEBUI_ADMIN_API_KEY`) grants admin role + override; a non-admin user key
+(`KB_API_KEY`, from `make users-create`) is read-scoped for KBs. Per-account keys
+are issued by the admin via `make users-create`. `KB_API_KEY` is a bearer — `KB_HOST`
+MUST be HTTPS or VPN/tunnel for any non-local agent.
 
 ## Prerequisites
 
 - The stack is up and healthy: `make start && make health`.
 - `KB_HOST` is set in your shell env (mandatory, no default — `export KB_HOST=http://<host>:3000`; `make bootstrap` persists it into `.env`). Replace `<host>` with the Docker host name/IP, or `localhost` if the client runs on the Docker host.
-- You have a `KB_API_KEY`. For the bootstrap admin + read-scoped agent keys, run
-  `make api-keys` (writes `OPENWEBUI_ADMIN_API_KEY` / `OPENWEBUI_USER_API_KEY` into
-  gitignored `.env.local`). For additional accounts, an admin runs `make users-create`.
+- You have a `KB_API_KEY`. For the bootstrap admin key, run
+  `make api-keys` (writes `OPENWEBUI_ADMIN_API_KEY` into
+  gitignored `.env.local`). For your own non-admin user key, run
+  `make users-create EMAIL=... NAME=...` (admin key required; it prints `kb_api_key`
+  to relay) and store it in `~/.api_keys` as `KB_API_KEY`.
 
 ## The `kb` skill
 
@@ -106,7 +108,7 @@ Export `KB_HOST` + `KB_API_KEY` once (the wrappers read only those two):
 
 ```
 export KB_HOST=http://localhost:3000            # or your KB_HOST
-export KB_API_KEY="$OPENWEBUI_USER_API_KEY"     # from .env.local (make api-keys)
+export KB_API_KEY=...                           # your own user key (make users-create; ~/.api_keys)
 S=~/.claude/skills/kb/scripts                   # your tool's installed skill dir
 ```
 
