@@ -298,3 +298,19 @@ if [ "${OCR_ENABLED:-true}" = "true" ]; then
   echo "==> OCR_ENABLED=true: pointing OWUI at the markitdown-ocr external engine"
   ./scripts/ocr-config.sh
 fi
+
+# Recreate the api-gateway so it picks up the OPENWEBUI_ADMIN_API_KEY just
+# written to .env.local. The gateway was started (in `make provision` step 3 /
+# `make start`) BEFORE this script wrote the key, and compose only interpolates
+# ${OPENWEBUI_ADMIN_API_KEY:-} at `docker compose up` time; the container env is
+# fixed at start and is not hot-reloaded. Without this, the gateway runs with an
+# empty admin key (POST /index -> "OPENWEBUI_ADMIN_API_KEY not set in gateway
+# env") until the next `make start`. Re-source .env.local so the just-written key
+# is in the shell env compose interpolates from; `up -d` recreates only the
+# gateway and only if the interpolated value changed (idempotent no-op on re-run
+# with an unchanged key).
+set -a
+# shellcheck source=/dev/null
+. ./.env.local
+set +a
+docker compose up -d api-gateway

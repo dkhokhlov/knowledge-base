@@ -120,7 +120,10 @@ while :; do
     | python3 -c 'import sys,json
 try:
     d=json.load(sys.stdin)
-    print(((d.get("meta") or {}).get("data") or {}).get("status",""))
+    # The terminal-status patch writes file.data.status (the data column),
+    # NOT meta.data.status (which only holds knowledge_id). The gateway /status
+    # route reads the same field via GET /files/.
+    print((d.get("data") or {}).get("status",""))
 except Exception:
     print("")' 2>/dev/null)
   [ "$status" = "completed" ] && break

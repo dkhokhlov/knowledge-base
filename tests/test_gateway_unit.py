@@ -487,5 +487,77 @@ class TestRetrieveRoute(unittest.TestCase):
         self.assertEqual(hits[1]["text"], "more text")
 
 
+class _DrainFake:
+    """Stand-in with only what _send/_drain_body/_read_body touch, so the
+    keep-alive body-drain logic in app.Handler can be unit-tested without an
+    HTTP socket. rfile.read is a Mock so the test asserts it was/wasn't called.
+    _drain_body/_read_body are the real app.Handler methods (aliased below) so
+    the flag + read behavior exercised is the production code, not a copy."""
+
+    def __init__(self, content_length=0, body=b"{}"):
+        self.headers = {"Content-Length": str(content_length)} if content_length else {}
+        self.rfile = mock.Mock()
+        self.rfile.read.return_value = body
+        self.wfile = mock.Mock()
+        self._body_consumed = False
+        self.sent_code = None
+
+    def send_response(self, code):
+        self.sent_code = code
+
+    def send_header(self, k, v):
+        pass
+
+    def end_headers(self):
+        pass
+
+
+# Bind the real app.Handler body methods onto the fake so _send's
+# self._drain_body()/self._read_body() resolve to the production code.
+_DrainFake._drain_body = app.Handler._drain_body
+_DrainFake._read_body = app.Handler._read_body
+
+
+class TestKeepAliveBodyDrain(unittest.TestCase):
+    """A POST route that does _auth() before _read_body() leaves the body
+    unread on a 401; with HTTP/1.1 keep-alive, Caddy reuses the upstream
+    connection and the next request parses the stale body as its request
+    line -> 501 'Unsupported method <body>POST'. _send() must drain an
+    unconsumed body before responding. No stack needed."""
+
+    def test_send_drains_unread_body_on_error(self):
+        # 401 path: _auth() raised before _read_body -> _body_consumed False.
+        f = _DrainFake(50, b'{"kb_id":"not-a-uuid","query":"x","mode":"hybrid"}')
+        app.Handler._send(f, 401, {"error": "auth required"})
+        f.rfile.read.assert_called_once()
+        self.assertEqual(f.rfile.read.call_args[0][0], min(50, app.MAX_BODY))
+        self.assertEqual(f.sent_code, 401)
+        self.assertFalse(f._body_consumed)  # reset for the next keep-alive request
+
+    def test_send_skips_drain_when_body_consumed(self):
+        # success path: the handler called _read_body -> _body_consumed True.
+        f = _DrainFake(50)
+        f._body_consumed = True
+        app.Handler._send(f, 200, {"ok": True})
+        f.rfile.read.assert_not_called()
+        self.assertFalse(f._body_consumed)  # reset after the response
+
+    def test_send_no_body_is_noop(self):
+        # GET /health: no Content-Length -> drain is a no-op, rfile untouched.
+        f = _DrainFake(0)
+        app.Handler._send(f, 200, {"status": "ok"})
+        f.rfile.read.assert_not_called()
+
+    def test_read_body_marks_consumed_even_on_bad_json(self):
+        # _read_body reads the bytes THEN parses; an invalid-JSON 400 must NOT
+        # cause _send to drain again (which would read the NEXT request). The
+        # flag is set right after rfile.read, before the parse.
+        f = _DrainFake(20, b"not json")
+        with self.assertRaises(app.GatewayError) as cm:
+            f._read_body()
+        self.assertEqual(cm.exception.status, 400)
+        self.assertTrue(f._body_consumed)  # set despite the parse failure
+
+
 if __name__ == "__main__":
     unittest.main()

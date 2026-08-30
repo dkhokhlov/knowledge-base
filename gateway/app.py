@@ -96,12 +96,22 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- response helpers --
     def _send(self, code, obj):
+        # Keep the keep-alive connection aligned on EVERY path: if the handler
+        # did not consume the request body (e.g. _auth() raised 401 before
+        # _read_body()), drain it now so the unread bytes do not get parsed as
+        # the next request's request line on a Caddy-reused upstream connection
+        # (which surfaced as a 501 "Unsupported method '<body>POST'"). _read_body
+        # and _drain_body set _body_consumed=True when they read; here we drain
+        # only what they left, then reset for the next keep-alive request.
+        if not getattr(self, "_body_consumed", False):
+            self._drain_body()
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        self._body_consumed = False
 
     def _ok(self, obj):
         self._send(200, obj)
@@ -116,6 +126,7 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
+        self._body_consumed = True  # read from the socket; do not drain again
         try:
             data = json.loads(raw.decode())
         except Exception:
@@ -125,17 +136,19 @@ class Handler(BaseHTTPRequestHandler):
         return data
 
     def _drain_body(self):
-        """Read and discard the request body. /index takes its arguments as
-        query params and sends an unused `{}` body, but with HTTP/1.1 keep-alive
-        an unconsumed body leaves bytes in the socket buffer; the next request
-        on the same (Caddy-reused) upstream connection then parses those bytes
-        as its request line -> 'Unsupported method'. Draining keeps the
-        connection aligned. No parsing, no size limit beyond MAX_BODY."""
+        """Read and discard the request body. With HTTP/1.1 keep-alive an
+        unconsumed body leaves bytes in the socket buffer; the next request on
+        the same (Caddy-reused) upstream connection then parses those bytes as
+        its request line -> 'Unsupported method <body>POST'. _send() calls this
+        whenever a handler did not consume the body (e.g. a 401 from _auth()
+        before _read_body()). No parsing, no size limit beyond MAX_BODY."""
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
+            self._body_consumed = True
             return
         remaining = min(length, MAX_BODY)
         self.rfile.read(remaining)
+        self._body_consumed = True
         # Anything beyond MAX_BODY: leave it. A trigger body is always tiny (`{}`);
         # an oversized body would desync the connection, but that is not a
         # contract any caller sends, so we do not engineer for it here.
@@ -241,7 +254,6 @@ class Handler(BaseHTTPRequestHandler):
             identity = self._auth()
             return self._create_user(identity, self._read_body())
         if path == "/index" and method == "POST":
-            self._drain_body()  # before auth: keep the keep-alive connection aligned on every path
             identity = self._auth()
             return self._index(identity, qs)
         if path == "/status" and method == "GET":
