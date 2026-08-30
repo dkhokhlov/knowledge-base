@@ -778,25 +778,36 @@ class Handler(BaseHTTPRequestHandler):
                  kb_id, completed, pending, processing, len(failed), source_count)
         in_flight = pending + processing
         per_file = [{"filename": s.get("filename"), "status": s.get("status"),
-                     "error": s.get("error")}
+                     "size": s.get("size"), "error": s.get("error")}
                     for s in file_status
                     if s.get("status") == "completed"]
         if relpath:
             per_file = [p for p in per_file
                         if p.get("filename") == os.path.basename(relpath)]
+        # Drain runtime = now - earliest file upload (created_at) in this KB.
+        # On a fresh /index run (all files uploaded together) min(created_at) is
+        # the run start; a re-index (delete + re-upload) resets created_at, so
+        # this tracks the current run. None when the KB has no files yet.
+        starts = [s.get("created_at") for s in file_status if s.get("created_at")]
+        started_at = min(starts) if starts else None
+        runtime = (int(time.time()) - started_at) if started_at else None
         summary = {"indexed_files": per_file,
                    "pending_files": [{"filename": s.get("filename"),
+                                      "size": s.get("size"),
                                       "error": s.get("error")}
                                      for s in file_status
                                      if s.get("status") == "pending"],
                    "failed_files": [{"filename": f.get("filename"),
+                                     "size": f.get("size"),
                                      "error": f.get("error")} for f in failed],
                    "source": source, "kb_id": kb_id,
                    "source_count": source_count,
                    "indexed_count": completed,
                    "pending": pending,
                    "processing": processing,
-                   "failed": len(failed)}
+                   "failed": len(failed),
+                   "started_at": started_at,
+                   "runtime": runtime}
         if as_json:
             return self._ok(summary)
         # human-readable: glyphs (✓/✗/○), no emoji, no ETA (no daemon). pending
@@ -805,10 +816,12 @@ class Handler(BaseHTTPRequestHandler):
                  "indexed (OWUI KB) : %d completed (searchable)" % completed,
                  "pending (OWUI)    : %d in extraction (OCR/GPU)" % pending,
                  "processing (OWUI) : %d embedding + linking" % processing,
-                 "failed (OWUI)     : %d" % len(failed)]
+                 "failed (OWUI)     : %d" % len(failed),
+                 "runtime           : %s" % _fmt_dur(runtime)]
         for f in failed[:20]:
-            lines.append("  ✗ %s — %s" % (f.get("filename") or "?",
-                                          (f.get("error") or "")[:80]))
+            lines.append("  ✗ %s (%s) — %s" % (f.get("filename") or "?",
+                                               _human_size(f.get("size")),
+                                               (f.get("error") or "")[:80]))
         if in_flight == 0 and not failed:
             lines.append("status            : ✓ sync COMPLETE (drained, no failures)")
         elif in_flight == 0:
@@ -977,6 +990,37 @@ def _parse_size(s):
         return int(s) * mult
     except ValueError:
         return 100 * 1024 * 1024
+
+
+def _human_size(n):
+    """bytes -> '1.2 MB' (1 decimal for >= 1 KB; bare bytes below). None -> '-'."""
+    if n is None:
+        return "-"
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return "-"
+    for unit, factor in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= factor:
+            return "%.1f %s" % (n / factor, unit)
+    return "%d B" % n
+
+
+def _fmt_dur(sec):
+    """seconds -> '1h 02m 03s' (leading zeros on m/s, stripped leading 0h/0m).
+    None -> '-'."""
+    if sec is None:
+        return "-"
+    sec = int(sec)
+    h, sec = divmod(sec, 3600)
+    m, sec = divmod(sec, 60)
+    parts = []
+    if h:
+        parts.append("%dh" % h)
+    if h or m:
+        parts.append("%02dm" % m)
+    parts.append("%02ds" % sec)
+    return " ".join(parts)
 
 
 def _parse_allow(s):

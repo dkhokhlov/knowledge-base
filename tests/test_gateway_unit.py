@@ -559,5 +559,86 @@ class TestKeepAliveBodyDrain(unittest.TestCase):
         self.assertTrue(f._body_consumed)  # set despite the parse failure
 
 
+class TestStatusRoute(unittest.TestCase):
+    """GET /status?json=1: per-file size + top-level drain runtime/started_at.
+    Mocks owui.list_file_status + walk_source + owui._admin_key + app.time.time.
+    No stack needed."""
+
+    KB = "550e8400-e29b-41d4-a716-446655440000"
+    T0 = 1788069380  # a fixed created_at baseline (unix seconds)
+
+    def _run(self, file_status, now=None):
+        """Invoke Handler._status(json=1) with mocked dependencies. Returns the
+        summary dict captured by _FakeHandler._ok."""
+        if now is None:
+            now = self.T0 + 100
+        h = _FakeHandler({}, auth="Bearer caller-key")
+        qs = "source=gdrive&kb_id=%s&json=1" % self.KB
+        patches = [
+            mock.patch.object(owui, "_admin_key", return_value="admin-key"),
+            mock.patch.object(app, "walk_source", return_value=[{"path": "x"}]),
+            mock.patch.object(owui, "list_file_status", return_value=file_status),
+            mock.patch.object(app.time, "time", return_value=now),
+        ]
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        app.Handler._status(h, None, qs)
+        self.assertEqual(h.sent[0], "ok")
+        return h.sent[1]
+
+    def test_size_and_runtime_fields(self):
+        fs = [
+            {"filename": "a.md", "status": "completed", "size": 100,
+             "created_at": self.T0, "error": None},
+            {"filename": "b.pdf", "status": "pending", "size": 200,
+             "created_at": self.T0 + 10, "error": None},
+            {"filename": "c.pdf", "status": "failed", "size": 300,
+             "created_at": self.T0 + 20, "error": "boom"},
+        ]
+        d = self._run(fs, now=self.T0 + 100)
+        # top-level drain runtime = now - min(created_at); started_at = that min.
+        self.assertEqual(d["runtime"], 100)
+        self.assertEqual(d["started_at"], self.T0)
+        self.assertEqual(d["indexed_count"], 1)
+        self.assertEqual(d["pending"], 1)
+        self.assertEqual(d["failed"], 1)
+        # per-file size carried through to each list
+        self.assertEqual(d["indexed_files"][0]["size"], 100)
+        self.assertEqual(d["pending_files"][0]["size"], 200)
+        self.assertEqual(d["failed_files"][0]["size"], 300)
+        self.assertEqual(d["failed_files"][0]["error"], "boom")
+
+    def test_empty_kb_runtime_none(self):
+        # no files -> started_at + runtime are None (no drain to time).
+        d = self._run([], now=self.T0 + 100)
+        self.assertIsNone(d["started_at"])
+        self.assertIsNone(d["runtime"])
+        self.assertEqual(d["indexed_count"], 0)
+
+    def test_missing_created_at_excluded_from_min(self):
+        # a file with created_at=None does not poison min(); it is skipped.
+        fs = [
+            {"filename": "a.md", "status": "completed", "size": 100,
+             "created_at": self.T0, "error": None},
+            {"filename": "b.md", "status": "completed", "size": 50,
+             "created_at": None, "error": None},
+        ]
+        d = self._run(fs, now=self.T0 + 50)
+        self.assertEqual(d["started_at"], self.T0)
+        self.assertEqual(d["runtime"], 50)
+
+    def test_human_size_helper(self):
+        self.assertEqual(app._human_size(None), "-")
+        self.assertEqual(app._human_size(500), "500 B")
+        self.assertEqual(app._human_size(1268354), "1.2 MB")
+        self.assertEqual(app._human_size(1073741824), "1.0 GB")
+
+    def test_fmt_dur_helper(self):
+        self.assertEqual(app._fmt_dur(None), "-")
+        self.assertEqual(app._fmt_dur(100), "01m 40s")
+        self.assertEqual(app._fmt_dur(3723), "1h 02m 03s")
+
+
 if __name__ == "__main__":
     unittest.main()

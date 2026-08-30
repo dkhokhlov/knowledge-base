@@ -368,7 +368,9 @@ def list_file_status(admin_key, kb_id):
     """GET /api/v1/files/?content=false&page=N, paged until `total` is covered
     (OWUI hardcodes PAGE_SIZE=50). Filters items by
     meta.data.knowledge_id == kb_id. Returns [{file_id, filename, file_hash,
-    directory_id, status, error}]. This is the real progress signal: the
+    directory_id, size, created_at, status, error}]. size is File.meta.size
+    (bytes, set at upload); created_at is the OWUI File unix timestamp (used by
+    /status for drain runtime). This is the real progress signal: the
     /knowledge/{id}/files list defers File.data (status reads null there), but
     GET /files/ returns data.status + data.error (content=false strips the
     large content key but keeps status + error). Admin key sees every file
@@ -385,13 +387,16 @@ def list_file_status(admin_key, kb_id):
                             % (page, code, (txt or "")[:200]))
         items = data.get("items") or []
         for it in items:
-            mdata = ((it.get("meta") or {}).get("data") or {})
+            meta = it.get("meta") or {}
+            mdata = (meta.get("data") or {})
             if mdata.get("knowledge_id") != kb_id:
                 continue
             d = it.get("data") or {}
             out.append({"file_id": it.get("id"), "filename": it.get("filename"),
                         "file_hash": mdata.get("file_hash"),
                         "directory_id": mdata.get("directory_id"),
+                        "size": meta.get("size"),
+                        "created_at": it.get("created_at"),
                         "status": d.get("status"), "error": d.get("error")})
         # Last page (short) or covered the reported total. Safety bound below.
         if len(items) < 50 or page * 50 >= (data.get("total") or 0):
