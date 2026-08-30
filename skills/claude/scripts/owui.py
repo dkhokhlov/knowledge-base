@@ -3,8 +3,8 @@
 
 Two surfaces, one key (your non-admin user key, KB_API_KEY):
 
-  * KB surface (read-scoped): list/search KBs, retrieve (semantic) from a KB, RAG chat
-    grounded on a KB, read file content. The key is read-only here: it
+  * KB surface (read-scoped): list/search KBs, retrieve (semantic) from a KB,
+    read file content. The key is read-only here: it
     cannot upload, modify, or delete KBs/files it does not own.
 
   * Projects-memory surface (user-key writes to OWNED KBs): index
@@ -22,9 +22,7 @@ at /memory/* on the same KB_HOST. One URL, one key.
 Zero dependencies (Python 3.10+ stdlib). Config: the wrapper is a thin client.
 It reads ONLY two env vars from the shell environment — KB_HOST and KB_API_KEY.
 It does not read .env / .env.local files (set both in your shell before invoking
-it). RAG chat is proxied by the api-gateway (POST /memory/rag), which inserts the
-chat model server-side from OPENWEBUI_MODEL; the wrapper carries no model. The
-projects-memory --wait deadline is 600s (fixed).
+it). The projects-memory --wait deadline is 600s (fixed).
 
 Env vars: KB_HOST, KB_API_KEY.
 """
@@ -226,24 +224,6 @@ def cmd_retrieve(base, key, a):
         h["gdrive"] = gcache.get(h.get("file_id"))
     print(json.dumps({"kb_id": kb_id, "kb_name": kb_name, "mode": mode,
                       "score_order": score_order, "hits": hits}))
-
-
-def cmd_rag(base, key, a):
-    # RAG is proxied by the api-gateway (POST /memory/rag), which inserts the
-    # chat model server-side from OPENWEBUI_MODEL and forwards the caller's key
-    # to OWUI so KB read access is enforced natively. The wrapper carries no
-    # model (the model is backend-side config; everything is tested against it).
-    body = {"messages": [{"role": "user", "content": a.question}]}
-    if a.kb:
-        # Ground the chat on KB(s). OWUI's /api/chat/completions (which the
-        # gateway proxies to) reads KBs from the top-level `files` field as
-        # collection items — NOT from a `knowledge` field (ignored) or
-        # `metadata.knowledge` (metadata is discarded and replaced server-side).
-        # type:collection -> whole-KB vector search; type:file would scope to
-        # one file id.
-        body["files"] = [{"type": "collection", "id": kid} for kid in a.kb]
-    d = jget(base, key, "POST", "/memory/rag", body)
-    print(d.get("content") or "(empty response)")
 
 
 def _content_ext(ctype):
@@ -783,9 +763,6 @@ def main():
     sp.add_argument("--no-hybrid", action="store_true",
                     help="deprecated alias for --mode vector (pure vector)")
 
-    sp = sub.add_parser("rag", help="RAG chat grounded on one or more KBs (proxied by api-gateway /memory/rag)")
-    sp.add_argument("question"); sp.add_argument("--kb", action="append", default=[])
-
     sp = sub.add_parser("file", help="print a file's extracted text content"); sp.add_argument("id")
     sp.add_argument("--raw", action="store_true",
                     help="fetch the ORIGINAL bytes (/content) instead of the extracted text")
@@ -825,7 +802,7 @@ def main():
 
     {
         "whoami": cmd_whoami, "kbs": cmd_kbs, "kb": cmd_kb, "search-kbs": cmd_search_kbs,
-        "retrieve": cmd_retrieve, "rag": cmd_rag, "file": cmd_file,
+        "retrieve": cmd_retrieve, "file": cmd_file,
         "index-projects": cmd_index_projects, "retrieve-projects": cmd_retrieve_projects,
         "status-projects": cmd_status_projects,
     }[a.cmd](base, key, a)

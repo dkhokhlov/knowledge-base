@@ -12,7 +12,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Nothing yet.
+- Removed the `rag` subcommand from the `/kb` skill (`skills/claude/scripts/owui.py`
+  + all four `skills/*/SKILL.md` copies). KB queries now use `retrieve` only (raw
+  chunks via the gateway `POST /retrieve`; the agent synthesizes the answer). The
+  gateway `POST /memory/rag` endpoint is retained for direct/operator use.
+- Documentation sweep for consistency with the current codebase: the vector backend
+  is pgvector (Postgres + the `pgvector` extension), not the former chromadb store;
+  retrieval is gateway-mediated (`POST /retrieve`), not the former direct-OWUI
+  Chroma path. Updated `README.md`, `docs/agents.md`, `docs/operations.md`, and the
+  four `skills/*/SKILL.md` copies.
 
 ### Fixed
 

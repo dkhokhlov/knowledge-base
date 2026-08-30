@@ -102,7 +102,7 @@ Notes:
   - a per-account key issued by the gateway (`POST /admin/users`) and relayed to the account.
   The skill CLI reads ONLY `KB_API_KEY` (no fallback) — set it in the shell env
   to one of the above (e.g. `export KB_API_KEY=...` with your own user key).
-- `make api-keys` is idempotent; `FORCE=1 make api-keys` rotates (replaces) the admin key. It also grants `*` read on the chat model (`OPENWEBUI_MODEL`) to non-admin users, so a non-admin agent can do RAG chat — without it the agent sees 0 models and chat returns `Model not found`.
+- `make api-keys` is idempotent; `FORCE=1 make api-keys` rotates (replaces) the admin key. It also grants `*` read on the chat model (`OPENWEBUI_MODEL`) to non-admin users, so a non-admin user can do direct RAG chat — without it the user sees 0 models and chat returns `Model not found`.
 - Hand the **read-scoped user key** to agents, **not** the admin key — the admin key bypasses access control. For a hard API-layer read-only lock on every key (including the admin key), use Settings -> Admin -> API Key Endpoint Restrictions (`ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS`).
 - The api-gateway never persists `KB_API_KEY` server-side — it is stateless. The key arrives as `Authorization: Bearer` on each request and is used only to resolve `(id, email, role)` via Open Web UI; the server stores no key material.
 - api-gateway internal env: `OWUI_URL`, `GRAPHITI_URL`, `NEO4J_URL`, `KB_GATEWAY_PORT` are hardcoded in `compose.yml`; `KB_MAX_CONCURRENCY` (default 16) is interpolated from `.env`; `OWUI_TIMEOUT`, `GRAPHITI_TIMEOUT`, `NEO4J_TIMEOUT`, `KB_MAX_BODY` are code defaults (overridable via env). None are in `.env.template`.
@@ -443,9 +443,15 @@ NOT reject same-content-different-path files as `400 Duplicate content` — they
 index as separate members. A per-file error in the `/index` response is a real
 upload/extract failure (read it), not an expected duplicate.
 
-### Open-file limit (Chroma)
+### Open-file limit (former Chroma backend)
 
-OWUI's RAG vector store is [Chroma][chroma] 1.5.x (rust backend), which opens a
+> **Current backend is pgvector** (`VECTOR_DB=pgvector`): OWUI stores vectors in
+> Postgres via the `pgvector` extension — no per-collection SQLite files, so the
+> fd exhaustion below does **not** occur. Kept as a historical note for stacks
+> still on (or reverted to) Chroma; the `ulimits.nofile` setting remains in
+> `compose.yml` as a harmless baseline.
+
+OWUI's former RAG vector store was [Chroma][chroma] 1.5.x (rust backend), which opens a
 SQLite db per collection. Bulk ingest (the first gdrive `/index`) creates 100s
 of collections and exhausts the default 1024 fd soft limit → `SQLITE_CANTOPEN
 "unable to open database file"` on every insert (KB `file_count` stays 0,
@@ -567,7 +573,7 @@ dependency is down.
 | Need to reach Open WebUI directly (it is behind Caddy; no direct host port) | OWUI is internal-only on `owui_net` | `docker exec kb-openwebui curl -s localhost:8080/...`, or a temporary `docker compose run --rm -p 3001:8080 openwebui` (avoid `:3000` — that is Caddy) |
 | RAG chat is slow; `ollama ps` shows a CPU/GPU split | `OPENWEBUI_MODEL` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; `GRAPHITI_MODEL` (extraction) and `OPENWEBUI_MODEL` (chat) are independent — two different 14B tags cannot both be resident at once on this GPU |
 | `make health` says `degraded` but the UI works | OWUI `/health` returned non-2xx | inspect the `openwebui` logs; the gateway reports degraded whenever the identity dependency is not healthy |
-| gdrive KB `file_count` stays 0; uploads time out; OWUI `unhealthy`; `docker logs kb-openwebui` shows `chromadb ... unable to open database file` | `openwebui` service `ulimits.nofile` lowered or removed → [Chroma][chroma] 1.5.x (rust backend) exhausts the fd limit creating one SQLite db per RAG collection under bulk ingest | restore `ulimits.nofile.soft=65536` (hard 524288) on `openwebui` in `compose.yml`; `docker compose up -d --no-deps --force-recreate openwebui`; re-run `make gdrive-sync` (or `make gdrive-index`) |
+| **(Chroma backend only)** gdrive KB `file_count` stays 0; uploads time out; OWUI `unhealthy`; `docker logs kb-openwebui` shows `chromadb ... unable to open database file` | `openwebui` service `ulimits.nofile` lowered or removed → [Chroma][chroma] 1.5.x (rust backend) exhausts the fd limit creating one SQLite db per RAG collection under bulk ingest (does not occur under pgvector) | restore `ulimits.nofile.soft=65536` (hard 524288) on `openwebui` in `compose.yml`; `docker compose up -d --no-deps --force-recreate openwebui`; re-run `make gdrive-sync` (or `make gdrive-index`) |
 | `make gdrive-status` shows `completed` below `source` with `pending+processing=0` | a file failed to upload or extract; `/status` `failed_files` + the per-file `errors` from the last `POST /index` hold the WHY | re-run `make gdrive-index` (or `make gdrive-sync`) to re-trigger failed; `docker logs kb-openwebui` / `docker logs kb-markitdown-ocr` for the upstream cause |
 | `POST /index` returns 422 "source walk yielded 0 files" | the `./gdrive` mount is empty/unreadable, or `GDRIVE_ROOT`/`KB_MAX_SIZE`/`DEFAULT_ALLOW` exclude everything | check `make gdrive-sync` populated `./gdrive`; check `HOST_UID` matches the gdrive owner uid; `?force=1` proceeds with an empty manifest (drives full `cleanup` — use only to drain the KB) |
 

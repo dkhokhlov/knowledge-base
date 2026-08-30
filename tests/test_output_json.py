@@ -4,8 +4,8 @@
 Covers every report/status/retrieve subcommand of skills/claude/scripts/{owui.py,
 kb_gateway.py}: asserts the success path prints valid JSON with the expected
 top-level schema, and (for the agent-facing scripts) that the JSON is COMPACT
-(single line, no indent — whitespace costs an agent tokens). `rag` stays raw
-text; `file` defaults to the EXTRACTED text (GET /files/{id}/data/content) and
+(single line, no indent — whitespace costs an agent tokens). `file` defaults
+to the EXTRACTED text (GET /files/{id}/data/content) and
 has a `--raw` escape hatch (GET /files/{id}/content, original bytes). No stack
 required: the HTTP layer is monkeypatched (unittest.mock), and cmd_file's
 owui.call + direct urllib.request.urlopen calls are patched too.
@@ -300,24 +300,6 @@ class OwuiTests(_Assertions):
                 owui._resolve_kb(BASE, KEY, "00000000-0000-0000-0000-000000000000")
             with self.assertRaises(SystemExit):    # no match -> fail
                 owui._resolve_kb(BASE, KEY, "no-such-kb")
-
-    def test_rag_is_raw_text(self):
-        # rag prints the LLM answer verbatim — NOT JSON-wrapped (lossy for an agent).
-        # Proxied by the api-gateway: one POST /memory/rag, no `model` key (the
-        # gateway inserts it). Asserting the route + body means this cannot pass
-        # against the old direct-/api/chat/completions endpoint (codex #5).
-        jget = mock.Mock(return_value={"content": "the answer"})
-        ns = mock.Mock(question="q", kb=[])
-        out = _run([(owui, "jget", jget)], owui.cmd_rag, ns)
-        self.assertEqual(out.strip(), "the answer")
-        self.assertFalse(out.lstrip().startswith("{"))
-        jget.assert_called_once()
-        args, _ = jget.call_args
-        self.assertEqual(args[:4], (BASE, KEY, "POST", "/memory/rag"))
-        body = args[4]
-        self.assertEqual(body["messages"], [{"role": "user", "content": "q"}])
-        self.assertNotIn("model", body)
-        self.assertNotIn("files", body)  # kb empty -> no files key
 
     def test_file_default_returns_extracted_text(self):
         # Default: GET /files/{id}/data/content -> the EXTRACTED text OWUI stored

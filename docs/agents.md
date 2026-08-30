@@ -11,7 +11,7 @@ under `/memory/*`, `POST /admin/users`, and `/health`. An agent holds only
 | Surface | Path | Auth | Use |
 |---|---|---|---|
 | Open WebUI REST | `KB_HOST/api/*` | `Bearer <KB_API_KEY>` | files, knowledge bases, projects memory (Claude Code skill only; humans/admins also RAG directly here with an explicit `model`) |
-| api-gateway memory | `KB_HOST/memory/*` | `Bearer <KB_API_KEY>` | Graphiti facts (whoami, groups, add, retrieve, episodes, status, forget, delete-edge, delete-episode) + RAG chat (`POST /memory/rag`; the gateway inserts the chat model from `OPENWEBUI_MODEL`) |
+| api-gateway memory | `KB_HOST/memory/*` | `Bearer <KB_API_KEY>` | Graphiti facts (whoami, groups, add, retrieve, episodes, status, forget, delete-edge, delete-episode) |
 | api-gateway admin | `KB_HOST/admin/users` (POST) | `Bearer <KB_API_KEY>` (admin) | create a new KB user (returns temp password + `KB_API_KEY`) |
 | health | `KB_HOST/health` | none | read-only stack probe |
 
@@ -40,7 +40,7 @@ with `scripts/` symlinked to `../claude/scripts`. The wrappers are zero-dependen
 Python 3.10+ stdlib:
 
 - `scripts/owui.py` — Open WebUI REST: KB surface (read-scoped) `whoami`, `kbs`,
-  `retrieve`, `rag`, `file`; **projects memory** (user-key writes to owned KBs)
+  `retrieve`, `file`; **projects memory** (user-key writes to owned KBs)
   `index-projects`, `retrieve-projects`, `status-projects` — **Claude Code skill copy
   only**; the shared `owui.py` keeps the subcommands, but the codex/opencode/pi
   `SKILL.md` copies do not document them.
@@ -50,8 +50,6 @@ Python 3.10+ stdlib:
 Both read ONLY `KB_HOST` + `KB_API_KEY` from the shell environment — no
 `.env` / `.env.local` files, no `--env-file`, no other env vars. Set both in
 your shell before invoking them (`export KB_HOST=...` / `export KB_API_KEY=...`).
-RAG chat is proxied by the api-gateway (`POST /memory/rag`), which inserts the
-chat model server-side; the wrappers carry no model.
 
 ### Triggers
 
@@ -59,7 +57,6 @@ chat model server-side; the wrappers carry no model.
 |---|---|---|
 | Slash command | `/kb` then the request | yes |
 | Natural — search | "search the KB for X" / "search the knowledge base for X" | by description match |
-| Natural — RAG chat | "ask the KB: \<question\>" / "ask the knowledge base: \<question\>" | by description match |
 | Natural — list | "list my KBs" / "list my knowledge bases" | by description match |
 | Natural — index projects memory | "index projects memory" / "index my Claude project memory" | by description match (Claude Code only) |
 | Natural — projects status | "projects memory index status" / "is my repo indexed" | by description match (Claude Code only) |
@@ -125,15 +122,7 @@ python3 "$S/kb_gateway.py" whoami    # api-gateway: email + role + id (derived f
 python3 "$S/owui.py" kbs                          # list visible KBs
 python3 "$S/owui.py" search-kbs "main"            # find a KB by name
 python3 "$S/owui.py" retrieve <kb-id> "XSL streaming"   # raw chunks (you synthesize)
-python3 "$S/owui.py" rag "What is XSL?" --kb <kb-id>  # RAG chat (LLM answer from the KB)
 ```
-
-RAG chat needs `make rag-config` (strict-grounding template + synced embedding
-URL); without it the model confabulates. Ground the chat via the top-level
-`files` field only (`{"type":"collection","id":"<kb-id>"}`) — a `knowledge` field
-is ignored. The `/kb` skill reaches RAG via `POST /memory/rag` (the api-gateway
-inserts the chat model from `OPENWEBUI_MODEL`; send no `model` field); humans/admins
-RAG directly at `POST /api/chat/completions` with an explicit `model`.
 
 ### Projects memory (owui.py, user key) — Claude Code skill only
 

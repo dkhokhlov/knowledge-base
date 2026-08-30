@@ -197,15 +197,15 @@ else
   finish; exit 1
 fi
 
-# --- 7. /kb skill path: gateway /memory/rag (gateway inserts the model) -------
-# The /kb skill reaches RAG via POST /memory/rag (api-gateway), NOT direct
-# /api/chat/completions. The gateway inserts the chat model from OPENWEBUI_MODEL
-# and forwards the caller's key, so OWUI enforces KB read access natively. The
-# request sends NO `model` field. Reuses the same KB_ID + MARKER + agent key as
-# §6 (the fixture is still live). Catches a gateway-RAG regression: a missing
-# OPENWEBUI_MODEL -> 503, a broken proxy -> non-200, broken grounding -> marker
-# absent.
-section "gateway /memory/rag: grounded via the /kb skill path (no model in body)"
+# --- 7. gateway /memory/rag endpoint (retained; gateway inserts the model) -----
+# The gateway /memory/rag endpoint is retained for direct/operator use (the /kb
+# skill's `rag` subcommand was removed; agents retrieve raw chunks + synthesize).
+# It inserts the chat model from OPENWEBUI_MODEL and forwards the caller's key,
+# so OWUI enforces KB read access natively. The request sends NO `model` field.
+# Reuses the same KB_ID + MARKER + user key as §6 (the fixture is still live).
+# Catches a gateway-RAG regression: a missing OPENWEBUI_MODEL -> 503, a broken
+# proxy -> non-200, broken grounding -> marker absent.
+section "gateway /memory/rag: grounded (no model in body; endpoint retained)"
 grag_body=$(python3 -c 'import sys,json;print(json.dumps({"messages":[{"role":"user","content":"What is the exact regression marker string mentioned in the document? Return only the marker value."}],"files":[{"type":"collection","id":sys.argv[1]}]}))' "$KB_ID")
 grag_code=$(curl -s -o /tmp/kbrouser_grag.out -w '%{http_code}' -X POST "$O/memory/rag" "${U[@]}" \
   -H 'Content-Type: application/json' -d "$grag_body")

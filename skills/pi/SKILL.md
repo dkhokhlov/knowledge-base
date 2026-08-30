@@ -1,13 +1,13 @@
 ---
 name: kb
-description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, or to remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "remember …", "what do we know about …", and "forget …". Covers list/search KBs, retrieve (semantic search) from a KB, RAG chat grounded on a KB, and Graphiti facts memory (add/retrieve/episodes/forget via the api-gateway). One URL (KB_HOST) fronts OWUI REST (root /api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the api-gateway for facts memory). Includes zero-dependency Python CLI wrappers (scripts/owui.py for OWUI KBs, scripts/kb_gateway.py for Graphiti facts memory).
+description: Use when the user wants to query a self-hosted Open WebUI knowledge base (KB) over REST, or to remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "remember …", "what do we know about …", and "forget …". Covers list/search KBs, retrieve (semantic search) from a KB, and Graphiti facts memory (add/retrieve/episodes/forget via the api-gateway). One URL (KB_HOST) fronts OWUI REST (root /api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side by the api-gateway for facts memory). Includes zero-dependency Python CLI wrappers (scripts/owui.py for OWUI KBs, scripts/kb_gateway.py for Graphiti facts memory).
 ---
 
 # Open WebUI REST (non-admin / read-scoped)
 
 Drive a self-hosted Open WebUI knowledge base over REST with a **non-admin
 user API key** — read-only scope. This skill covers only the read path:
-list/search KBs, retrieve (semantic) from a KB, RAG chat grounded on a KB, and read file
+list/search KBs, retrieve (semantic) from a KB, and read file
 content. Write/delete/admin operations are out of scope (see [Admin surface](#admin-surface)).
 
 The whole stack is fronted by Caddy at one URL, **KB_HOST** (default
@@ -21,15 +21,13 @@ key.
   knowledgebase repo).
 - You have a non-admin user key (KB_API_KEY): create your own user with
   `make users-create EMAIL=... NAME=...` (needs the admin key; prints the
-  `kb_api_key` to relay). `make api-keys` enables non-admin API keys + grants
-  `*` read on the chat model so a non-admin user's RAG chat works. Store your
+  `kb_api_key` to relay). `make api-keys` enables non-admin API keys. Store your
   key in `~/.api_keys` as `KB_API_KEY` (the operator's single source).
-- Grounded RAG is configured: `make rag-config` has been run. It sets the strict
-  `RAG_TEMPLATE` (answer only from the KB context — without it, ~12B models
-  confabulate from their own knowledge) and syncs `rag.ollama.base_url` to `.env`
-  `OLLAMA_BASE_URL` (OWUI persists that URL on first boot and ignores later `.env`
-  changes; a stale value breaks embedding). `make preflight` warns if it drifts;
-  re-run `make rag-config` to fix, and after any DB reset/rebuild.
+- The OWUI embedding URL is configured: `make rag-config` has been run. It syncs
+  `rag.ollama.base_url` to `.env` `OLLAMA_BASE_URL` (OWUI persists that URL on
+  first boot and ignores later `.env` changes; a stale value breaks retrieval
+  embeddings). `make preflight` warns if it drifts; re-run `make rag-config` to
+  fix, and after any DB reset/rebuild.
 - Set `KB_HOST` and `KB_API_KEY` in your shell env (`export KB_HOST=...`,
   `export KB_API_KEY=...`). The wrapper is a thin client: it reads ONLY those two
   env vars and does not read `.env` / `.env.local`. KB_API_KEY is your own
@@ -45,35 +43,35 @@ key.
 
 ## Agent endpoints
 
-Two ways to query a KB — pick by what you need:
+Query a KB with `retrieve`:
 
-### Chat (RAG)
+### Retrieve (default)
 
-The `/kb` skill reaches RAG via the api-gateway: `POST /memory/rag` — body
-`{messages, files:[{type:collection,id:<kb-id>}]}` (NO `model` field) →
-`{content}`. The gateway inserts the chat model server-side (from
-`OPENWEBUI_MODEL`) and forwards the caller's `KB_API_KEY` to OWUI, so OWUI
-enforces KB read access natively. (Humans/admins still RAG directly at
-`POST /api/chat/completions` with an explicit `model` field — see [Admin surface](#admin-surface).)
+`POST /retrieve` (gateway-mediated; Caddy → api-gateway → OWUI) — body
+`{kb_id, query, k, mode}`. The gateway maps `mode` → `{hybrid, hybrid_bm25_weight}`
+and forwards a single `collection_name` to OWUI `/api/v1/retrieval/query/collection`
+with the caller's key, so OWUI enforces KB read access natively (403 on deny).
+The gateway flattens the OWUI `{documents, distances, metadatas}` response into
+8-key hits (`distance, file, file_id, page, start_index, source, mtime, text`);
+the wrapper joins `File.meta.data.gdrive` per `file_id` (file-level, one GET per
+id). `score_order` in the response tells the consumer how to sort: `hybrid`/
+`lexical` return an RRF score (higher=better, `desc`); `vector` returns a cosine
+distance (lower=better, `asc`). No LLM call. Wrapper:
+`retrieve <kb-name-or-id> "<query>" [--k N] [--mode hybrid|lexical|vector]`
+(`--k` default 5; use 10–20 for broader recall — the agent synthesizes from raw
+chunks, so more chunks serve it better. `--mode` default `hybrid`; `lexical` = pure
+FTS/BM25 (server-side, indexed — the mode for exact register/signal/keyword
+queries); `vector` = pure vector. `--no-hybrid` is a deprecated alias for
+`--mode vector`). The wrapper resolves the name to a KB id via
+`GET /api/v1/knowledge/` (exact name or exact id; a valid UUID that is not a real
+id FAILS — no silent fallthrough, so a wrong hand-copied id cannot query the
+wrong KB) and prints the resolved `kb_id` + `kb_name` alongside the hits.
 
-- The server vector-searches the `files` collection, injects the chunks into the strict `RAG_TEMPLATE`, and calls the chat LLM for a grounded answer.
-- **Requires `make rag-config`**: the strict `RAG_TEMPLATE` is set by `make rag-config`, not the image default — without it the model falls back to its own knowledge and confabulates. The embedding URL must also be in sync (`make preflight` checks; `make rag-config` re-syncs). See Prerequisites.
-- **Use when**: a one-shot answer is enough and the local model is adequate.
-- **Cost**: fewer of your tokens (only the answer returns); spends Ollama tokens.
-- **Risk**: the local model can confabulate. If the answer must be right, use **Retrieve** below and synthesize yourself.
-- **Grounding**: pass the KB via the top-level `files` field only. Do NOT use a `knowledge` field (silently ignored) or `metadata.knowledge` (request metadata is discarded and replaced server-side). `type:collection` = whole-KB vector search; `type:file` = one file id. The caller needs read access to the KB; the model is backend-side config (the gateway inserts it).
-- Wrapper: `rag "<question>" --kb <kb-id> [--kb <id2>]`.
-
-### Retrieve
-
-`POST /api/v1/retrieval/query/collection` — body `{collection_names:[<kb-id>], query, k, hybrid:true}` → **Chroma** `{documents:[[…]], distances:[[…]], metadatas:[[…]]}` (one inner list per collection_name; OWUI omits `ids` — identify chunks by `file_id` + `start_index`).
-
-- Pure vector retrieval — **no LLM call**. Returns matched chunks + distances.
-- **Use when**: the answer must be correct — read the chunks and synthesize yourself.
-- **Cost**: more of your tokens (chunks return); zero Ollama.
-- **Risk**: none from synthesis (you do it). Lower distance = better match (Chroma cosine, 0 best).
-- **Response is nested arrays** (Chroma shape). Flatten `documents`/`distances`/`metadatas` per collection before reading. OWUI returns no `ids`. The wrapper does this; if calling curl directly, parse with care.
-- Wrapper: `retrieve <kb-name-or-id> "<query>" [--k N] [--no-hybrid]` (`--k` default 5; use 10–20 for broader recall — the agent synthesizes from raw chunks, better than a one-shot `rag`). The wrapper resolves the name to a KB id via `GET /api/v1/knowledge/` (exact name or exact id; a valid UUID that is not a real id FAILS — no silent fallthrough, so a wrong hand-copied id cannot query the wrong KB) and prints the resolved `kb_id` + `kb_name` alongside the hits.
+- **To confirm a specific file is searchable**, retrieve by its **literal
+  filename stem** with a higher `--k` (e.g. 20). A generic concept query can be
+  outranked by topically-similar documents and report not-found even after the
+  file is fully indexed and extracted. The filename stem is the discriminator
+  that ranks the target file first.
 
 ### Discovery and file content
 
@@ -85,13 +83,12 @@ enforces KB read access natively. (Humans/admins still RAG directly at
 | GET | `/api/v1/knowledge/search` | `?query=<text>` | KB name search |
 | GET | `/api/v1/files/{id}/content` | — | file text content |
 
-## Phone-home (RAG is safe)
+## Phone-home (retrieval is safe)
 
-RAG chat / semantic retrieval drives the Chroma vector client. Chroma telemetry is
-**off**: Open WebUI builds the chromadb client with `anonymized_telemetry=False`
-and the container env sets `ANONYMIZED_TELEMETRY=false`. No outbound telemetry
-on retrieve/chat. (Other phone-home hardening — Graphiti/posthog, OWUI version
-check, favicon, OTEL — is handled in the stack's compose/`.env`.)
+Retrieval runs over the pgvector backend (Postgres + the `pgvector` extension) —
+no embedded vector-client telemetry. No outbound telemetry on retrieve. (Other
+phone-home hardening — Graphiti/posthog, OWUI version check, favicon, OTEL — is
+handled in the stack's compose/`.env`.)
 
 ## Admin surface
 
@@ -107,7 +104,7 @@ keep it private; do not hand it to agents.
 
 ## Using the wrapper (`scripts/owui.py`)
 
-Zero-dependency (Python 3.10+ stdlib). The KB surface (kbs/retrieve/rag/file) is
+Zero-dependency (Python 3.10+ stdlib). The KB surface (kbs/retrieve/file) is
 read-only and matches the agent role. The wrapper lives in `scripts/` next to this file; set `S` to its
 path in your installed copy of this skill.
 
@@ -119,7 +116,6 @@ export KB_API_KEY=...                           # your non-admin user key (~/.ap
 python3 "$S" whoami                             # verify key + role
 python3 "$S" kbs                                # list visible KBs
 python3 "$S" search-kbs "main"                  # find a KB by name
-python3 "$S" rag "What is XSL?" --kb <kb-id>    # chat (RAG) — LLM answer from the KB (via api-gateway)
 python3 "$S" retrieve <kb-name-or-id> "XSL streaming"     # retrieve — raw chunks, you synthesize
 python3 "$S" file <file-id>                     # file text content
 ```
@@ -127,13 +123,10 @@ python3 "$S" file <file-id>                     # file text content
 Config: the wrapper is a thin client. It reads ONLY `KB_HOST` and `KB_API_KEY`
 from the shell environment — no `.env` / `.env.local` files, no other env vars,
 no `--base-url` / `--key` / `--model` flags. Set both in your shell before
-invoking it (`export KB_HOST=...` / `export KB_API_KEY=...`). RAG chat is
-proxied by the api-gateway (`POST /memory/rag`), which inserts the chat model
-server-side from `OPENWEBUI_MODEL`; the wrapper carries no model.
+invoking it (`export KB_HOST=...` / `export KB_API_KEY=...`).
 
-Typical flow: `kbs` (or `search-kbs`) → grab the KB id → `rag` for a one-shot
-answer, or `retrieve` for raw chunks when the answer must be right (see the
-Retrieve vs Chat (RAG) groups above).
+Typical flow: `kbs` (or `search-kbs`) → grab the KB id → `retrieve` for raw
+chunks, then synthesize the answer (see Retrieve above).
 
 # Facts memory (Graphiti, agent / api-gateway)
 
@@ -214,7 +207,6 @@ deterministically loads this skill. Pi also auto-discovers skills by their
 |---|---|---|
 | Slash command | `/skill:kb` then the request | yes |
 | Natural — search | "search the KB for X" / "search the knowledge base for X" | by description match |
-| Natural — RAG chat | "ask the KB: \<question\>" / "ask the knowledge base: \<question\>" | by description match |
 | Natural — list | "list my KBs" / "list my knowledge bases" | by description match |
 | Natural — remember | "remember that …" / "what do we know about …" / "forget …" | by description match |
 

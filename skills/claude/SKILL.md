@@ -1,6 +1,6 @@
 ---
 name: kb
-description: Use when the user wants to query or chat with a self-hosted Open WebUI knowledge base (KB) over REST, index/search/retrieve Claude projects memory (~/.claude/projects/*/memory), or remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "index projects memory", "search projects memory"/"retrieve projects memory", "projects/repo index status", "remember …", "what do we know about …", and "forget …". One URL (KB_HOST) fronts OWUI REST (/api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side for facts memory). Zero-dependency Python CLI wrappers: scripts/owui.py (OWUI KBs + projects memory), scripts/kb_gateway.py (Graphiti facts).
+description: Use when the user wants to query a self-hosted Open WebUI knowledge base (KB) over REST, index/search/retrieve Claude projects memory (~/.claude/projects/*/memory), or remember/search/retrieve Graphiti facts memory. Triggers on "KB"/"knowledge base", "index projects memory", "search projects memory"/"retrieve projects memory", "projects/repo index status", "remember …", "what do we know about …", and "forget …". One URL (KB_HOST) fronts OWUI REST (/api/*) and api-gateway memory (/memory/*). Authenticates with KB_API_KEY (an Open WebUI key; read-scoped for KBs the caller does not own, write-scoped for the caller's own project KBs; identity+role derived server-side for facts memory). Zero-dependency Python CLI wrappers: scripts/owui.py (OWUI KBs + projects memory), scripts/kb_gateway.py (Graphiti facts).
 ---
 
 # KB + memory (agent / api-gateway)
@@ -23,10 +23,9 @@ One URL, one key.
 - **KB_API_KEY** — your Open WebUI non-admin user key, with read grants on the
   KBs you query (write scope on your own project KBs). The wrapper exits if it
   is unset.
-- For RAG chat, a strict RAG template (answer only from KB context) and a synced
-  embedding URL must be configured server-side — without them the model falls
-  back to its own knowledge and confabulates. That server-side setup is operator
-  work, not part of this skill.
+- For retrieval, the OWUI embedding URL must be configured server-side (synced
+  to `OLLAMA_BASE_URL` via `make rag-config`) — without it embeddings fail. That
+  server-side setup is operator work, not part of this skill.
 - Set both in your shell env: `export KB_HOST=...` / `export KB_API_KEY=...`.
   The wrapper is a thin client: it reads ONLY those two env vars and no env files.
 
@@ -40,9 +39,8 @@ One URL, one key.
 
 ## Agent endpoints
 
-Two ways to query a KB — **default to `retrieve`**: read the raw chunks and
-synthesize the answer yourself. Use `rag` only for a quick one-shot answer when
-the local model is adequate and the token cost of returning chunks matters.
+Query a KB with `retrieve`: read the raw chunks and synthesize the answer
+yourself.
 
 ### Retrieve (default)
 
@@ -58,7 +56,7 @@ id). `score_order` in the response tells the consumer how to sort: `hybrid`/
 distance (lower=better, `asc`). No LLM call. Wrapper:
 `retrieve <kb-name-or-id> "<query>" [--k N] [--mode hybrid|lexical|vector]`
 (`--k` default 5; use 10–20 for broader recall — the agent synthesizes from raw
-chunks, so more chunks serve it better than a one-shot `rag`. `--mode` default
+chunks, so more chunks serve it better. `--mode` default
 `hybrid`; `lexical` = pure FTS/BM25 (server-side, indexed — the mode for exact
 register/signal/keyword queries); `vector` = pure vector. `--no-hybrid` is a
 deprecated alias for `--mode vector`). The wrapper resolves the name to a KB id
@@ -72,19 +70,6 @@ wrong KB) and prints the resolved `kb_id` + `kb_name` alongside the hits.
   file is fully indexed and extracted. The filename stem is the discriminator
   that ranks the target file first.
 
-### Chat (RAG)
-
-`POST /memory/rag` (via the api-gateway) — body
-`{messages, files:[{type:collection,id:<kb-id>}]}` (NO `model` field) →
-`{content}`. The gateway inserts the chat model server-side and forwards your
-`KB_API_KEY` to OWUI, which enforces KB read access natively.
-
-- Requires the server-side RAG config above; otherwise the model confabulates.
-- Pass the KB via the top-level `files` field only. Do NOT use a `knowledge`
-  field (silently ignored) or `metadata.knowledge` (discarded server-side).
-  `type:collection` = whole-KB vector search; `type:file` = one file id.
-- Wrapper: `rag "<question>" --kb <kb-id> [--kb <id2>]`.
-
 ### Discovery and file content
 
 | Method | Path | Body / qs | Returns |
@@ -96,8 +81,10 @@ wrong KB) and prints the resolved `kb_id` + `kb_name` alongside the hits.
 
 ## Phone-home (retrieval is safe)
 
-Open WebUI builds the chromadb client with `anonymized_telemetry=False`. No
-outbound telemetry on retrieve/chat.
+Retrieval runs over the pgvector backend (Postgres + the `pgvector` extension) —
+no embedded vector-client telemetry. No outbound telemetry on retrieve. (Other
+phone-home hardening — Graphiti/posthog, OWUI version check, favicon, OTEL — is
+handled in the stack's compose/`.env`.)
 
 ## Admin surface
 
@@ -122,7 +109,6 @@ python3 "$S" kbs                       # list KBs visible to this key
 python3 "$S" kb <kb-id>                 # one KB's metadata
 python3 "$S" search-kbs "main"         # find a KB by name
 python3 "$S" retrieve <kb-name-or-id> "XSL streaming"   # raw chunks, you synthesize (default; --mode hybrid|lexical|vector)
-python3 "$S" rag "What is XSL?" --kb <kb-id>     # one-shot RAG answer (via api-gateway)
 python3 "$S" file <file-id>             # file's extracted text content (full doc)
 python3 "$S" file <file-id> --raw       # original bytes instead of extracted text (binary saved to /tmp)
 ```
