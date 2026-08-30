@@ -261,9 +261,21 @@ e2e_ephemeral_user() {
   domain="$(grep -E '^KB_DOMAIN=' .env | head -1 | cut -d= -f2- || true)"
   [ -n "$domain" ] || { echo "FAIL  KB_DOMAIN not set in the clone .env (ephemeral user email)" >&2; return 1; }
   email="temp-${E2E_STAMP}@${domain}"
+  # `make api-keys` recreates the api-gateway at its tail (ocr-config.sh when
+  # OCR_ENABLED=true, then `docker compose up -d api-gateway` for the admin
+  # key) and returns once the container Starts, before the gateway app binds
+  # its port. Wait for /health before POSTing /admin/users, else the create
+  # races the gateway startup (a transient connection-refused the prior
+  # 2>/dev/null hid, surfacing only as "ephemeral user create failed").
+  local h="${KB_HOST:?}" i=0
+  until curl -sf "$h/health" >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -lt 60 ] || { echo "FAIL  gateway not healthy in 120s ($h/health) before ephemeral user create" >&2; return 1; }
+    sleep 2
+  done
   echo "==> create ephemeral test user $email (admin key -> gateway POST /admin/users)"
-  ujson="$(make users-create EMAIL="$email" NAME="E2E" ROLE=user 2>/dev/null)" \
-    || { echo "FAIL  ephemeral user create failed for $email" >&2; return 1; }
+  ujson="$(make users-create EMAIL="$email" NAME="E2E" ROLE=user)" \
+    || { echo "FAIL  ephemeral user create failed for $email (see make users-create output above)" >&2; return 1; }
   ukey="$(printf '%s' "$ujson" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("kb_api_key") or "")')"
   [ -n "$ukey" ] || { echo "FAIL  ephemeral user create returned no kb_api_key: $ujson" >&2; return 1; }
   # Idempotent upsert of KB_API_KEY into the clone .env.local (atomic write,
