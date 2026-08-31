@@ -24,8 +24,8 @@ PYTEST   ?= .venv/bin/python -m pytest
         health ci test test-unit test-live-RO test-iso test-iso-shared test-iso-single test-iso-long test-long test-output api-keys admin-signup rag-config \
         users-create users-list users-search \
         ocr-config \
-        gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
-        kb-public-read kb-check \
+        gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status gdrive-sync-finalize \
+        kb-public-read kb-check kb-finalize \
         projects-bootstrap \
         shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-test clean-tests clean-backup backup
 
@@ -242,6 +242,14 @@ gdrive-status: ## Show gdrive index status via api-gateway GET /status (complete
 	  curl -sS "$$H/status?$$q&json=1" \
 	    -H "Authorization: Bearer $$KB_API_KEY" \
 	    | python3 -m json.tool --indent 2
+
+kb-finalize: ## Finalize a gdrive drain: rebuild the pgvector ivfflat vector + GIN FTS indexes so freshly-embedded vectors become queryable (pgvector only; Chroma/HNSW incremental -> no-op). Run AFTER the drain is terminal (or use gdrive-sync-finalize to wait). Logs each REINDEX duration. Named "finalize" not "reindex": on a fresh drain the vectors were never queryable (ivfflat folds post-build rows in only on REINDEX), and to avoid collision with the gateway reindex_all (POST /index?reindex_all=1 RE-PROCESSES files — a different op at a different layer).
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@./scripts/kb-finalize.sh
+
+gdrive-sync-finalize: ## Wait for the in-flight gdrive drain to terminate (poll GET /status to pending+processing=0, timeout GDRIVE_TEST_WAIT default 2400s) then finalize (REINDEX ivfflat + GIN FTS). Run AFTER `make gdrive-sync` (which dispatches the async drain) — this is the "block until the KB is searchable" step. Fails loud if the drain does not terminate (do not REINDEX while inserts are in flight — that races the live index). pgvector only; no-op on Chroma/HNSW.
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@./scripts/kb-finalize.sh --wait
 
 projects-bootstrap: ## One-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
