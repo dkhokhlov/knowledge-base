@@ -207,7 +207,7 @@ if [ "$in_flight" = "0" ] && [ "$accounted" -ge "$src_count" ]; then
   pass "drain terminal: completed=${completed} failed=${failed} pending=${pending} processing=${processing} source=${src_count}"
 else
   fail "drain did not terminate after ${CHUNKQ_WAIT}s: completed=${completed} failed=${failed} pending=${pending} processing=${processing} source=${src_count} (accounted=${accounted})"
-  fail "check: docker logs kb-openwebui + docker logs kb-markitdown-ocr"
+  fail "check: docker logs ${OWUI_CONTAINER:-kb-openwebui} + docker logs ${MARKITDOWN_CONTAINER:-kb-markitdown-ocr}"
   finish
   exit 1
 fi

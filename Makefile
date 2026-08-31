@@ -21,7 +21,7 @@ DATA_DIR := ./data
 PYTEST   ?= .venv/bin/python -m pytest
 
 .PHONY: help provision bootstrap preflight pull pull-models start stop restart logs ps config \
-        health ci test test-unit test-e2e test-e2e-long test-output test-e2e-iso api-keys admin-signup rag-config \
+        health ci test test-unit test-live-RO test-iso test-iso-shared test-iso-single test-iso-long test-long test-output test-e2e-iso api-keys admin-signup rag-config \
         users-create users-list users-search \
         ocr-config \
         gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status \
@@ -94,21 +94,31 @@ health: ## Probe the stack /health (Caddy -> api-gateway aggregated, reflects OW
 ci: ## Provision the .venv: uv sync (Python 3.12 from .python-version + locked deps from uv.lock). Idempotent; prereq for every test target.
 	uv sync
 
-test: ci ## Run the python unit tests only (no stack needed). Integration + e2e run in the isolated clone via `make test-e2e-iso`.
+test: test-unit test-live-RO ## Run the unit tests + live-stack read-only system tests (needs `make start` first). Iso + long tests run via `make test-iso` / `make test-long`.
+
+test-unit: ci ## Run the python unit tests only (no stack needed; marker = unit).
 	@$(PYTEST) -m unit -v
 
-test-unit: ci ## Run only the python unit tests (no stack needed).
-	@$(PYTEST) -m unit -v
+test-live-RO: ci ## Run the live-stack read-only system tests (test_01/02/03; needs `make start` first; marker = integration and not long).
+	@$(PYTEST) -m "integration and not long" -v
 
-test-e2e: ci ## Run the quick isolated e2e tests (self-isolate a throwaway stack via scripts/lib-e2e-env.sh; NOT the live stack). GPU/RAM: a 2nd stack on the shared Ollama.
-	@$(PYTEST) -m "e2e and not long" -v
+test-iso-shared: ci ## Run the iso tests that share ONE session-provisioned clean-prod stack (test_04/05/06/07/10/11/13/14/15; marker = iso and shared). Auto-provisions via the iso_env session fixture; GPU/RAM: a 2nd stack on the shared Ollama.
+	@$(PYTEST) -m "iso and shared" -v
 
-test-e2e-long: ci ## Run the long isolated e2e (test_08 agent-surface + test-e2e-iso at-scale). Self-isolate; GPU/RAM heavy; runs many minutes.
-	@$(PYTEST) -m "e2e and long" -v
+test-iso-single: ci ## Run the iso tests that each get their own named clean-prod stack (test_12; marker = iso and not long and not shared). GPU/RAM: a 2nd stack on the shared Ollama.
+	@$(PYTEST) -m "iso and not long and not shared" -v
+
+test-iso: test-iso-shared test-iso-single ## Run all short iso tests (shared + single; excludes long). Each provisions a throwaway clean-prod stack.
+
+test-iso-long: ci ## Run the long iso tests (test_08 agent-surface + test-e2e-iso at-scale; marker = iso and long). GPU/RAM heavy; runs many minutes.
+	@$(PYTEST) -m "iso and long" -v
+
+test-long: test-iso-long ## Run the long iso tests (same as test-iso-long).
+
 test-output: ci ## Unit-test CLI JSON output schemas (no stack needed)
 	@.venv/bin/python tests/test_output_json.py -v
 
-test-e2e-iso: ## Isolated e2e: clone to a datetime-stamped gitignored .test-e2e/<stamp>/ + run the destructive e2e (clean-state wipe + re-provision + rclone + full suite + test_09 drain) under a separate compose project (kb-e2e-<stamp>) so the LIVE stack keeps running. The destructive logic is inlined; there is NO in-place `make test-e2e` (it would wipe the live stack). REAL rclone (re-downloads the corpus). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On success docker is stopped but the clone is KEPT (proliferation -- may hold commits); flush with `make clean-tests`. On failure the stack + clone are left; run `make clean-test STAMP=<stamp>`.
+test-e2e-iso: ## Isolated e2e: clone to a datetime-stamped gitignored .test-e2e/<stamp>/ + run the destructive e2e (clean-state wipe + re-provision + rclone + full suite + test_09 drain) under a separate compose project (kb-e2e-<stamp>) so the LIVE stack keeps running. The destructive logic is inlined; there is NO in-place destructive `make test-iso` target (it would wipe the live stack). REAL rclone (re-downloads the corpus). Set E2E_PORT (default 3010), OCR_ENABLED, E2E_KEEP=1. Costs: 2nd stack (GPU/RAM contention on the shared Ollama). On success docker is stopped but the clone is KEPT (proliferation -- may hold commits); flush with `make clean-tests`. On failure the stack + clone are left; run `make clean-test STAMP=<stamp>`.
 	@./scripts/test-e2e-iso.sh
 
 clean-test: ## Tear down ONE isolated e2e run + remove its clone. NAME=<name> (default e2e) + optional STAMP=<stamp> (latest stamp under .test-<name>/ if unset). Safe anytime (no-op if absent). Delegates to scripts/lib-e2e-env.sh (shared with make test-e2e-iso + tests/test_*_e2e.sh).

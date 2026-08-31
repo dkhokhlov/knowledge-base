@@ -169,17 +169,22 @@ set +e
   make rag-config
   make gdrive-index-bootstrap
   make gdrive-sync
-  # Integration suite (the single gate, now that live `make test` is unit-only).
-  # Direct pytest -- NOT `make test` (retargeted to unit-only) -- with the same
-  # marker the old in-clone `make test` used: "not e2e and not long". This runs
-  # the integration-not-long tests (test_01-07,10,11,13,14,15) + the unit tests,
-  # and EXCLUDES test_e2e_iso (e2e -> would re-invoke this script: infinite
-  # recursion), test_08/test_12 (e2e -> self-isolate nested clones on fixed
-  # ports), and test_09 (long -> run explicitly below on the freshly-synced
-  # corpus, so it is not double-drained). `make ci` provisions the clone's .venv
-  # (a fresh git clone has none; the old `make test: ci` prereq did this).
+  # In-clone suite: unit + live-RO (test_01/02/03) against THIS clone's stack.
+  # Direct pytest -- NOT `make test` (which targets the LIVE stack for RO) --
+  # with marker "not iso and not long". This runs the unit tests + the
+  # integration-not-long tests (test_01/02/03, live-RO against the clone stack),
+  # and EXCLUDES:
+  #   - iso tests (test_04-15 shared, test_08, test_12, test_e2e_iso): each
+  #     provisions its OWN throwaway iso env via the iso_env / iso_env_named
+  #     fixtures, which would NEST-provision a 3rd stack inside this clone
+  #     (test_e2e_iso would also re-invoke this script: infinite recursion).
+  #     They are covered instead by `make test-iso-shared` / `test-iso-single` /
+  #     `test-iso-long` against their own clean-prod stacks.
+  #   - test_09 (integration long): run explicitly below on the freshly-synced
+  #     corpus, so it is not double-drained.
+  # `make ci` provisions the clone's .venv (a fresh git clone has none).
   make ci
-  GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" .venv/bin/python -m pytest -m "not e2e and not long" -v
+  GDRIVE_TEST_WAIT="${E2E_INDEXER_WAIT:-2400}" .venv/bin/python -m pytest -m "not iso and not long" -v
   # test_09 (full real-gdrive drain) is not in the suite above (it is long and
   # coupled to the live rclone-synced corpus); run it explicitly here, where the
   # gdrive KB is provisioned and the corpus is freshly synced above.

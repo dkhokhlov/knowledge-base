@@ -135,7 +135,7 @@ if [ "$status" = "completed" ]; then
   pass "fixture file drain completed"
 else
   fail "fixture file drain not completed after ${wait_s}s (status=${status:-none})"
-  fail "check: docker logs kb-openwebui | tail -50"
+  fail "check: docker logs ${OWUI_CONTAINER:-kb-openwebui} | tail -50"
   finish; exit 1
 fi
 

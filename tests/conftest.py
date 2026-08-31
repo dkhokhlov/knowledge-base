@@ -16,9 +16,11 @@ Three concerns:
    their progress; it passes iff the script exits 0 (lib.sh ``finish`` exits
    non-zero on FAIL>0; ``require_stack_up`` exits 2 when the stack is down).
 
-3. Provide the ``e2e_env_named`` factory fixture for an OWN isolated e2e env
-   (a throwaway clean-prod stack, auto-picked free host port). See its
-   docstring for the clean-env / split-setup / outcome-branched teardown model.
+3. Provide the iso fixtures for isolated tests (throwaway clean-prod stacks,
+   auto-picked free host port): ``iso_env`` (session-scoped, shared by the 9
+   iso+shared tests) and ``iso_env_named`` (function-scoped factory, a named
+   own-iso stack per destructive/heavy test). See their docstrings for the
+   clean-env / split-setup / outcome-branched teardown model.
 """
 
 import os
@@ -169,59 +171,83 @@ def _test_passed(request):
     return bool(rep and rep.passed)
 
 
+def _setup_iso_env(name, ocr, request, remove_fn):
+    """Shared isolate -> finalizer -> provision -> _run for both the named
+    (function) and shared (session) iso fixtures.
+
+    call A -- ``e2e_resolve_ollama && e2e_isolate <name> "" [<ocr>]``: progress
+             -> stderr (streams live); stdout -> temp file with the captured iso
+             env (whatever is set, even on isolate failure). Python parses it
+             and registers a finalizer. (Inherits the operator env for
+             OLLAMA_HOST resolution; e2e_isolate strips BASH_ENV/KB_HOST/
+             KB_API_KEY before the clone sees them.)
+    call B -- ``e2e_provision`` in the clone with the clean child env, output
+             streams live. A failure here still hits the finalizer (registered
+             after A), so no half-up stack is stranded.
+
+    The body runs in a CLEAN child env (only the iso vars + PATH/HOME/LANG/TERM;
+    no operator BASH_ENV, no live KB_HOST/KB_API_KEY) so the operator's profile
+    never reaches the test body. ``remove_fn()`` is evaluated at teardown to
+    decide e2e_down (remove the clone) vs e2e_stop_docker (keep). Returns a
+    ``_run(relpath)`` callable."""
+    setup = subprocess.run(
+        ["bash", "-c", _ISO_SETUP_BASH], cwd=str(REPO),
+        env={**os.environ, "E2E_NAME": name, "E2E_OCR": ocr or ""},
+        stdout=subprocess.PIPE, text=True)
+    captured = _parse_iso_env(setup.stdout)
+    if setup.returncode != 0 or not captured.get("E2E_STAMP"):
+        pytest.fail("%s isolate failed" % name, pytrace=False)
+    # Register the finalizer NOW (after isolate, before provision): a provision
+    # failure still tears the stack down via this finalizer.
+    request.addfinalizer(
+        lambda: _iso_teardown(captured["E2E_NAME"], captured["E2E_STAMP"],
+                              remove=remove_fn()))
+    prov = subprocess.run(
+        ["bash", "-c", ". scripts/lib-e2e-env.sh; e2e_provision"],
+        cwd=captured["E2E_CLONE"], env=_child_env(captured))
+    if prov.returncode != 0:
+        pytest.fail("%s provision failed" % name, pytrace=False)
+    child = _child_env(captured)
+
+    def _run(relpath):
+        rc = subprocess.run(["bash", relpath], cwd=captured["E2E_CLONE"],
+                            env=child).returncode
+        if rc != 0:
+            pytest.fail("%s exited %d" % (relpath, rc), pytrace=False)
+    return _run
+
+
 @pytest.fixture
-def e2e_env_named(request):
-    """Factory fixture (function scope): provision a NAMED isolated e2e env (a
-    throwaway clean-prod stack, auto-picked free host port) for one e2e test,
-    and return a runner that executes a repo-relative .sh body in it.
+def iso_env_named(request):
+    """Factory fixture (function scope): provision a NAMED own-iso env (a
+    throwaway clean-prod stack, auto-picked free host port) for one destructive
+    / heavy iso test, and return a runner that executes a repo-relative .sh
+    body in it.
 
     The ``suffix`` IS the clone subdir name (operator traceability:
     ``.test-<suffix>/<stamp>/``). The iso env is clean / prod-exact: the only
     diffs from prod are ``KB_HOST`` (the auto-picked port) + the ephemeral
     ``KB_API_KEY`` (file-based in the clone .env.local). No env hacks.
 
-    Setup is split into two subprocess calls so a provision failure does not
-    strand a half-up stack:
-
-      call A -- ``e2e_resolve_ollama && e2e_isolate <suffix> "" [<ocr>]``:
-               progress -> stderr (streams live); stdout -> temp file with the
-               captured iso env. Python parses it and registers a finalizer.
-      call B -- ``e2e_provision`` in the clone with the clean child env. A
-               failure here still hits the finalizer (registered after A).
-
-    The body runs in a CLEAN child env (only the iso vars + PATH/HOME/LANG/TERM;
-    no BASH_ENV, no live KB_HOST/KB_API_KEY) so the operator's profile never
-    reaches the destructive test body. Teardown branches on the test outcome:
-    passed -> ``e2e_down`` (stop + remove the clone); failed ->
-    ``e2e_stop_docker`` (stop, keep the clone for ``make clean-tests``).
-    """
+    Setup is split (isolate -> finalizer -> provision) so a provision failure
+    does not strand a half-up stack. Teardown branches on the test's own
+    outcome (passed -> e2e_down remove the clone; failed -> e2e_stop_docker
+    keep it for ``make clean-tests`` to flush)."""
     def _make(suffix, ocr=None):
-        # call A: isolate (inherits the operator env for OLLAMA_HOST resolution;
-        # e2e_isolate strips BASH_ENV/KB_HOST/KB_API_KEY before the clone sees them).
-        setup = subprocess.run(
-            ["bash", "-c", _ISO_SETUP_BASH], cwd=str(REPO),
-            env={**os.environ, "E2E_NAME": suffix, "E2E_OCR": ocr or ""},
-            stdout=subprocess.PIPE, text=True)
-        captured = _parse_iso_env(setup.stdout)
-        if setup.returncode != 0 or not captured.get("E2E_STAMP"):
-            pytest.fail("e2e_env_named(%s) isolate failed" % suffix, pytrace=False)
-        # Register the finalizer NOW (after isolate, before provision): a
-        # provision failure still tears the stack down via this finalizer.
-        request.addfinalizer(
-            lambda: _iso_teardown(captured["E2E_NAME"], captured["E2E_STAMP"],
-                                  remove=_test_passed(request)))
-        # call B: provision in the clone, clean child env, output streams live.
-        prov = subprocess.run(
-            ["bash", "-c", ". scripts/lib-e2e-env.sh; e2e_provision"],
-            cwd=captured["E2E_CLONE"], env=_child_env(captured))
-        if prov.returncode != 0:
-            pytest.fail("e2e_env_named(%s) provision failed" % suffix, pytrace=False)
-        child = _child_env(captured)
-
-        def _run(relpath):
-            rc = subprocess.run(["bash", relpath], cwd=captured["E2E_CLONE"],
-                                env=child).returncode
-            if rc != 0:
-                pytest.fail("%s exited %d" % (relpath, rc), pytrace=False)
-        return _run
+        return _setup_iso_env(suffix, ocr, request,
+                              lambda: _test_passed(request))
     return _make
+
+
+@pytest.fixture(scope="session")
+def iso_env(request):
+    """Session-scoped SHARED clean-prod stack for the iso+shared tests
+    (test_04/05/06/07/10/11/13/14/15). Provisions ONE isolated stack
+    (e2e_isolate "iso-shared", auto-picked port, OCR=true template default) +
+    e2e_provision, shared across all of them. Each shared test's body runs in a
+    CLEAN child env via the returned ``_run``; the tests self-clean (delete
+    temp KBs/files) so the shared env stays clean across them. Teardown at
+    session end: ``session.testsfailed == 0`` -> e2e_down (remove the clone)
+    else e2e_stop_docker (keep for inspection)."""
+    return _setup_iso_env("iso-shared", None, request,
+                          lambda: request.session.testsfailed == 0)
