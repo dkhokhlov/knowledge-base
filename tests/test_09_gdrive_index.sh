@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# System integration test: gdrive indexing via api-gateway (stateless, no sidecar).
+# Comprehensive at-scale e2e body (iso long): run via the iso_env_named("gdrive",
+# at_scale=True) fixture, which owns isolate + e2e_provision_at_scale (clean-all
+# + image rebuild + preflight + real rclone gdrive corpus + make ci) + teardown.
+# This body runs in the clone: first the in-clone suite (unit + live-RO 01/02/03
+# against the fresh stack), then the full real-gdrive drain below.
 #
-# POSTs /index (admin key) to reconcile ./gdrive into the OWUI "gdrive" KB.
+# gdrive indexing via api-gateway (stateless, no sidecar). POSTs /index (admin
+# key) to reconcile ./gdrive into the OWUI "gdrive" KB.
 # The gateway uploads via POST /files/ (process_in_background=True) and does NOT
 # link files itself — OWUI's per-upload background task is the sole linker
 # (extract via markitdown-ocr -> embed into the KB collection -> link). That
@@ -27,41 +32,40 @@
 #
 # /index is idempotent (re-run reports unmodified + re-triggers any failed).
 #
-# Tolerant: SKIPs (passes with a notice) when gdrive indexing is not provisioned
-# — GDRIVE_KB_ID unset in .env.local, or ./gdrive has no allowlisted files — so
-# `make test` still runs clean in a bare environment.
+# No SKIP: the at-scale fixture always provisions the gdrive KB + syncs the
+# corpus (or provision fails first + this body never runs). A missing
+# GDRIVE_KB_ID or empty corpus is a hard fail (require_env / completed<source),
+# not a silent pass.
 set -u
 . "$(dirname "$0")/lib.sh"
 load_env
 require_stack_up
 
-# Not part of `make test` (slow: up to GDRIVE_TEST_WAIT of GPU OCR over the
-# whole live rclone-synced corpus). `make test` covers the gdrive index path
-# fast + deterministically via test_11_gdrive_index_fixture.sh. This full
-# real-gdrive drain runs under `make test-e2e` (which invokes it by path).
+# --- in-clone suite: unit + live-RO (01/02/03) against THIS clone's fresh stack
+# Direct pytest -- NOT `make test` (which targets the LIVE stack for RO) -- with
+# marker "not iso and not long". Runs the unit tests + the integration tests
+# (test_01/02/03, live-RO against the clone stack) and EXCLUDES every iso/long
+# test (test_09 itself is iso long -> excluded -> no recursion; test_08/test_12/
+# shared excluded too). The .venv was provisioned by `make ci` at the tail of
+# e2e_provision_at_scale. Fail on any non-zero exit.
+section "in-clone suite (unit + live-RO)"
+if ! .venv/bin/python -m pytest -m "not iso and not long" -v; then
+  fail "in-clone suite failed (see output above)"
+  finish
+  exit 1
+fi
+pass "in-clone suite green"
+
+# --- full real-gdrive drain --------------------------------------------------
 O="$(kb_host)"
 # Allowlist must match gateway DEFAULT_ALLOW (gateway/app.py). find's default
 # Emacs regex treats (a|b) as LITERAL (matches 0 files), so every -iregex call
 # below MUST use -regextype posix-extended for the alternation to work.
 ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
-
-# --- skip conditions ---------------------------------------------------------
-if [ -z "${GDRIVE_KB_ID:-}" ]; then
-  section "gdrive index"
-  pass "SKIP: GDRIVE_KB_ID not set in .env.local (run: make gdrive-index-bootstrap)"
-  finish
-  exit 0
-fi
 # Exclude dot-dirs (.tests, .sync-reports) from the source count: gateway.walk_source prunes them from a full walk (gateway/app.py "Prune dot-dirs"), so counting them leaves the drain `accounted < src_count` -> a false timeout. `path` opts into a dot-subtree (test_11); this full walk does not.
 src_count=$(find gdrive -type f -not -path '*/.*' -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
-if [ "${src_count:-0}" -eq 0 ]; then
-  section "gdrive index"
-  pass "SKIP: ./gdrive has no allowlisted files to index (run: make gdrive-sync)"
-  finish
-  exit 0
-fi
 
-require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }
+require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY GDRIVE_KB_ID || { finish; exit 1; }
 AK="$OPENWEBUI_ADMIN_API_KEY"
 UK="$KB_API_KEY"
 ADM=(-H "Authorization: Bearer $AK")
@@ -103,11 +107,12 @@ fi
 # --- poll GET /status until the drain reaches a terminal state ---------------
 # Real completion = no pending AND no processing AND completed+failed covers the
 # source (every uploaded file reached a terminal state). /status reads
-# file.data.status via GET /files/. Poll up to GDRIVE_TEST_WAIT (default 600s).
+# file.data.status via GET /files/. Poll up to GDRIVE_TEST_WAIT (default 2400s:
+# cold first-extraction per-figure OCR budget over the full fresh-synced corpus).
 # Admin key: /status uses the gateway's held admin key for the file scan
 # internally; any valid key authorizes the call.
 section "poll GET /status (real drain)"
-wait_s="${GDRIVE_TEST_WAIT:-600}"
+wait_s="${GDRIVE_TEST_WAIT:-2400}"
 deadline=$(( $(date +%s) + wait_s ))
 completed=0; pending=0; processing=0; failed=0; status_json=""
 while :; do
@@ -132,7 +137,7 @@ if [ "$in_flight" = "0" ] && [ "$accounted" -ge "$src_count" ]; then
   pass "drain terminal: completed=${completed} failed=${failed} pending=${pending} processing=${processing} source=${src_count}"
 else
   fail "drain did not terminate after ${wait_s}s: completed=${completed} failed=${failed} pending=${pending} processing=${processing} source=${src_count} (accounted=${accounted})"
-  fail "check: docker logs kb-openwebui + docker logs kb-markitdown-ocr"
+  fail "check: docker logs ${OWUI_CONTAINER:-kb-openwebui} + docker logs ${MARKITDOWN_CONTAINER:-kb-markitdown-ocr}"
   finish
   exit 1
 fi
@@ -212,7 +217,7 @@ if [ "$completed" -ge "$expected_min" ] && [ "$completed" -gt 0 ]; then
   pass "completed=${completed} >= source(${src_count}) - failed(${failed}) = ${expected_min}"
 else
   fail "completed=${completed} < source(${src_count}) - failed(${failed}) = ${expected_min} (unexplained gap)"
-  fail "re-run: make gdrive-sync; then docker logs kb-openwebui / kb-markitdown-ocr"
+  fail "re-run: make gdrive-sync; then docker logs ${OWUI_CONTAINER:-kb-openwebui} / ${MARKITDOWN_CONTAINER:-kb-markitdown-ocr}"
   finish
   exit 1
 fi

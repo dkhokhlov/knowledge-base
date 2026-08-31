@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Reusable isolated e2e stack management. Sourced (NOT executed) by
-# scripts/test-e2e-iso.sh and tests/test_*.sh that need a throwaway stack that
-# does NOT touch the live `kb-*` containers.
+# Reusable isolated e2e stack management. Sourced (NOT executed) by the conftest
+# iso fixtures (tests/conftest.py) and tests/test_*.sh that need a throwaway stack
+# that does NOT touch the live `kb-*` containers.
 #
 # What "isolated" means here: clone the repo to a throwaway, gitignored
 # .test-<NAME>/<stamp>/ tree and run a SEPARATE compose project
@@ -44,10 +44,11 @@
 #                                              # (PORT omitted -> auto-pick a free port)
 #   e2e_provision                 # make start + wait healthy + admin-signup + api-keys
 #                                 # + projects-bootstrap + rag-config (prod-exact) + ephemeral user
+#   e2e_provision_at_scale        # DESTRUCTIVE at-scale: clean-all + re-bootstrap + image
+#                                 # rebuild + preflight + gdrive (rclone) + make ci (test_09)
 #   e2e_stop_docker <NAME> <STAMP> # stop+remove docker, KEEP the clone (success path)
 #   e2e_down <NAME> [STAMP]        # stop docker + remove the clone (quick tests' EXIT
 #                                 # trap, make clean-test; latest stamp if no STAMP)
-#   e2e_keep_or_down <NAME> <KEEP> # KEEP=1 leave running; KEEP=0 stop docker, keep clone
 #   e2e_clean_tests [NAME]         # flush ALL stamps + legacy + orphans (make clean-tests)
 #
 # Globals set by e2e_isolate (for the caller): E2E_NAME, E2E_PORT, E2E_CLONE,
@@ -95,20 +96,18 @@ e2e_resolve_ollama() {
 }
 
 # Pick a free host port in [lo..hi] (default 3011..3099) for an isolated stack.
-# Skips 3000 (the live stack's Caddy) and 3010 (test-e2e-iso's canonical port,
-# reserved so the auto-picker never grabs it while a standalone test-e2e-iso run
-# may bind it). Prints the port; returns 1 if none free. One Python invocation
-# scans the whole range (bind-test each port). A small TOCTOU gap is inherent --
-# the probe socket closes before `make start` binds the port in a separate
-# process -- so `make start` failing on the bind is still the clear signal; a
-# re-run picks a different free port. This is part of env setup (e2e_isolate),
-# run before the test body.
+# Skips 3000 (the live stack's Caddy). Prints the port; returns 1 if none free.
+# One Python invocation scans the whole range (bind-test each port). A small
+# TOCTOU gap is inherent -- the probe socket closes before `make start` binds the
+# port in a separate process -- so `make start` failing on the bind is still the
+# clear signal; a re-run picks a different free port. This is part of env setup
+# (e2e_isolate), run before the test body.
 _e2e_free_port() {
   local lo="${1:-3011}" hi="${2:-3099}"
   python3 - "$lo" "$hi" <<'PY'
 import socket, sys
 lo, hi = int(sys.argv[1]), int(sys.argv[2])
-SKIP = {3000, 3010}              # never the live stack; never test-e2e-iso's 3010
+SKIP = {3000}                    # never the live stack's Caddy
 for p in range(lo, hi + 1):
     if p in SKIP:
         continue
@@ -118,14 +117,14 @@ for p in range(lo, hi + 1):
     except OSError:
         s.close(); continue
     s.close(); print(p); sys.exit(0)
-sys.exit("FAIL  no free host port in %d..%d (3000 + 3010 skipped)" % (lo, hi))
+sys.exit("FAIL  no free host port in %d..%d (3000 skipped)" % (lo, hi))
 PY
 }
 
 # Clone the repo to .test-<NAME>/<stamp>/, set up the isolation env (stamped
 # compose project, generated container-rename override, OWUI_CONTAINER,
-# KB_HOST), unset the operator's shell profile leaks (BASH_ENV/KB_HOST -- see
-# the comment in test-e2e-iso.sh), and run `make bootstrap` (seed .env/.env.local
+# KB_HOST), unset the operator's shell profile leaks (BASH_ENV/KB_HOST), and run
+# `make bootstrap` (seed .env/.env.local
 # for the clone). The stamp makes the clone unique, so a leftover clone never
 # blocks a re-run. Does NOT start the stack -- the caller calls e2e_provision
 # (or its own destructive re-provision). The host PORT auto-picks a free port
@@ -290,6 +289,84 @@ e2e_provision() {
   e2e_ephemeral_user || return 1
 }
 
+# Destructive AT-SCALE provision of the isolated stack: the comprehensive
+# from-scratch path (clean-all wipe + re-bootstrap + restore admin creds + [OCR
+# model pull] + preflight + image rebuild + start + wait healthy + admin-signup +
+# api-keys + ephemeral user + projects-bootstrap + rag-config + gdrive-index-
+# bootstrap + gdrive-sync + make ci). This is the at-scale variant of
+# e2e_provision: it wipes the clone's data, re-provisions from scratch, rebuilds
+# the locally-built images, and syncs the REAL gdrive corpus (rclone).
+# test_09_gdrive_index (the comprehensive at-scale e2e) uses it via the
+# iso_env_named(..., at_scale=True) fixture.
+#
+# Call AFTER e2e_isolate (which seeded .env/.env.local + the admin account). The
+# caller's gdrive-exclude.conf must ALREADY be copied into the clone (the conftest
+# fixture does this -- the provision bash has no E2E_SRC to reach the source
+# repo). Stashes OPENWEBUI_FIRST_USER/PASSWORD before clean-all (which wipes
+# .env.local) + restores them after bootstrap via scripts/e2e-restore-creds.sh.
+# Every bare `docker compose` / `make` honors COMPOSE_PROJECT_NAME/COMPOSE_FILE
+# from the clean child env (set by e2e_isolate), so clean-all/build/start target
+# THIS iso project, never the live stack. rclone uses the host
+# ~/.config/rclone/rclone.conf via HOME (carried in the child env). No fallback:
+# any step failing aborts (return 1).
+e2e_provision_at_scale() {
+  echo "==> DESTRUCTIVE at-scale provision: wipes all data + re-provisions from scratch."
+  test -f .env.local || { echo "FAIL  no .env.local (no admin creds to stash) -- run e2e_isolate first" >&2; return 1; }
+  set -a; . ./.env; . ./.env.local; set +a
+  # Capture KB_HOST / OLLAMA_HOST from the just-sourced .env (after the source, so
+  # this reads the persisted localhost:<E2E_PORT> KB_HOST, not the empty shell env).
+  # Re-forwarded to the internal `make bootstrap` as make-tunables so the freshly
+  # recreated .env keeps the e2e host + Ollama URL (clean-all deletes .env;
+  # bootstrap force-persists KB_HOST + derives KB_HOST_PORT from it).
+  _E2E_KB_HOST="${KB_HOST:-}"; _E2E_OLLAMA_HOST="${OLLAMA_HOST:-}"
+  [ -n "${OPENWEBUI_FIRST_USER:-}" ] && [ -n "${OPENWEBUI_FIRST_PASSWORD:-}" ] \
+    || { echo "FAIL  OPENWEBUI_FIRST_USER/PASSWORD not set in .env.local -- fill them first" >&2; return 1; }
+  stash=$(mktemp); chmod 600 "$stash"
+  { printf 'OPENWEBUI_FIRST_USER=%s\nOPENWEBUI_FIRST_PASSWORD=%s\n' "$OPENWEBUI_FIRST_USER" "$OPENWEBUI_FIRST_PASSWORD"; } > "$stash"
+  # EXIT trap (not RETURN): this runs in a one-shot `bash -c ". lib;
+  # e2e_provision_at_scale"`, so EXIT fires after the function returns + cleans the
+  # stash whether the function succeeded or failed mid-way (return 1).
+  trap 'rm -f "$stash"' EXIT
+  make clean-all || return 1
+  unset GDRIVE_KB_ID
+  make bootstrap KB_HOST="$_E2E_KB_HOST" OLLAMA_HOST="$_E2E_OLLAMA_HOST" || return 1
+  ./scripts/e2e-restore-creds.sh "$stash" || return 1
+  # Pull the OCR vision model before preflight (preflight hard-fails on a missing
+  # OCR model when OCR_ENABLED=true). Pull only the OCR model, NOT full
+  # `make pull-models` (that `ollama rm`s + recreates GRAPHITI_MODEL, disrupting the
+  # base LLM). Honors OCR_ENABLED=false.
+  if [ "${OCR_ENABLED:-true}" = "true" ]; then
+    echo "==> pulling OCR vision model: ${OCR_MODEL:-deepseek-ocr}"
+    ollama pull "${OCR_MODEL:-deepseek-ocr}" || return 1
+  fi
+  make preflight || return 1
+  # Rebuild locally-built images whose code changed since the last run (clean-all
+  # wipes volumes/data, NOT images; `up -d` without --build reuses the existing
+  # image). api-gateway is stdlib-only (fast). markitdown-ocr is rebuilt (gated on
+  # OCR_ENABLED) so the at-scale run uses current OCR code.
+  docker compose build api-gateway || return 1
+  if [ "${OCR_ENABLED:-true}" = "true" ]; then
+    docker compose build markitdown-ocr || return 1
+  fi
+  make start || return 1
+  local h="$E2E_KB_HOST" i=0
+  until curl -sf "$h/health" >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -lt 60 ] || { echo "FAIL  isolated stack did not become healthy in 120s ($h/health)" >&2; return 1; }
+    sleep 2
+  done
+  echo "stack healthy ($h/health)"
+  make admin-signup || return 1
+  make api-keys || return 1
+  e2e_ephemeral_user || return 1
+  make projects-bootstrap || return 1
+  make rag-config || return 1
+  make gdrive-index-bootstrap || return 1
+  make gdrive-sync || return 1
+  echo "==> make ci (provision the clone .venv for the in-clone suite)"
+  make ci || return 1
+}
+
 # Create ONE ephemeral throwaway user for this clone env (admin key -> gateway
 # POST /admin/users via scripts/e2e_user.py) and write its key as KB_API_KEY into
 # the clone's .env.local. Tests read KB_API_KEY via load_env (tests/lib.sh
@@ -321,7 +398,7 @@ e2e_ephemeral_user() {
   echo "==> create ephemeral test user $email (admin key -> gateway POST /admin/users)"
   # The POST + JSON parse + kb_api_key extract + .env.local atomic upsert run in
   # Python (scripts/e2e_user.py), NOT a shell capture of `make users-create`:
-  # under `make test-e2e-iso` a recursive make prints "Entering/Leaving
+  # under `make test-iso-*` a recursive make prints "Entering/Leaving
   # directory" --print-directory banners to stdout, which a `$(make users-create
   # ...)` capture pulls into the JSON and breaks json.load at char 0. Shell only
   # sources the clone .env/.env.local (so Python sees KB_HOST +
@@ -427,21 +504,6 @@ e2e_down() {
   else
     clone="$E2E_SRC/.test-$name"
     _e2e_rm_clone "$clone"
-  fi
-  return 0
-}
-
-# test-e2e-iso success path: KEEP=1 leaves the stack RUNNING + clone in place
-# (debug/re-use); KEEP=0 STOPS docker but KEEPS the clone (proliferation -- a
-# green run's clone may hold commits). Reads E2E_STAMP (in-process; set by the
-# just-run e2e_isolate). Returns 0 either way.
-e2e_keep_or_down() {
-  local name="$1" keep="${2:-0}" stamp="${E2E_STAMP:-}"
-  if [ "$keep" = "1" ]; then
-    echo "==> PASS (stack left running on port ${E2E_PORT:-?}, project $COMPOSE_PROJECT_NAME; clone at $E2E_CLONE; stop+keep: make clean-test NAME=$name STAMP=$stamp; flush all: make clean-tests)"
-  else
-    e2e_stop_docker "$name" "$stamp"
-    echo "==> PASS (docker stopped, clone kept at $E2E_CLONE; remove with: make clean-test NAME=$name STAMP=$stamp; flush all: make clean-tests)"
   fi
   return 0
 }

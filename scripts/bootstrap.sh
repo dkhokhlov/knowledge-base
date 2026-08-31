@@ -157,10 +157,11 @@ fi
 # (overwrites any prior .env value). Pass KB_HOST_PORT=... as a make-tunable
 # ONLY for the tunnel case (client URL port != bind port, e.g.
 # KB_HOST=http://tunnel:443 KB_HOST_PORT=3000); an explicit tunable wins over
-# the derivation. The isolated e2e (test-e2e-iso) pins KB_HOST (+ OLLAMA_HOST)
-# the same way so they survive test-e2e's internal clean-all (rm .env) ->
-# bootstrap; it no longer passes KB_HOST_PORT (the port is derived from
-# KB_HOST=http://localhost:<e2e-port>).
+# the derivation. The iso tests (iso_env / iso_env_named in tests/conftest.py)
+# pin KB_HOST (+ OLLAMA_HOST) the same way so they survive the at-scale
+# provision's internal clean-all (rm .env) -> bootstrap; they no longer pass
+# KB_HOST_PORT (the port is derived from KB_HOST=http://localhost:<auto-picked
+# port>).
 #
 # Resolve KB_HOST: process env (shell/make-tunable) first, then a prior
 # persisted value in the existing .env (so a CLEAN-SHELL re-bootstrap -- no

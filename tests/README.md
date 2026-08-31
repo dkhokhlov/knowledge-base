@@ -30,10 +30,13 @@ groups are `unit`, `integration`, `iso`.
 | no stack | `test_gateway_unit`, `test_kb_check`, `test_offset_aware_chunking`, `test_output_json` | `unit` | stdlib UTs |
 | live (RO) | `test_01`, `test_02`, `test_03` | `integration` | read-only; verify the LIVE deployment's infra (Neo4j not host-published, pg_isready on live kb-postgres) |
 | shared-iso | `test_04`, `05`, `06`, `07`, `10`, `11`, `13`, `14`, `15` | `iso` + `shared` | contaminate but self-clean (traps delete temp KBs/files) → share ONE clean-prod stack |
-| own-iso (named) | `test_08_e2e`, `test_09_gdrive_index`, `test_12_kb_check`, `test_e2e_iso` | `iso` (+`long`) | destructive / heavy / no self-cleanup → each gets its own named clean-prod stack |
+| own-iso (named) | `test_08_e2e`, `test_09_gdrive_index`, `test_12_kb_check` | `iso` (+`long`) | destructive / heavy / no self-cleanup → each gets its own named clean-prod stack |
 
-`test_09` is currently `integration long` (runs in `make test-e2e-iso`'s clone + as
-`make test-long`); it migrates to own-iso (`iso long`) in a follow-up.
+`test_09_gdrive_index` is the comprehensive at-scale e2e (`iso long`): clean-all +
+image rebuild + preflight + real rclone gdrive corpus + in-clone suite + the full
+real-gdrive drain. Its `iso_env_named("gdrive", at_scale=True)` fixture provisions
+via `e2e_provision_at_scale` (the destructive variant); the shared/single iso tests
+use `e2e_provision` (clean-prod).
 
 ## Make targets
 
@@ -43,14 +46,20 @@ Leaf targets select by marker; aggregator targets compose the leaves.
 |---|---|---|
 | `make test` | `test-unit` + `test-live-RO` | `unit` + live-RO (`test_01/02/03`) |
 | `make test-unit` | `-m unit` | the python UTs |
-| `make test-live-RO` | `-m "integration and not long"` | live-RO (`test_01/02/03`) |
+| `make test-live-RO` | `-m "integration"` | live-RO (`test_01/02/03`) |
 | `make test-iso` | `test-iso-shared` + `test-iso-single` | all short iso (shared + single) |
 | `make test-iso-shared` | `-m "iso and shared"` | the 9 shared-iso tests (one session stack) |
 | `make test-iso-single` | `-m "iso and not long and not shared"` | the named own-iso short tests (`test_12`) |
-| `make test-long` | `test-iso-long` | long iso (`test_08` + `test_e2e_iso`) |
-| `make test-iso-long` | `-m "iso and long"` | long iso (`test_08` + `test_e2e_iso`) |
-| `make test-e2e-iso` | `scripts/test-e2e-iso.sh` | at-scale from-scratch (clean-all + re-provision + rclone + `test_09` drain) |
+| `make test-long` | `test-iso-long` | long iso (`test_08` + `test_09`) |
+| `make test-iso-long` | `-m "iso and long"` | long iso (`test_08` + `test_09`) |
 | `make test-output` | `python3 tests/test_output_json.py -v` | standalone JSON-schema UT (no stack) |
+
+`make test-long` (or `.venv/bin/python -m pytest -m "iso and long" -k
+test_09_gdrive_index -v`) is the entry for the at-scale `test_09` run. There is no
+separate at-scale target — `test_09` is `iso long`, selected by `make test-long`;
+the `iso_env_named(..., at_scale=True)` fixture owns the at-scale provision
+(clean-all + image rebuild + rclone), so no standalone self-isolating script is
+needed.
 
 `make test` needs the live stack up (`make start`). The iso targets self-isolate
 (never touch the live stack): the first `iso` test auto-provisions a clean-prod
@@ -60,8 +69,7 @@ selection with `python3 -m pytest -m <expr>`.
 ## Ports
 
 The iso fixtures **auto-pick a free host port** in `3011..3099`, skipping `3000`
-(live) and `3010` (`make test-e2e-iso`'s canonical port). No manual port
-assignment. `make test-e2e-iso` keeps `3010` (`E2E_PORT` override).
+(the live stack's Caddy). No manual port assignment.
 
 ## Layout
 
@@ -112,14 +120,13 @@ regenerate with `--out gdrive/.tests/chunkq`). test_13 runs it with
 | `test_06_gateway` | `tests/test_06_gateway.sh` | `iso shared` |
 | `test_07_admin_users` | `tests/test_07_admin_users.sh` | `iso shared` |
 | `test_08_e2e` | `tests/test_08_e2e.sh` | `iso long` |
-| `test_09_gdrive_index` | `tests/test_09_gdrive_index.sh` | `integration long` |
+| `test_09_gdrive_index` | `tests/test_09_gdrive_index.sh` | `iso long` |
 | `test_10_ocr_auth` | `tests/test_10_ocr_auth.sh` | `iso shared` |
 | `test_11_gdrive_index_fixture` | `tests/test_11_gdrive_index_fixture.sh` | `iso shared` |
 | `test_13_chunk_quality` | `tests/test_13_chunk_quality.sh` | `iso shared` |
 | `test_14_rag_config` | `tests/test_14_rag_config.sh` | `iso shared` |
 | `test_15_retrieve` | `tests/test_15_retrieve.sh` | `iso shared` |
 | `test_12_kb_check` | `tests/test_12_kb_check.sh` | `iso` |
-| `test_e2e_iso` | `scripts/test-e2e-iso.sh` | `iso long` |
 | (native UT) | `test_gateway_unit.py` | `unit` |
 | (native UT) | `test_kb_check.py` | `unit` |
 | (native UT) | `test_offset_aware_chunking.py` | `unit` |
@@ -171,10 +178,14 @@ the marker on the test in-file.
      ```
      The `<suffix>` is the clone subdir name (operator traceability:
      `.test-<suffix>/<stamp>/`). See `test_08_e2e.sh` / `test_12_kb_check.sh`.
+     For a comprehensive at-scale run (clean-all + image rebuild + real rclone
+     gdrive corpus), pass `at_scale=True` (the fixture then provisions via
+     `e2e_provision_at_scale` instead of `e2e_provision`); see
+     `test_09_gdrive_index`.
    - **long-running** (minutes: real-corpus drain, at-scale) → ALSO stack
      `@pytest.mark.long` on the runner function.
 2. No port to pick: the iso fixtures auto-pick a free port in `3011..3099`
-   (skip `3000` live + `3010` `test-e2e-iso`).
+   (skip `3000` live).
 3. Run it: `python3 -m pytest -m <marker>` or the matching make target.
 
 ## Module names (no `owui` clash)

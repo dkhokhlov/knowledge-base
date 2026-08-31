@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pytest test runner: one test function per bash test script.
 
-Each function wraps one tests/test_*.sh (or scripts/test-e2e-iso.sh) and runs it
+Each function wraps one tests/test_*.sh and runs it
 via a fixture (tests/conftest.py). A test passes iff its script exits 0 (lib.sh
 ``finish`` exits non-zero on FAIL>0; ``require_stack_up`` exits 2 when the stack
 is down). The script inherits this process's fds (live stack) OR runs in a clean
@@ -77,11 +77,11 @@ def test_08_e2e(iso_env_named):
     """Isolated e2e: api-gateway Graphiti agent surface (whoami/status/groups/add/retrieve/episodes/delete-edge/delete-episode/forget) against a named throwaway stack (fixture owns isolate+provision+teardown). LONG."""
     iso_env_named("test08")("tests/test_08_e2e.sh")
 
-@pytest.mark.integration
+@pytest.mark.iso
 @pytest.mark.long
-def test_09_gdrive_index(run_sh):
-    """Full real-gdrive drain via api-gateway POST /index + poll GET /status, then failure audit + deterministic semantic search. LONG."""
-    run_sh("tests/test_09_gdrive_index.sh")
+def test_09_gdrive_index(iso_env_named):
+    """Comprehensive at-scale e2e (iso long): clean-all + image rebuild + preflight + real rclone gdrive corpus + in-clone suite (unit + live-RO 01/02/03) + the full real-gdrive drain (POST /index + poll GET /status + failure audit + semantic search) on a named throwaway stack (fixture owns isolate + at-scale provision + teardown). LONG."""
+    iso_env_named("gdrive", at_scale=True)("tests/test_09_gdrive_index.sh")
 
 @pytest.mark.iso
 @pytest.mark.shared
@@ -117,9 +117,3 @@ def test_15_retrieve(iso_env):
 def test_12_kb_check(iso_env_named):
     """Isolated e2e for make kb-check on pgvector: named throwaway stack (fixture owns isolate+provision+teardown), create a reproducible leak class, detect -> PURGE=1 export+purge -> re-audit 0."""
     iso_env_named("kbcheck")("tests/test_12_kb_check.sh")
-
-@pytest.mark.iso
-@pytest.mark.long
-def test_e2e_iso(run_sh):
-    """Isolated at-scale e2e: clone the repo to a throwaway .test-e2e/ under a separate compose project (kb-e2e) and run the destructive e2e (wipe + re-provision + rclone + full suite + test_09 drain) there. LONG."""
-    run_sh("scripts/test-e2e-iso.sh")

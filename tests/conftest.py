@@ -24,6 +24,7 @@ Three concerns:
 """
 
 import os
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -171,7 +172,7 @@ def _test_passed(request):
     return bool(rep and rep.passed)
 
 
-def _setup_iso_env(name, ocr, request, remove_fn):
+def _setup_iso_env(name, ocr, request, remove_fn, at_scale=False):
     """Shared isolate -> finalizer -> provision -> _run for both the named
     (function) and shared (session) iso fixtures.
 
@@ -181,9 +182,15 @@ def _setup_iso_env(name, ocr, request, remove_fn):
              and registers a finalizer. (Inherits the operator env for
              OLLAMA_HOST resolution; e2e_isolate strips BASH_ENV/KB_HOST/
              KB_API_KEY before the clone sees them.)
-    call B -- ``e2e_provision`` in the clone with the clean child env, output
-             streams live. A failure here still hits the finalizer (registered
-             after A), so no half-up stack is stranded.
+    call B -- ``e2e_provision`` (clean-prod) or, when ``at_scale``,
+             ``e2e_provision_at_scale`` (destructive: clean-all + image rebuild +
+             preflight + real rclone gdrive corpus + make ci) in the clone with
+             the clean child env, output streams live. When ``at_scale``, the
+             fixture first copies the source repo's gdrive-exclude.conf into the
+             clone (the provision bash has no E2E_SRC to reach it; clean-all does
+             not touch clone-root files, so the copy survives to gdrive-sync). A
+             failure here still hits the finalizer (registered after A), so no
+             half-up stack is stranded.
 
     The body runs in a CLEAN child env (only the iso vars + PATH/HOME/LANG/TERM;
     no operator BASH_ENV, no live KB_HOST/KB_API_KEY) so the operator's profile
@@ -202,8 +209,24 @@ def _setup_iso_env(name, ocr, request, remove_fn):
     request.addfinalizer(
         lambda: _iso_teardown(captured["E2E_NAME"], captured["E2E_STAMP"],
                               remove=remove_fn()))
+    if at_scale:
+        # gdrive-exclude.conf (gitignored PII: Drive file paths) is read by
+        # `make gdrive-sync` so rclone does not abort on non-downloadable paths.
+        # The provision bash has no E2E_SRC (_child_env/_ISO_VARS do not carry
+        # it), so the fixture -- which has REPO = the source repo root -- copies
+        # it into the clone now, before the provision's `make clean-all`. clean-all
+        # removes .env/.env.local/./data/./.gdrive-backup, NOT clone-root files, so
+        # the copy survives. Fail loud if it is missing (no fallback -- rclone
+        # would abort anyway). It is discarded with the throwaway clone (never
+        # committed, never leaves the host).
+        src = REPO / "gdrive-exclude.conf"
+        if not src.is_file():
+            pytest.fail("gdrive-exclude.conf missing at %s -- required for the "
+                        "at-scale gdrive rclone" % src, pytrace=False)
+        shutil.copy2(src, Path(captured["E2E_CLONE"]) / "gdrive-exclude.conf")
     prov = subprocess.run(
-        ["bash", "-c", ". scripts/lib-e2e-env.sh; e2e_provision"],
+        ["bash", "-c", ". scripts/lib-e2e-env.sh; %s" %
+            ("e2e_provision_at_scale" if at_scale else "e2e_provision")],
         cwd=captured["E2E_CLONE"], env=_child_env(captured))
     if prov.returncode != 0:
         pytest.fail("%s provision failed" % name, pytrace=False)
@@ -227,15 +250,17 @@ def iso_env_named(request):
     The ``suffix`` IS the clone subdir name (operator traceability:
     ``.test-<suffix>/<stamp>/``). The iso env is clean / prod-exact: the only
     diffs from prod are ``KB_HOST`` (the auto-picked port) + the ephemeral
-    ``KB_API_KEY`` (file-based in the clone .env.local). No env hacks.
+    ``KB_API_KEY`` (file-based in the clone .env.local). No env hacks. Pass
+    ``at_scale=True`` for the comprehensive at-scale provision (clean-all + image
+    rebuild + real rclone gdrive corpus; used by test_09_gdrive_index).
 
     Setup is split (isolate -> finalizer -> provision) so a provision failure
     does not strand a half-up stack. Teardown branches on the test's own
     outcome (passed -> e2e_down remove the clone; failed -> e2e_stop_docker
     keep it for ``make clean-tests`` to flush)."""
-    def _make(suffix, ocr=None):
+    def _make(suffix, ocr=None, at_scale=False):
         return _setup_iso_env(suffix, ocr, request,
-                              lambda: _test_passed(request))
+                              lambda: _test_passed(request), at_scale=at_scale)
     return _make
 
 
