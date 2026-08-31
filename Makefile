@@ -247,7 +247,7 @@ kb-finalize: ## Finalize a gdrive drain: rebuild the pgvector ivfflat vector + G
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@./scripts/kb-finalize.sh
 
-gdrive-sync-finalize: ## Wait for the in-flight gdrive drain to terminate (poll GET /status to pending+processing=0, timeout GDRIVE_TEST_WAIT default 2400s) then finalize (REINDEX ivfflat + GIN FTS). Run AFTER `make gdrive-sync` (which dispatches the async drain) — this is the "block until the KB is searchable" step. Fails loud if the drain does not terminate (do not REINDEX while inserts are in flight — that races the live index). pgvector only; no-op on Chroma/HNSW.
+gdrive-sync-finalize: gdrive-sync ## One-command full pipeline: dispatch the gdrive async drain (make gdrive-sync = rclone + POST /index), then wait for it to terminate (poll GET /status to pending+processing=0, timeout GDRIVE_TEST_WAIT default 2400s), then finalize (REINDEX ivfflat + GIN FTS) so the freshly-embedded vectors become queryable — the "block until the KB is searchable" command. Fails loud if the drain does not terminate (do not REINDEX while inserts are in flight — that races the live index). pgvector only; no-op on Chroma/HNSW. (gdrive-sync is .PHONY — re-dispatches the drain each invocation; do not run this while a drain is already in flight.)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@./scripts/kb-finalize.sh --wait
 

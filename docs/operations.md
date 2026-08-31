@@ -229,8 +229,8 @@ the vectors are written but — on pgvector/ivfflat — not yet queryable: ivffl
 folds post-build rows into its inverted lists only on `REINDEX`, and OWUI hybrid is
 vector-fetch→BM25 with no FTS fallback (vector=0 → hybrid=0). `make kb-finalize`
 runs that `REINDEX` (ivfflat vector + GIN FTS) once the drain is terminal;
-`make gdrive-sync-finalize` waits for `pending+processing=0` first, then finalizes
-(run it after `make gdrive-sync`). pgvector-only — Chroma/HNSW are incremental, so
+`make gdrive-sync-finalize` dispatches the drain (`make gdrive-sync`) then waits
+for `pending+processing=0` and finalizes in one command. pgvector-only — Chroma/HNSW are incremental, so
 it is a no-op there. Named "finalize" (not "reindex") because the fresh vectors
 were never queryable (a first publish, not a re-do) and to avoid collision with
 the gateway `reindex_all` (`POST /index?reindex_all=1` re-PROCESSES files — a
@@ -615,7 +615,7 @@ dependency is down.
 | `kb-public-read` | grant public read (`user:*`) on EVERY knowledge base + enable `sharing.public_knowledge` so all authenticated users read all KBs (admin). One-time backfill for an already-running stack; re-run as a safety net for KBs created outside the flows (e.g. via the OWUI UI). Idempotent |
 | `gdrive-status` | GET `/status` (api-gateway), pretty JSON (indent=2): `indexed_files` (completed only; `len == indexed_count`), `pending_files`, `failed_files` (last list), then `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`. Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
 | `kb-finalize` | finalize a gdrive drain: `REINDEX INDEX idx_document_chunk_vector` (pgvector ivfflat) + `idx_document_chunk_text_search` (GIN FTS) so freshly-embedded vectors become queryable. Run AFTER the drain is terminal (or use `gdrive-sync-finalize` to wait). Logs each REINDEX duration. pgvector-only — Chroma/HNSW are incremental, so it exits 0 (no-op) there. Named "finalize" not "reindex": the fresh vectors were never queryable (ivfflat folds post-build rows in only on `REINDEX`; OWUI hybrid = vector-fetch→BM25, no FTS fallback → vector=0 → hybrid=0), and to avoid collision with the gateway `reindex_all` (which re-PROCESSES files) |
-| `gdrive-sync-finalize` | wait for the in-flight gdrive drain to terminate (poll GET `/status` to `pending+processing=0`, timeout `GDRIVE_TEST_WAIT` default 2400s) then finalize (`REINDEX` ivfflat + GIN FTS). Run AFTER `make gdrive-sync` (the "block until the KB is searchable" step). Fails loud if the drain does not terminate (do not `REINDEX` while inserts are in flight — that races the live index). pgvector-only; no-op on Chroma/HNSW |
+| `gdrive-sync-finalize` | one-command full pipeline: dispatch the gdrive async drain (`make gdrive-sync` = rclone + `POST /index`), then wait for it to terminate (poll GET `/status` to `pending+processing=0`, timeout `GDRIVE_TEST_WAIT` default 2400s), then finalize (`REINDEX` ivfflat + GIN FTS) — the "block until the KB is searchable" command. Fails loud if the drain does not terminate (do not `REINDEX` while inserts are in flight — that races the live index). `gdrive-sync` is `.PHONY` so the drain re-dispatches each invocation (do not run while a drain is already in flight). pgvector-only; no-op on Chroma/HNSW |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
 | `clean-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + backup-and-delete `.env` + `.env.local` (dated backup under `./.config-backup/<TS>/`; preserves `graphiti/config.yaml`, `caddy/Caddyfile`, and the `./gdrive` mirror) |

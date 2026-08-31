@@ -28,13 +28,15 @@
 #
 # Two entry points (see Makefile):
 #   make kb-finalize            REINDEX only (assumes the drain is terminal).
-#   make gdrive-sync-finalize   --wait: poll GET /status until the drain is
-#                              terminal (pending+processing=0), then REINDEX.
-#                              Run after `make gdrive-sync` (which dispatches the
-#                              async drain). Times out after GDRIVE_TEST_WAIT
-#                              (default 2400s) if the drain never terminates;
-#                              fails loud (do not REINDEX while inserts are in
-#                              flight — that races the live index).
+#   make gdrive-sync-finalize   gdrive-sync prereq (dispatches the async drain),
+#                              then --wait: poll GET /status until the drain is
+#                              terminal (pending+processing=0 AND
+#                              completed+failed>=source_count), then REINDEX.
+#                              One command = dispatch + wait + finalize.
+#                              Times out after GDRIVE_TEST_WAIT (default 2400s) if
+#                              the drain never terminates; fails loud (do not
+#                              REINDEX while inserts are in flight — that races
+#                              the live index).
 #
 # Preconditions:
 #   - Stack running + the gdrive drain dispatched (make gdrive-sync) for --wait.
@@ -86,18 +88,47 @@ fi
 : "${PGVECTOR_DB:?FAIL  PGVECTOR_DB not set in .env (run: make bootstrap)}"
 PG_CTN="${POSTGRES_CONTAINER:-kb-postgres}"
 
-# --- --wait: poll GET /status until the drain is terminal (pending+processing=0)
+# --- --wait: poll GET /status until the drain is terminal ---------------------
+# Terminal = pending+processing == 0 AND completed+failed >= source_count (every
+# uploaded file reached a terminal state). The source_count guard is load-bearing:
+# a /status error (curl fail / 401 / bad JSON) falls back to all-zero counts, for
+# which pending+processing == 0 BUT accounted(0) < source_count(N>0) -> does NOT
+# break -> keeps polling -> times out failing loud. Without it a transient /status
+# error would break immediately and REINDEX while the drain is still in flight (the
+# exact race this tool exists to prevent). Mirrors tests/test_09_gdrive_index.sh;
+# src_count is read from /status (the gateway's authoritative source walk) instead
+# of a local `find`, so this stays allowlist-agnostic.
 if [ "$WAIT" = "1" ]; then
   : "${KB_HOST:?FAIL  KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}"
   : "${GDRIVE_KB_ID:?FAIL  GDRIVE_KB_ID not set in .env.local (run: make gdrive-index-bootstrap)}"
   : "${OPENWEBUI_ADMIN_API_KEY:?FAIL  OPENWEBUI_ADMIN_API_KEY not set in .env.local (run: make api-keys)}"
   wait_s="${GDRIVE_TEST_WAIT:-2400}"
+  status_url="${KB_HOST}/status?source=gdrive&kb_id=${GDRIVE_KB_ID}&json=1"
+  adm=(-H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}")
+
+  # source_count: the drain's reference set. Read ONCE before polling (the source
+  # dir is stable after `make gdrive-sync`, so this is a constant for the drain).
+  # Fail loud if unreadable -- do NOT finalize without a verified reference: an
+  # unknown source_count would let the all-zero error fallback break the loop and
+  # REINDEX mid-drain. -1 = unreadable (curl fail / bad JSON / missing key).
+  src_count=$(curl -sS "$status_url" "${adm[@]}" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get("source_count", -1))
+except Exception:
+    print("-1")
+' 2>/dev/null || echo "-1")
+  if [ "${src_count}" -lt 0 ] 2>/dev/null; then
+    echo "FAIL  could not read source_count from /status (got '${src_count}'); refusing to finalize." >&2
+    echo "       do not REINDEX without a verified terminal state; check KB_HOST / admin key / gateway health." >&2
+    exit 1
+  fi
+
   deadline=$(( $(date +%s) + wait_s ))
   completed=0; pending=0; processing=0; failed=0
   while :; do
-    read -r completed pending processing failed < <(curl -sS \
-      "${KB_HOST}/status?source=gdrive&kb_id=${GDRIVE_KB_ID}&json=1" \
-      -H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}" 2>/dev/null \
+    read -r completed pending processing failed < <(curl -sS "$status_url" "${adm[@]}" 2>/dev/null \
       | python3 -c '
 import sys, json
 try:
@@ -106,20 +137,24 @@ try:
 except Exception:
     print("0 0 0 0")
 ' 2>/dev/null || echo "0 0 0 0") || true
-    [ "$(( pending + processing ))" = "0" ] && break
+    in_flight=$(( pending + processing ))
+    accounted=$(( completed + failed ))
+    if [ "$in_flight" = "0" ] && [ "$accounted" -ge "$src_count" ]; then break; fi
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 10
   done
-  if [ "$(( pending + processing ))" != "0" ]; then
-    printf 'FAIL  drain did not terminate after %ss: completed=%s failed=%s pending=%s processing=%s\n' \
-      "$wait_s" "$completed" "$failed" "$pending" "$processing" >&2
-    echo '       do not REINDEX while inserts are in flight; check: docker logs kb-openwebui / kb-markitdown-ocr' >&2
+  in_flight=$(( pending + processing ))
+  accounted=$(( completed + failed ))
+  if [ "$in_flight" != "0" ] || [ "$accounted" -lt "$src_count" ]; then
+    printf 'FAIL  drain did not terminate after %ss: completed=%s failed=%s pending=%s processing=%s source=%s (accounted=%s)\n' \
+      "$wait_s" "$completed" "$failed" "$pending" "$processing" "$src_count" "$accounted" >&2
+    echo '       do not REINDEX while inserts are in flight or /status is unreadable; check: docker logs kb-openwebui / kb-markitdown-ocr' >&2
     exit 1
   fi
-  printf '==> drain terminal: completed=%s failed=%s pending=%s processing=%s\n' \
-    "$completed" "$failed" "$pending" "$processing"
-  [ "$(( completed + failed ))" -gt 0 ] \
-    || echo 'WARN  no files drained (completed+failed=0) — REINDEXing anyway (idempotent, harmless)'
+  printf '==> drain terminal: completed=%s failed=%s pending=%s processing=%s source=%s\n' \
+    "$completed" "$failed" "$pending" "$processing" "$src_count"
+  [ "$src_count" -gt 0 ] \
+    || echo 'WARN  source_count=0 (empty corpus) — REINDEXing anyway (idempotent, harmless)'
 fi
 
 # --- REINDEX ivfflat vector + GIN FTS (the finalize step) ---------------------
