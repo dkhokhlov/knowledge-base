@@ -43,6 +43,7 @@
 #   e2e_isolate <NAME> [PORT] [OCR_ENABLED]   # stamped clone + isolation env + bootstrap
 #                                              # (PORT omitted -> auto-pick a free port)
 #   e2e_provision                 # make start + wait healthy + admin-signup + api-keys
+#                                 # + projects-bootstrap + rag-config (prod-exact) + ephemeral user
 #   e2e_stop_docker <NAME> <STAMP> # stop+remove docker, KEEP the clone (success path)
 #   e2e_down <NAME> [STAMP]        # stop docker + remove the clone (quick tests' EXIT
 #                                 # trap, make clean-test; latest stamp if no STAMP)
@@ -276,6 +277,16 @@ e2e_provision() {
   echo "stack healthy ($h/health)"
   make admin-signup || return 1
   make api-keys || return 1
+  # Match `make provision` steps 6-7 so the iso env is prod-exact (the ONLY diffs
+  # from prod are KB_HOST + the ephemeral KB_API_KEY): projects-bootstrap enables
+  # workspace.knowledge + sharing.public_knowledge (test_05 user-key KB create
+  # 401s without it), rag-config sets the strict-grounding RAG template + syncs
+  # rag.ollama.base_url. Both hit the OWUI admin API via Caddy at KB_HOST (not
+  # the api-gateway), so the stack-healthy wait above covers them. gdrive-index-
+  # bootstrap is deliberately excluded: it needs PII rclone creds absent from the
+  # clone, and the shared tests use synthetic fixtures (not the gdrive KB).
+  make projects-bootstrap || return 1
+  make rag-config || return 1
   e2e_ephemeral_user || return 1
 }
 
