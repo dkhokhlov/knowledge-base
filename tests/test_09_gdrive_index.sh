@@ -25,12 +25,20 @@
 # content, OCR timeout) are genuine source-file issues: surfaced as a notice,
 # not a hard fail (re-run /index to re-trigger them).
 #
-# Deterministic semantic search: mine a 5-word content PHRASE from a COMPLETED
-# file (via /api/v1/files/{id}/data/content) and query the KB collection for
-# >=1 hit. A completed file has vectors, so a phrase from its own content must
-# retrieve a document. The filename stem is NOT used: it is non-deterministic +
-# often ubiquitous corpus terms -> hybrid ~0 IDF -> 0 hits on a healthy index.
-# The phrase is corpus-independent (mined at runtime, no hardcoded terms).
+# Deterministic semantic search: prove the drained vectors are queryable. Two
+# parts, each fixing a distinct failure mode:
+#   1. REINDEX ivfflat after the drain (the step above). ivfflat does not fold
+#      post-build inserts into its lists until REINDEX, so a fresh bulk drain's
+#      vectors are invisible to vector search. OWUI hybrid = vector-fetch ->
+#      BM25 rerank (no FTS fallback), so vector=0 -> hybrid=0. This was the real
+#      cause of a prior 0-hits (NOT query formulation): /status showed completed
+#      but the index was not refreshed.
+#   2. Mine a 5-word content PHRASE (not the filename stem) to query the KB
+#      collection for >=1 hit. The stem is a separate, latent fragility: it is
+#      non-deterministic (first-completed file) and often ubiquitous corpus
+#      terms -> hybrid ~0 IDF -> 0 hits on a HEALTHY, refreshed index. A content
+#      phrase is rare across any corpus -> retrieves reliably. Corpus-
+#      independent: mined at runtime, no hardcoded terms.
 #
 # /index is idempotent (re-run reports unmodified + re-triggers any failed).
 #
@@ -224,18 +232,59 @@ else
   exit 1
 fi
 
+# --- REINDEX after the bulk drain (refresh ivfflat vector + GIN FTS) ----------
+# The gdrive drain bulk-inserted rows AFTER these indexes were built.
+#   - ivfflat (idx_document_chunk_vector): builds its inverted lists at CREATE
+#     INDEX time and folds post-build rows in only on REINDEX, so the freshly
+#     drained vectors are invisible to vector search until now. OWUI hybrid is
+#     vector-fetch -> BM25 rerank (no independent FTS fallback), so vector=0 ->
+#     hybrid=0. This was the real cause of a prior 0-hits: /status showed
+#     completed (vectors written) but the index was not refreshed.
+#   - GIN FTS (idx_document_chunk_text_search, to_tsvector('simple', text)): GIN
+#     is incremental (queryable without REINDEX) but is REINDEXed too to compact
+#     it after the bulk load + remove FTS-index state as a variable.
+# This mirrors the manual REINDEX done on the live stack (Phase-1). Run after
+# /status is terminal (all vectors written), before the semantic search. Log
+# each duration (capacity-planning data for the at-scale corpus). POSTGRES_-
+# CONTAINER is iso-fixture-provided; :? (not :- kb-postgres) so a missing var
+# fails loud instead of touching the LIVE stack.
+section "REINDEX after bulk drain (ivfflat vector + GIN FTS)"
+PG_CTN="${POSTGRES_CONTAINER:?POSTGRES_CONTAINER not set (iso fixture must provide it)}"
+reindex_one() {  # echo "<seconds> <rc>" for REINDEX INDEX $1
+  local idx="$1" t0 t1 rc
+  t0=$(date +%s)
+  docker exec "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" \
+    -v ON_ERROR_STOP=1 -c "REINDEX INDEX $idx" >/dev/null 2>&1
+  rc=$?
+  t1=$(date +%s)
+  echo "$((t1 - t0)) $rc"
+}
+read -r vec_s vec_rc < <(reindex_one idx_document_chunk_vector)
+if [ "${vec_rc:-1}" -ne 0 ]; then
+  fail "REINDEX idx_document_chunk_vector failed (rc=${vec_rc}, postgres=${PG_CTN})"
+  finish
+  exit 1
+fi
+read -r fts_s fts_rc < <(reindex_one idx_document_chunk_text_search)
+if [ "${fts_rc:-1}" -ne 0 ]; then
+  fail "REINDEX idx_document_chunk_text_search failed (rc=${fts_rc}, postgres=${PG_CTN})"
+  finish
+  exit 1
+fi
+pass "REINDEX done: ivfflat vector ${vec_s}s + GIN FTS ${fts_s}s (drained vectors now queryable)"
+
 # --- deterministic semantic search (vectors written + searchable) ------------
-# Mine a multi-word PHRASE from a COMPLETED file's CONTENT (not its filename
-# stem) and require >=1 hit. A completed file has vectors, so a phrase from its
-# own content must retrieve a document. Querying the filename stem is flaky: the
-# stem is non-deterministic (first-completed file) + often ubiquitous corpus
-# terms (e.g. a generic title stem like "Introduction Overview") -> hybrid ~0 IDF
-# -> 0 hits on a healthy index
-# (hybrid-retrieve-query-form-sensitive). A 5-word sub-sentence phrase is the
-# lever: rare across ANY corpus by combinatorics, + within one chunk (the
-# offset-aware chunker respects sentence boundaries, and a phrase from the first
-# sentences sits at the content start = chunk 0 -> no boundary straddle).
-# Corpus-independent: no domain-specific token shape, no hardcoded terms. Iterate
+# The REINDEX above made the drained vectors queryable (the real 0-hits fix).
+# This step mines a multi-word PHRASE from a COMPLETED file's CONTENT (not its
+# filename stem) and requires >=1 hit -- a query-robustness measure, not the
+# index fix. The filename stem is a latent fragility: non-deterministic (first-
+# completed file) + often ubiquitous corpus terms (e.g. a generic title stem like
+# "Introduction Overview") -> hybrid ~0 IDF -> 0 hits on a HEALTHY, refreshed
+# index (hybrid-retrieve-query-form-sensitive). A 5-word sub-sentence phrase is
+# rare across ANY corpus by combinatorics, + within one chunk (the offset-aware
+# chunker respects sentence boundaries, and a phrase from the first sentences
+# sits at the content start = chunk 0 -> no boundary straddle). Corpus-
+# independent: no domain-specific token shape, no hardcoded terms. Iterate
 # completed files until one yields a phrase (bounded; usually file 1).
 #
 # /status indexed_files[] is gdrive-KB-scoped but carries no file id (only
