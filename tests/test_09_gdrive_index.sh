@@ -25,10 +25,12 @@
 # content, OCR timeout) are genuine source-file issues: surfaced as a notice,
 # not a hard fail (re-run /index to re-trigger them).
 #
-# Deterministic semantic search: query the filename stem of the first COMPLETED
-# file against the KB collection and require >=1 hit. A completed file has
-# vectors, so its own stem (usually present in its content) must retrieve a
-# document. 0 hits on a completed file's stem means vectors are not searchable.
+# Deterministic semantic search: mine a 5-word content PHRASE from a COMPLETED
+# file (via /api/v1/files/{id}/data/content) and query the KB collection for
+# >=1 hit. A completed file has vectors, so a phrase from its own content must
+# retrieve a document. The filename stem is NOT used: it is non-deterministic +
+# often ubiquitous corpus terms -> hybrid ~0 IDF -> 0 hits on a healthy index.
+# The phrase is corpus-independent (mined at runtime, no hardcoded terms).
 #
 # /index is idempotent (re-run reports unmodified + re-triggers any failed).
 #
@@ -223,25 +225,70 @@ else
 fi
 
 # --- deterministic semantic search (vectors written + searchable) ------------
-# Query the filename stem of the first COMPLETED file against the KB collection
-# and require >=1 hit. A completed file has vectors, so its own stem (usually
-# present in its content) must retrieve a document. 0 hits on a completed
-# file's stem means vectors are not searchable (embedding/RAG config issue).
+# Mine a multi-word PHRASE from a COMPLETED file's CONTENT (not its filename
+# stem) and require >=1 hit. A completed file has vectors, so a phrase from its
+# own content must retrieve a document. Querying the filename stem is flaky: the
+# stem is non-deterministic (first-completed file) + often ubiquitous corpus
+# terms (e.g. a generic title stem like "Introduction Overview") -> hybrid ~0 IDF
+# -> 0 hits on a healthy index
+# (hybrid-retrieve-query-form-sensitive). A 5-word sub-sentence phrase is the
+# lever: rare across ANY corpus by combinatorics, + within one chunk (the
+# offset-aware chunker respects sentence boundaries, and a phrase from the first
+# sentences sits at the content start = chunk 0 -> no boundary straddle).
+# Corpus-independent: no domain-specific token shape, no hardcoded terms. Iterate
+# completed files until one yields a phrase (bounded; usually file 1).
+#
+# /status indexed_files[] is gdrive-KB-scoped but carries no file id (only
+# filename/status/size/error). /api/v1/files/ items carry the id + data.status
+# but are paginated 50/page. Iterate the files list (page 1 holds 50 completed
+# files -> enough to find one with a minable phrase), take each COMPLETED file's
+# id, fetch its content, and mine a phrase until one yields. In this at-scale
+# clone the only files are the gdrive KB's (the in-clone suite excludes every iso
+# upload test), so a completed file here is a gdrive-KB file with vectors in the
+# gdrive collection; the query targets collection_names=[GDRIVE_KB_ID] directly.
 section "semantic search over gdrive KB (deterministic)"
-q_stem=$(printf '%s' "$status_json" | python3 -c '
-import sys, json, re
+q_phrase=""
+src_fid=""
+page_json="$(curl -sS "$O/api/v1/files/?content=false&page=1" "${ADM[@]}" 2>/dev/null || true)"
+for fid in $(printf '%s' "$page_json" | python3 -c '
+import sys, json
 d = json.load(sys.stdin)
-for f in (d.get("indexed_files") or []):
-    if f.get("status") == "completed" and f.get("filename"):
-        stem = re.sub(r"[^A-Za-z0-9]+", " ", f["filename"].rsplit(".", 1)[0]).strip()
-        if stem:
-            print(stem); break
+for it in (d.get("items") or []):
+    if (it.get("data") or {}).get("status") == "completed" and it.get("id"):
+        print(it["id"])
+' 2>/dev/null); do
+  [ -n "$fid" ] || continue
+  tok=$(curl -s "$O/api/v1/files/${fid}/data/content" "${ADM[@]}" 2>/dev/null \
+    | python3 -c '
+import sys, json, re
+try:
+    txt = (json.load(sys.stdin) or {}).get("content") or ""
+except Exception:
+    txt = ""
+if not txt:
+    print(""); sys.exit(0)
+stop = {"the","a","an","in","on","of","and","to","is","are","for","with","or","as",
+        "at","by","be","this","that","it","was","were","from","its","their","which",
+        "not","but","has","have","had","will","can","may","we","you","they","he","she"}
+# A 5-word sub-sentence phrase (>= 3 substantive words: non-stop, len>=4): rare
+# across any corpus + within one chunk (sentence-bounded, near the content start).
+for sent in re.split(r"(?<=[.!?])\s+", txt):
+    ws = re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", sent)
+    if len(ws) < 6:
+        continue
+    for start in range(0, len(ws) - 4):
+        win = ws[start:start + 5]
+        if sum(1 for w in win if w.lower() not in stop and len(w) >= 4) >= 3:
+            print(" ".join(win)); sys.exit(0)
+print("")
 ' 2>/dev/null || true)
-if [ -z "$q_stem" ]; then
-  pass "SKIP semantic search: no completed file with a usable filename stem"
+  if [ -n "$tok" ]; then q_phrase="$tok"; src_fid="$fid"; break; fi
+done
+if [ -z "$q_phrase" ]; then
+  pass "SKIP semantic search: no completed file (page 1) has a usable content phrase"
 else
   hits=$(curl -s -X POST "$O/api/v1/retrieval/query/collection" "${RD[@]}" -H 'Content-Type: application/json' \
-    -d "{\"collection_names\":[\"${GDRIVE_KB_ID}\"],\"query\":$(python3 -c 'import sys,json;print(json.dumps(sys.argv[1]))' "$q_stem"),\"k\":4,\"hybrid\":true}" \
+    -d "{\"collection_names\":[\"${GDRIVE_KB_ID}\"],\"query\":$(python3 -c 'import sys,json;print(json.dumps(sys.argv[1]))' "$q_phrase"),\"k\":4,\"hybrid\":true}" \
     | python3 -c '
 import sys,json
 d=json.load(sys.stdin)
@@ -253,9 +300,9 @@ elif isinstance(d,dict):
 print(len(docs))
 ' 2>/dev/null || echo 0)
   if [ "${hits:-0}" -gt 0 ]; then
-    pass "search q=\"$q_stem\" -> ${hits} hit(s) (vectors searchable)"
+    pass "search q=\"$q_phrase\" (file ${src_fid}) -> ${hits} hit(s) (vectors searchable)"
   else
-    fail "search q=\"$q_stem\" -> 0 hits (completed file has vectors but none searchable — check embedding/RAG config)"
+    fail "search q=\"$q_phrase\" (file ${src_fid}) -> 0 hits (completed file has vectors but its content phrase retrieved none — check embedding/RAG config)"
     finish
     exit 1
   fi
