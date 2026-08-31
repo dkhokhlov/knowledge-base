@@ -22,9 +22,11 @@
 #
 # Proliferation: a run leaves docker STOPPED (GPU freed) but the clone KEPT at
 # .test-<NAME>/<stamp>/ -- a commit-in-clone-first workflow may hold unmerged
-# commits, so clones are NOT auto-removed. The host PORT is serial: a failed run
-# still holding E2E_PORT must be cleaned before a re-run on the same port (make
-# start failing on the bind is the clear signal). `make clean-test STAMP=<stamp>`
+# commits, so clones are NOT auto-removed. The host PORT auto-picks a free port
+# (3011..3099, skip 3000 + 3010) when the caller passes none; an explicit port override
+# is the caller's collision risk, and a failed run still holding it must be
+# cleaned before a re-run on that port (make start failing on the bind is the
+# clear signal). `make clean-test STAMP=<stamp>`
 # removes ONE run; `make clean-tests` is the manual hygiene flush (every stamp +
 # legacy un-stamped clones + orphan docker). The clone lives on disk (NOT /tmp
 # shmem -- the ./data + ./gdrive corpus are too large for tmpfs); gitignored
@@ -38,7 +40,8 @@
 # Usage (source this file, then call the functions):
 #   . scripts/lib-e2e-env.sh
 #   e2e_resolve_ollama            # sets OLLAMA_HOST (env > live .env > kb-graphiti)
-#   e2e_isolate <NAME> <PORT> [OCR_ENABLED]   # stamped clone + isolation env + bootstrap
+#   e2e_isolate <NAME> [PORT] [OCR_ENABLED]   # stamped clone + isolation env + bootstrap
+#                                              # (PORT omitted -> auto-pick a free port)
 #   e2e_provision                 # make start + wait healthy + admin-signup + api-keys
 #   e2e_stop_docker <NAME> <STAMP> # stop+remove docker, KEEP the clone (success path)
 #   e2e_down <NAME> [STAMP]        # stop docker + remove the clone (quick tests' EXIT
@@ -90,24 +93,55 @@ e2e_resolve_ollama() {
   export OLLAMA_HOST
 }
 
+# Pick a free host port in [lo..hi] (default 3011..3099) for an isolated stack.
+# Skips 3000 (the live stack's Caddy) and 3010 (test-e2e-iso's canonical port,
+# reserved so the auto-picker never grabs it while a standalone test-e2e-iso run
+# may bind it). Prints the port; returns 1 if none free. One Python invocation
+# scans the whole range (bind-test each port). A small TOCTOU gap is inherent --
+# the probe socket closes before `make start` binds the port in a separate
+# process -- so `make start` failing on the bind is still the clear signal; a
+# re-run picks a different free port. This is part of env setup (e2e_isolate),
+# run before the test body.
+_e2e_free_port() {
+  local lo="${1:-3011}" hi="${2:-3099}"
+  python3 - "$lo" "$hi" <<'PY'
+import socket, sys
+lo, hi = int(sys.argv[1]), int(sys.argv[2])
+SKIP = {3000, 3010}              # never the live stack; never test-e2e-iso's 3010
+for p in range(lo, hi + 1):
+    if p in SKIP:
+        continue
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("", p))
+    except OSError:
+        s.close(); continue
+    s.close(); print(p); sys.exit(0)
+sys.exit("FAIL  no free host port in %d..%d (3000 + 3010 skipped)" % (lo, hi))
+PY
+}
+
 # Clone the repo to .test-<NAME>/<stamp>/, set up the isolation env (stamped
 # compose project, generated container-rename override, OWUI_CONTAINER,
 # KB_HOST), unset the operator's shell profile leaks (BASH_ENV/KB_HOST -- see
 # the comment in test-e2e-iso.sh), and run `make bootstrap` (seed .env/.env.local
 # for the clone). The stamp makes the clone unique, so a leftover clone never
 # blocks a re-run. Does NOT start the stack -- the caller calls e2e_provision
-# (or its own destructive re-provision).
+# (or its own destructive re-provision). The host PORT auto-picks a free port
+# (_e2e_free_port, skip 3000 + 3010) when the caller passes none; an explicit port
+# (TEST08_PORT / KBCHECK_PORT / E2E_PORT) overrides and owns its collision risk.
 e2e_isolate() {
-  local name="$1" port="$2" ocr="${3:-}"
+  local name="$1" port="${2:-}" ocr="${3:-}"
+  [ -n "$port" ] || port="$(_e2e_free_port)" || return 1
   local kb_host="http://localhost:$port"
   local parent="$E2E_SRC/.test-$name"
   # Datetime-stamped clone + project: each run gets a unique .test-<name>/<stamp>/
   # clone and a kb-<name>-<stamp> compose project, so re-runs never clobber a
   # prior (possibly failed, commit-bearing) clone and never collide on container
-  # names. The host PORT stays serial -- a failed run still holding E2E_PORT
-  # must be cleaned (make clean-test STAMP=<stamp>) or the re-run uses a different
-  # E2E_PORT (make start failing on the port bind is the clear signal). Retry on
-  # a same-second collision (two runs started in the same second).
+  # names. The host PORT auto-picks a free port when none is passed (above); an
+  # explicit override is the caller's collision risk. A failed run still holding
+  # its port must be cleaned (make clean-test STAMP=<stamp>). Retry on a
+  # same-second collision (two runs started in the same second).
   local stamp clone
   stamp="$(date +%Y%m%d-%H%M%S)"; clone="$parent/$stamp"
   while [ -e "$clone" ]; do stamp="$(date +%Y%m%d-%H%M%S)"; clone="$parent/$stamp"; done

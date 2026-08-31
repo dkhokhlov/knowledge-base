@@ -1,99 +1,40 @@
 #!/usr/bin/env bash
-# Isolated e2e for the api-gateway Graphiti agent surface: drives
-# skills/claude/scripts/kb.py (memory subcommand) through every gateway endpoint the agent
-# surface exposes (whoami, status, groups, add, retrieve, episodes, delete-edge,
-# delete-episode, forget) against a THROWAWAY stack (separate compose project,
-# NOT the live kb-* stack).
+# Body-only e2e for the api-gateway Graphiti agent surface: drives
+# skills/claude/scripts/kb.py (memory subcommand) through every gateway endpoint
+# the agent surface exposes (whoami, status, groups, add, retrieve, episodes,
+# delete-edge, delete-episode, forget) against the NAMED throwaway stack
+# provisioned by the e2e_env_named("test08") fixture.
 #
 # Why isolated: the `forget` at the end deletes the agent's ENTIRE Graphiti
 # group. Against the live stack that destroys the live agent's facts memory.
 # Against a throwaway stack it only touches the throwaway agent's OWN freshly
-# created group: e2e_provision makes a fresh admin + agent account + the clone
-# has a fresh empty Neo4j, so the agent identity + its Graphiti group are
-# disposable. Isolation contains the destructive op to throwaway state.
+# created group: the fixture provisions a fresh admin + agent account + the
+# clone has a fresh empty Neo4j, so the agent identity + its Graphiti group are
+# disposable.
 #
-# Uses scripts/lib-e2e-env.sh (clone + compose project + container-rename override
-# + provision + teardown) so the live stack is never touched and the isolation
-# logic is NOT duplicated here. See lib-e2e-env.sh.
-#
-# e2e_provision (make start + admin-signup + api-keys) suffices for the /memory
-# endpoints -- no extra provisioning:
-#   - make start brings up api-gateway + graphiti + neo4j (compose.yml services).
-#   - /memory derives identity from the agent bearer key (the gateway calls OWUI
-#     /api/v1/auths/ with it) and needs NO admin key (api-gateway starts with a
-#     bare ${OPENWEBUI_ADMIN_API_KEY:-}, empty -- /memory does not use it), NO
-#     rag-config (that is OWUI RAG embedding config for /retrieval/query), NO
-#     projects-bootstrap (OWUI KB workspace perm), NO gdrive.
-#   - The shared EXTERNAL Ollama already has the extraction model (qwen2.5:14b,
-#     graphiti/config.yaml default) pulled by the live stack, so the async
-#     extraction after `add` works without a model pull.
-# So test_08 is a standalone isolated e2e (like test_12), NOT run by
-# test-e2e-iso (it would clone a nested stack + collide). Run it directly.
-#
-# Usage: bash tests/test_08_e2e.sh [TEST08_PORT=3030]
-#   TEST08_PORT - host port for the isolated Caddy (default 3030; must not
-#                collide with the live KB_HOST_PORT 3000, e2e 3010, or kbcheck 3020).
-#   TEST08_KEEP=1 - keep the stack + clone on FAILURE for inspection.
-# Requires: OLLAMA_HOST resolvable (shell env, live .env, or live stack up) and
-# the locally-built open-webui overlay image present.
+# The fixture (tests/conftest.py e2e_env_named) owns e2e_isolate + e2e_provision
+# + teardown; this script is the BODY ONLY. It runs with cwd=clone in a CLEAN
+# child env (only the iso vars + PATH/HOME/LANG/TERM; no operator BASH_ENV,
+# no live KB_HOST/KB_API_KEY), so load_env reads the clone .env/.env.local
+# (the ephemeral user key). e2e_provision (make start + admin-signup + api-keys
+# + e2e_ephemeral_user) suffices for the /memory endpoints -- no rag-config,
+# no projects-bootstrap, no gdrive. The shared EXTERNAL Ollama already has the
+# extraction model (qwen2.5:14b) pulled by the live stack, so the async
+# extraction after `add` works without a model pull.
 set -u
 
-PORT="${TEST08_PORT:-3030}"
-NAME="test08"
-
-# Source the reusable isolation lib (sets E2E_SRC + the e2e_* functions).
-# ORDER MATTERS: lib.sh (next) does `cd "$KB_ROOT"` at SOURCE time, where
-# KB_ROOT resolves from BASH_SOURCE to the LIVE repo (this script is invoked
-# from there). e2e_isolate below then cds INTO the clone. load_env (called after
-# e2e_isolate) reads ./.env from the clone cwd. Swapping these two source lines
-# would point load_env + every `make` at the live tree -- keep lib-e2e-env.sh before
-# lib.sh. (Same ordering as test_12_kb_check.sh.)
-. "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib-e2e-env.sh"
-
 # Source the test helpers (pass/fail/section/finish) for consistent output.
+# lib.sh does `cd "$KB_ROOT"` at SOURCE time, where KB_ROOT resolves from
+# BASH_SOURCE to the CLONE root (this script runs with cwd=clone). load_env
+# (called below) reads ./.env + ./.env.local relative to cwd=$E2E_CLONE.
 . "$(dirname "$0")/lib.sh"
 
-ISOLATED=0  # set 1 once e2e_isolate succeeds (we own the clone); the EXIT trap
-            # tears down ONLY a clone we created, never a pre-existing leftover.
-
-cleanup() {
-  local rc=$?
-  # Tear down the isolated stack + remove the clone -- but ONLY if e2e_isolate
-  # created it (ISOLATED=1). e2e_isolate stamps a unique clone per run, so it
-  # never refuses on a leftover; ISOLATED=1 means THIS run's clone exists and the
-  # trap cleans only it. The live stack is never touched (separate project +
-  # container names).
-  # TEST08_KEEP=1 keeps the stack + clone on FAILURE for inspection (mirrors
-  # test_12's KBCHECK_KEEP); default 0 always cleans up.
-  if [ "$ISOLATED" = "1" ]; then
-    if [ "$rc" -ne 0 ] && [ "${TEST08_KEEP:-0}" = "1" ]; then
-      echo "==> KEEP (TEST08_KEEP=1): stack left for inspection (port $PORT, project $COMPOSE_PROJECT_NAME, clone $E2E_CLONE); tear down with: make clean-test NAME=$NAME STAMP=$E2E_STAMP" >&2
-    else
-      e2e_down "$NAME" 2>/dev/null || true
-    fi
-  fi
-  exit "$rc"
-}
-trap cleanup EXIT
-
-# --- 1. isolate + provision a throwaway stack -------------------------------
-section "isolated stack (project kb-$NAME, port $PORT)"
-e2e_resolve_ollama || { fail "OLLAMA_HOST resolution failed"; finish; exit 1; }
-e2e_isolate "$NAME" "$PORT" || { fail "e2e_isolate failed"; finish; exit 1; }
-ISOLATED=1
-pass "clone + isolation env ready ($E2E_CLONE)"
-e2e_provision || { fail "e2e_provision failed (start/admin-signup/api-keys)"; finish; exit 1; }
-pass "isolated stack up + admin key + ephemeral user provisioned"
-
-# Load the clone's secrets (user key) the standard way (lib.sh load_env, but in
-# the clone cwd -- it reads ./.env + ./.env.local relative to cwd=$E2E_CLONE).
-# e2e_provision already waited for /health, so no separate require_stack_up.
 load_env
 require_env KB_API_KEY || { finish; exit 1; }
 
-# --- 2. agent-surface body (verbatim from the non-isolated original) --------
-# Drives skills/claude/scripts/kb.py (memory subcommand) through every gateway endpoint the
-# agent surface exposes:
+# --- agent-surface body -----------------------------------------------------
+# Drives skills/claude/scripts/kb.py (memory subcommand) through every gateway
+# endpoint the agent surface exposes:
 #   whoami, status, groups, add, retrieve, episodes, delete-edge,
 #   delete-episode, forget
 # Exercises delete-edge (via a fact uuid, since /memory/episodes does not
@@ -106,9 +47,9 @@ KB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shell env (no --env-file / --key / --base-url flags). load_env exports both
 # from the clone .env.local; inline `env` overrides only KB_HOST per invocation
 # (KB_API_KEY is inherited). KB = user key. KB_ROOT resolves to the CLONE root
-# here (cwd is the clone after e2e_isolate), so the clone's kb.py is the
-# code under test -- NOT the live repo's copy (clean-tree guard guarantees they
-# are at the same commit, but the clone is the code being verified).
+# here (cwd is the clone), so the clone's kb.py is the code under test -- NOT
+# the live repo's copy (clean-tree guard guarantees they are at the same
+# commit, but the clone is the code being verified).
 KB="env KB_HOST=${G} python3 ${KB_ROOT}/skills/claude/scripts/kb.py"
 
 # kbrun <cmd...>: print stdout; record a failure (and return 1) if the cmd

@@ -61,9 +61,9 @@ def test_07_admin_users(run_sh):
 
 @pytest.mark.e2e
 @pytest.mark.long
-def test_08_e2e(run_sh):
-    """Isolated e2e: api-gateway Graphiti agent surface (whoami/status/groups/add/retrieve/episodes/delete-edge/delete-episode/forget) against a throwaway stack. LONG."""
-    run_sh("tests/test_08_e2e.sh")
+def test_08_e2e(e2e_env_named):
+    """Isolated e2e: api-gateway Graphiti agent surface (whoami/status/groups/add/retrieve/episodes/delete-edge/delete-episode/forget) against a named throwaway stack (fixture owns isolate+provision+teardown). LONG."""
+    e2e_env_named("test08")("tests/test_08_e2e.sh")
 
 @pytest.mark.integration
 @pytest.mark.long
@@ -97,9 +97,9 @@ def test_15_retrieve(run_sh):
     run_sh("tests/test_15_retrieve.sh")
 
 @pytest.mark.e2e
-def test_12_kb_check(run_sh):
-    """Isolated e2e for make kb-check: throwaway stack, upload synthetic files, create the file-{id} leak, then detect -> PURGE=1 export+purge -> re-audit 0 orphans."""
-    run_sh("tests/test_12_kb_check.sh")
+def test_12_kb_check(e2e_env_named):
+    """Isolated e2e for make kb-check on pgvector: named throwaway stack (fixture owns isolate+provision+teardown), create a reproducible leak class, detect -> PURGE=1 export+purge -> re-audit 0."""
+    e2e_env_named("kbcheck")("tests/test_12_kb_check.sh")
 
 @pytest.mark.e2e
 @pytest.mark.long
