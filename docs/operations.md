@@ -223,7 +223,10 @@ gdrive-sync` runs rclone to sync `./gdrive` from the shared drives, then POSTs
 `/index` to api-gateway, which walks `./gdrive` read-only and drives OWUI's
 native sync/diff protocol to reconcile the tree into the KB. Indexing is
 **manual/on-demand only**: no daemon, no schedule, no hooks. `make gdrive-index`
-runs POST `/index` alone (no rclone); `make gdrive-status` reads GET `/status`. The
+runs POST `/index` alone (no rclone); `make gdrive-status` reads GET `/status`. `make
+gdrive-sync` fails fast before dispatch if a drain is already in flight
+(`pending+processing>0`; exempt `RETRY_PENDING=1`); `make gdrive-index` and raw `curl
+POST /index` are not guarded. The
 drain is async (OWUI background extract→embed→link), so after `make gdrive-sync`
 the vectors are written but — on pgvector/ivfflat — not yet queryable: ivfflat
 folds post-build rows into its inverted lists only on `REINDEX`, and OWUI hybrid is
@@ -615,7 +618,7 @@ dependency is down.
 | `kb-public-read` | grant public read (`user:*`) on EVERY knowledge base + enable `sharing.public_knowledge` so all authenticated users read all KBs (admin). One-time backfill for an already-running stack; re-run as a safety net for KBs created outside the flows (e.g. via the OWUI UI). Idempotent |
 | `gdrive-status` | GET `/status` (api-gateway), pretty JSON (indent=2): `indexed_files` (completed only; `len == indexed_count`), `pending_files`, `failed_files` (last list), then `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`. Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
 | `kb-finalize` | finalize a gdrive drain: `REINDEX INDEX idx_document_chunk_vector` (pgvector ivfflat) + `idx_document_chunk_text_search` (GIN FTS) so freshly-embedded vectors become queryable. Run AFTER the drain is terminal (or use `gdrive-sync-finalize` to wait). Logs each REINDEX duration. pgvector-only — Chroma/HNSW are incremental, so it exits 0 (no-op) there. Named "finalize" not "reindex": the fresh vectors were never queryable (ivfflat folds post-build rows in only on `REINDEX`; OWUI hybrid = vector-fetch→BM25, no FTS fallback → vector=0 → hybrid=0), and to avoid collision with the gateway `reindex_all` (which re-PROCESSES files) |
-| `gdrive-sync-finalize` | one-command full pipeline: dispatch the gdrive async drain (`make gdrive-sync` = rclone + `POST /index`), then wait for it to terminate (poll GET `/status` to `pending+processing=0`, timeout `GDRIVE_TEST_WAIT` default 2400s), then finalize (`REINDEX` ivfflat + GIN FTS) — the "block until the KB is searchable" command. Fails loud if the drain does not terminate (do not `REINDEX` while inserts are in flight — that races the live index). `gdrive-sync` is `.PHONY` so the drain re-dispatches each invocation (do not run while a drain is already in flight). pgvector-only; no-op on Chroma/HNSW |
+| `gdrive-sync-finalize` | one-command full pipeline: dispatch the gdrive async drain (`make gdrive-sync` = rclone + `POST /index`), then wait for it to terminate (poll GET `/status` to `pending+processing=0`, timeout `GDRIVE_TEST_WAIT` default 2400s), then finalize (`REINDEX` ivfflat + GIN FTS) — the "block until the KB is searchable" command. Fails loud if the drain does not terminate (do not `REINDEX` while inserts are in flight — that races the live index). `gdrive-sync` is `.PHONY` so the drain re-dispatches each invocation; `make gdrive-sync` fails fast if a drain is already in flight (`pending+processing>0`; exempt `RETRY_PENDING=1`) — `make gdrive-index` + raw `curl POST /index` are not guarded. pgvector-only; no-op on Chroma/HNSW |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
 | `clean-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + backup-and-delete `.env` + `.env.local` (dated backup under `./.config-backup/<TS>/`; preserves `graphiti/config.yaml`, `caddy/Caddyfile`, and the `./gdrive` mirror) |

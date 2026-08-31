@@ -679,6 +679,46 @@ if (( !dry_run )); then
             exit 1
         fi
         O="${KB_HOST%/}"
+        # --- in-flight drain guard (client-side): refuse to POST /index if a gdrive
+        #     drain is already running for this KB. A drain is in flight when OWUI
+        #     still has un-finished files (pending+processing > 0); re-dispatching
+        #     then races the per-file extract->embed->link (markitdown-ocr) + the
+        #     gateway sync/diff, and --index-all would delete the in-flight files.
+        #     --retry-pending is EXEMPT (it intentionally re-triggers pending files).
+        #     Strict + fail-closed: curl -f fails on HTTP 401/503/etc (a gateway
+        #     error body is valid JSON {"error":..} WITHOUT pending/processing, so a
+        #     plain .get(,0) would parse it as 0 -> unsafe proceed); --max-time bounds
+        #     the paginating scan; missing/invalid pending/processing -> refuse.
+        #     CLIENT-SIDE guard: bypassable by raw curl / make gdrive-index; has a
+        #     check-then-dispatch TOCTOU; the /status scan caps at 10k files
+        #     (owui.py page-200), so a pending file beyond that is missed.
+        if (( ! retry_pending )); then
+            if ! status_resp=$(curl -fsS --max-time 1200 \
+                    "${O}/status?source=gdrive&kb_id=${GDRIVE_KB_ID}&json=1" \
+                    -H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}" 2>/dev/null); then
+                emit "FAIL: could not read /status (gateway error/unreachable/timeout) for KB ${GDRIVE_KB_ID}; refusing to dispatch (cannot confirm no drain in flight). Check: ${O}/health ; make gdrive-status"
+                write_report_and_exit 1
+            fi
+            inflight=$(printf '%s' "$status_resp" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    p, q = d["pending"], d["processing"]   # KeyError if absent -> fail-closed
+    if not (isinstance(p, int) and isinstance(q, int) and p >= 0 and q >= 0):
+        raise ValueError
+    print(p + q)
+except Exception:
+    print("ERR")
+')
+            if [[ "$inflight" == "ERR" ]]; then
+                emit "FAIL: /status response for KB ${GDRIVE_KB_ID} missing/invalid pending or processing (got: ${status_resp:0:120}); refusing to dispatch (cannot confirm no drain in flight)"
+                write_report_and_exit 1
+            fi
+            if (( inflight > 0 )); then
+                emit "FAIL: a gdrive drain is in flight for KB ${GDRIVE_KB_ID} (pending+processing=${inflight}). Refusing to re-dispatch (would race the in-flight extract->embed->link). Wait for terminal: make gdrive-status ; make gdrive-sync-finalize (polls then REINDEXes). Or retry stalled pending: make gdrive-sync RETRY_PENDING=1"
+                write_report_and_exit 1
+            fi
+        fi
         idx_q="source=gdrive&kb_id=${GDRIVE_KB_ID}"
         (( index_all )) && idx_q="${idx_q}&reindex_all=1"
         (( retry_pending )) && idx_q="${idx_q}&retry_pending=1"

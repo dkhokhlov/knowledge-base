@@ -170,8 +170,8 @@ ocr-config: ## Re-assert OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-o
 	    || { echo "MISSING OCR_SERVICE_TOKEN in .env.local (run: make bootstrap with OCR_ENABLED=true)"; exit 1; }; \
 	  ./scripts/ocr-config.sh
 
-gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup), then POST /index to reconcile into the OWUI gdrive KB. Use --index-all for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
-	@./scripts/gdrive-sync $${SCOPE_PATH:+--path "$$SCOPE_PATH"}
+gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup), then POST /index to reconcile into the OWUI gdrive KB. Set INDEX_ALL=1 for a full re-index, RETRY_PENDING=1 to also retry stalled pending files. Fails fast if a drain is already in flight (pending+processing>0); exempt RETRY_PENDING=1. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
+	@./scripts/gdrive-sync $${SCOPE_PATH:+--path "$$SCOPE_PATH"} $${INDEX_ALL:+--index-all} $${RETRY_PENDING:+--retry-pending}
 
 gdrive-meta: ## Generate per-file .meta YAML sidecars (Drive description, [labels], file attributes, approval) next to each synced gdrive file (read-only; reuses rclone token; never prints credentials). Set FILE=<id> for one file, DRIVE=<name> for one drive, DRY_RUN=1 to preview. .meta sidecars are excluded from indexing and protected from sync deletion (gdrive-exclude.conf [*] *.meta).
 	@./scripts/gdrive-meta.py $${FILE:+--file "$$FILE"} $${DRIVE:+--drive "$$DRIVE"} $${DRY_RUN:+--dry-run}
@@ -247,7 +247,7 @@ kb-finalize: ## Finalize a gdrive drain: rebuild the pgvector ivfflat vector + G
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@./scripts/kb-finalize.sh
 
-gdrive-sync-finalize: gdrive-sync ## One-command full pipeline: dispatch the gdrive async drain (make gdrive-sync = rclone + POST /index), then wait for it to terminate (poll GET /status to pending+processing=0, timeout GDRIVE_TEST_WAIT default 2400s), then finalize (REINDEX ivfflat + GIN FTS) so the freshly-embedded vectors become queryable — the "block until the KB is searchable" command. Fails loud if the drain does not terminate (do not REINDEX while inserts are in flight — that races the live index). pgvector only; no-op on Chroma/HNSW. (gdrive-sync is .PHONY — re-dispatches the drain each invocation; do not run this while a drain is already in flight.)
+gdrive-sync-finalize: gdrive-sync ## One-command full pipeline: dispatch the gdrive async drain (make gdrive-sync = rclone + POST /index), then wait for it to terminate (poll GET /status to pending+processing=0, timeout GDRIVE_TEST_WAIT default 2400s), then finalize (REINDEX ivfflat + GIN FTS) so the freshly-embedded vectors become queryable — the "block until the KB is searchable" command. Fails loud if the drain does not terminate (do not REINDEX while inserts are in flight — that races the live index). pgvector only; no-op on Chroma/HNSW. (gdrive-sync is .PHONY — re-dispatches the drain each invocation; make gdrive-sync fails fast if a drain is already in flight, pending+processing>0, exempt RETRY_PENDING=1.)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@./scripts/kb-finalize.sh --wait
 
