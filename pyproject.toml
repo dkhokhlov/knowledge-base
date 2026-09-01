@@ -9,7 +9,12 @@ description = "Self-hosted agent-first knowledge stack: api-gateway + integratio
 requires-python = ">=3.12"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "pytest>=8",
+    # scripts/gdrive-meta.py (operator tooling, run via shebang in the venv):
+    "requests>=2.31",
+    "pyyaml>=6.0",
+]
 
 [tool.uv]
 package = false
