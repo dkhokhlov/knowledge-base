@@ -192,15 +192,27 @@ if ! KB_ID=$(KB=gdrive ./scripts/kb-bootstrap.sh --resolve 2>/dev/null); then
   say "FAIL  could not resolve the 'gdrive' KB by name for the parity gate (run: make kb-bootstrap KB=gdrive)" >&2
   exit 1
 fi
-dr=$(curl -sS --max-time 120 -X POST "${O}/index?kb_id=${KB_ID}&dir=gdrive&dry_run=1" "${adm[@]}")
-plan=$(printf '%s' "$dr" | python3 -c 'import sys,json
+# Retry the dry_run /index: /health readiness != /index readiness right after
+# `make start` -- Caddy + OWUI are also recreated, and /index -> owui.sync_diff
+# needs OWUI wired (a 200 /health can precede that by tens of seconds). Poll
+# up to ~90s before declaring failure; dry_run is zero-mutation so retries are safe.
+plan=""
+dr=""
+for _ in $(seq 1 18); do
+  dr=$(curl -sS --max-time 30 -X POST "${O}/index?kb_id=${KB_ID}&dir=gdrive&dry_run=1" "${adm[@]}" 2>/dev/null || true)
+  plan=$(printf '%s' "$dr" | python3 -c 'import sys,json
 try:
   d=json.load(sys.stdin)
   if not d.get("dry_run"): print("NOTDRY")
   else: print("%d %d %d %d" % (int(d.get("added",0)), int(d.get("modified",0)), int(d.get("deleted",0)), int(d.get("unmodified",0))))
 except Exception: print("ERR")' 2>/dev/null || echo "ERR")
-if [ "$plan" = "ERR" ] || [ "$plan" = "NOTDRY" ]; then
-  say "FAIL  post-move dry_run /index did not return a dry-run plan (got: ${dr:0:160}) -- the gateway may be stale; aborting" >&2
+  case "$plan" in
+    ERR|NOTDRY|"") sleep 5 ;;
+    *) break ;;
+  esac
+done
+if [ "$plan" = "ERR" ] || [ "$plan" = "NOTDRY" ] || [ -z "$plan" ]; then
+  say "FAIL  post-move dry_run /index did not return a dry-run plan (got: ${dr:0:160}) -- the gateway may be stale, or Caddy/OWUI still wiring after make start; aborting" >&2
   exit 1
 fi
 read -r g_added g_mod g_del g_unmod <<< "$plan"
