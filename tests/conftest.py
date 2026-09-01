@@ -20,7 +20,7 @@ Three concerns:
    auto-picked free host port): ``iso_env`` (session-scoped, shared by the 10
    iso+shared tests) and ``iso_env_named`` (function-scoped factory, a named
    own-iso stack per destructive/heavy test). See their docstrings for the
-   clean-env / split-setup / outcome-branched teardown model.
+   clean-env / split-setup / keep-on-teardown model.
 """
 
 import os
@@ -34,11 +34,6 @@ import pytest
 # from). tests/ is one level below the repo root.
 REPO = Path(__file__).resolve().parents[1]
 
-# Stash key for the test's call-phase report. Set by ``pytest_runtest_makereport``
-# and read by the ``e2e_env_named`` finalizer to branch teardown on whether the
-# test itself passed (green -> remove the clone; fail -> keep it).
-_REP = pytest.StashKey()
-
 
 def pytest_collection_modifyitems(config, items):
     """Mark every stdlib unittest.TestCase item with the ``unit`` marker.
@@ -50,21 +45,6 @@ def pytest_collection_modifyitems(config, items):
         cls = getattr(item, "cls", None)
         if cls is not None and issubclass(cls, unittest.TestCase):
             item.add_marker(pytest.mark.unit)
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    """Stash the call-phase report on the item.
-
-    A fixture finalizer (registered before the test runs, executed after it)
-    reads this to branch teardown on the test's own outcome: passed -> remove
-    the isolated clone (``e2e_down``); failed -> keep it for inspection
-    (``e2e_stop_docker``; flush later with ``make clean-tests``).
-    """
-    outcome = yield
-    rep = outcome.get_result()
-    if rep.when == "call":
-        item.stash[_REP] = rep
 
 
 @pytest.fixture
@@ -152,26 +132,20 @@ def _child_env(captured):
     return child
 
 
-def _iso_teardown(name, stamp, remove):
-    """Stop the isolated stack. ``remove`` (test passed) -> ``e2e_down`` (stop
-    containers + remove the clone); else (test failed) -> ``e2e_stop_docker``
-    (stop containers, KEEP the clone for inspection; flush with
-    ``make clean-tests``). Output is captured: teardown is best-effort and must
-    not noise up the pytest report."""
-    fn = "e2e_down" if remove else "e2e_stop_docker"
+def _iso_teardown(name, stamp):
+    """Stop the isolated stack's containers but KEEP the clone on disk for
+    inspection (the operator flushes it via ``make clean-tests`` / ``make
+    clean-test NAME=<suffix> STAMP=<stamp>``). All iso runs are kept on
+    teardown -- pass or fail, long or short -- so what actually ran (the
+    clone's HEAD, on-disk state, logs) is inspectable after the fact. Output
+    is captured: teardown is best-effort and must not noise up the pytest
+    report."""
     subprocess.run(
-        ["bash", "-c", '. scripts/lib-e2e-env.sh; %s "%s" "%s"' % (fn, name, stamp)],
+        ["bash", "-c", '. scripts/lib-e2e-env.sh; e2e_stop_docker "%s" "%s"' % (name, stamp)],
         cwd=str(REPO), capture_output=True)
 
 
-def _test_passed(request):
-    """Did the consuming test's call phase pass? Defaults to False (keep the
-    clone) if no call report is stashed yet (e.g. an error before the call)."""
-    rep = request.node.stash.get(_REP, None)
-    return bool(rep and rep.passed)
-
-
-def _setup_iso_env(name, ocr, request, remove_fn, at_scale=False):
+def _setup_iso_env(name, ocr, request, at_scale=False):
     """Shared isolate -> finalizer -> provision -> _run for both the named
     (function) and shared (session) iso fixtures.
 
@@ -194,8 +168,9 @@ def _setup_iso_env(name, ocr, request, remove_fn, at_scale=False):
 
     The body runs in a CLEAN child env (only the iso vars + PATH/HOME/LANG/TERM;
     no operator BASH_ENV, no live KB_HOST/KB_API_KEY) so the operator's profile
-    never reaches the test body. ``remove_fn()`` is evaluated at teardown to
-    decide e2e_down (remove the clone) vs e2e_stop_docker (keep). Returns a
+    never reaches the test body. Teardown ALWAYS stops the containers and keeps
+    the clone on disk (``e2e_stop_docker``) -- pass or fail, long or short --
+    so what ran is inspectable; flush via ``make clean-tests``. Returns a
     ``_run(relpath)`` callable."""
     setup = subprocess.run(
         ["bash", "-c", _ISO_SETUP_BASH], cwd=str(REPO),
@@ -205,10 +180,9 @@ def _setup_iso_env(name, ocr, request, remove_fn, at_scale=False):
     if setup.returncode != 0 or not captured.get("E2E_STAMP"):
         pytest.fail("%s isolate failed" % name, pytrace=False)
     # Register the finalizer NOW (after isolate, before provision): a provision
-    # failure still tears the stack down via this finalizer.
+    # failure still stops the stack via this finalizer (the clone is kept).
     request.addfinalizer(
-        lambda: _iso_teardown(captured["E2E_NAME"], captured["E2E_STAMP"],
-                              remove=remove_fn()))
+        lambda: _iso_teardown(captured["E2E_NAME"], captured["E2E_STAMP"]))
     if at_scale:
         # The unified deny-list (gitignored PII: Drive file paths) is read by
         # `make gdrive-sync` so rclone does not abort on non-downloadable paths.
@@ -287,22 +261,19 @@ def iso_env_named(request):
     real rclone gdrive corpus; used by test_09_gdrive_index).
 
     Setup is split (isolate -> finalizer -> provision) so a provision failure
-    does not strand a half-up stack. Teardown branches on the test's own
-    outcome (passed -> e2e_down remove the clone; failed -> e2e_stop_docker
-    keep it for ``make clean-tests`` to flush) -- EXCEPT long runs
-    (@pytest.mark.long), which are NEVER auto-removed (kept on pass too; flush
-    via `make clean-tests`)."""
+    does not strand a half-up stack. Teardown ALWAYS stops the containers and
+    keeps the clone on disk (``e2e_stop_docker``) -- pass or fail, long or
+    short -- so what ran is inspectable afterward; flush via ``make clean-tests``
+    (or ``make clean-test NAME=<suffix> STAMP=<stamp>`` for one run)."""
     def _make(suffix, ocr=None, at_scale=False):
-        # Long runs (@pytest.mark.long: test_08, test_09) are NEVER auto-removed
-        # at teardown -- they are expensive to rebuild (at-scale provision +
-        # real-corpus drain) and are kept for inspection / reuse; the operator
-        # flushes them manually via `make clean-tests` (or
-        # `make clean-test NAME=<suffix> STAMP=<stamp>`). Quick named iso tests
-        # (test_12, test_16) still auto-remove on pass. See
+        # All iso runs are kept on teardown (stop containers, KEEP the clone):
+        # long runs (test_08/09) because they are expensive to rebuild, and now
+        # short named runs (test_12/16) + the shared session stack too -- so the
+        # operator can inspect what actually ran (clone HEAD, on-disk state,
+        # logs) instead of relying on the pytest report alone. Flush manually
+        # via `make clean-tests` (all) / `make clean-test NAME=<suffix>`. See
         # [[long-runs-never-auto-cleaned]].
-        is_long = request.node.get_closest_marker("long") is not None
-        remove_fn = (lambda: False) if is_long else (lambda: _test_passed(request))
-        return _setup_iso_env(suffix, ocr, request, remove_fn, at_scale=at_scale)
+        return _setup_iso_env(suffix, ocr, request, at_scale=at_scale)
     return _make
 
 
@@ -314,7 +285,7 @@ def iso_env(request):
     e2e_provision, shared across all of them. Each shared test's body runs in a
     CLEAN child env via the returned ``_run``; the tests self-clean (delete
     temp KBs/files) so the shared env stays clean across them. Teardown at
-    session end: ``session.testsfailed == 0`` -> e2e_down (remove the clone)
-    else e2e_stop_docker (keep for inspection)."""
-    return _setup_iso_env("iso-shared", None, request,
-                          lambda: request.session.testsfailed == 0)
+    session end stops the containers and KEEPS the clone on disk (pass or fail)
+    so what ran is inspectable; flush via ``make clean-tests`` (or
+    ``make clean-test NAME=iso-shared``)."""
+    return _setup_iso_env("iso-shared", None, request)
