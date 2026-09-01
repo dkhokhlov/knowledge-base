@@ -77,6 +77,18 @@ if [ "$drain_ok" = "0" ]; then
 fi
 say "OK  gdrive drain is terminal (pending+processing==0)"
 
+# --- 1b. rebuild the api-gateway image (before any destructive step) -----------
+# `make start` (scripts/start.sh -> `docker compose up -d`) does NOT rebuild a
+# locally-built image -- it recreates the CONTAINER only. Build the new image
+# from ./gateway NOW so a build failure aborts BEFORE the corpus move; step 5
+# `make start` then recreates the gateway with this fresh image. Without this,
+# a stale pre-migration image (old code: GDRIVE_ROOT -> /gdrive) under the new
+# ./root:/kb-source:ro mount would 422 on an empty root (or mass-delete with
+# force=1).
+say "==> building the api-gateway image from the new ./gateway code..."
+docker compose build api-gateway
+say "OK  api-gateway image rebuilt (new code: dir= + KB_SOURCE_ROOT)"
+
 # --- 2. move ./gdrive -> ./root/gdrive ----------------------------------------
 if [ -d root/gdrive ]; then
   if [ -d gdrive ]; then
@@ -127,10 +139,20 @@ fi
 
 # --- 4. remove GDRIVE_KB_ID from .env.local -----------------------------------
 if [ -f .env.local ] && grep -qE '^[[:space:]]*GDRIVE_KB_ID=' .env.local; then
-  # In-place edit via a temp file (preserve mode + the rest of .env.local).
-  tmp=$(mktemp); chmod 600 "$tmp"
-  grep -vE '^[[:space:]]*GDRIVE_KB_ID=' .env.local > "$tmp" || true
-  mv "$tmp" .env.local
+  # Atomic rewrite: mktemp in the REPO dir (same filesystem as .env.local) so the
+  # final `mv` is a rename, not a cross-device copy/replace. mktemp under /tmp is
+  # a different device here -> an interruption mid-copy could truncate .env.local.
+  # Do NOT mask a read error with `|| true`: grep -v exit 2 (I/O error) would
+  # otherwise replace .env.local with an empty/partial file. Exit 0 = lines kept,
+  # 1 = file had only GDRIVE_KB_ID (empty result is valid), 2 = error.
+  tmp=$(mktemp ./.env.local.XXXXXX); chmod 600 "$tmp"
+  grep -vE '^[[:space:]]*GDRIVE_KB_ID=' .env.local > "$tmp"; rc=$?
+  if [ "$rc" -eq 2 ]; then
+    rm -f "$tmp"
+    say "FAIL  could not rewrite .env.local (read error); left .env.local unchanged" >&2
+    exit 1
+  fi
+  mv -f "$tmp" .env.local
   say "OK  removed GDRIVE_KB_ID from .env.local (resolution is now by name at runtime)"
 else
   say "OK  GDRIVE_KB_ID not present in .env.local (nothing to remove)"
@@ -138,10 +160,57 @@ fi
 
 # --- 5. recreate api-gateway with the new compose mount -----------------------
 # compose.yml in this commit already mounts ./root:/kb-source:ro + sets
-# KB_SOURCE_ROOT=/kb-source. `make start` re-reads compose and recreates the
-# gateway (the mount change forces it). OWUI / the vector store keep running.
+# KB_SOURCE_ROOT=/kb-source. The image was rebuilt in step 1b, so `make start`
+# (docker compose up -d) recreates the gateway with the NEW image + the new
+# mount/env. A mount/env change forces a CONTAINER recreate, NOT an image
+# rebuild -- that is why step 1b builds first. OWUI / the vector store keep
+# running.
 say "==> recreating api-gateway with the new ./root:/kb-source:ro mount (make start)..."
 make start
+
+# --- 5b. verify the new gateway + post-move dry-run parity gate ----------------
+# The rebuilt image is proven by a dry_run=1 /index against the MOVED tree: a
+# stale image would 422 on the empty /gdrive root or error on the `dir` param.
+# dry_run runs ZERO mutations (gateway app.py: returns the sync/diff plan only).
+# Assert key-shape parity: added=modified=deleted=0 -- dir=gdrive keeps manifest
+# keys identical to the old source=gdrive shape. If any delta > 0 the dir= root
+# is WRONG: abort BEFORE the operator's `make gdrive-sync` would apply it.
+O="${KB_HOST%/}"
+adm=(-H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}")
+say "==> waiting for the new api-gateway /health..."
+healthy=0
+for _ in $(seq 1 30); do
+  if curl -sS --max-time 5 "${O}/health" >/dev/null 2>&1; then healthy=1; break; fi
+  sleep 1
+done
+if [ "$healthy" != "1" ]; then
+  say "FAIL  api-gateway did not become healthy after make start -- aborting before the parity gate" >&2
+  exit 1
+fi
+say "OK  api-gateway healthy"
+if ! KB_ID=$(KB=gdrive ./scripts/kb-bootstrap.sh --resolve 2>/dev/null); then
+  say "FAIL  could not resolve the 'gdrive' KB by name for the parity gate (run: make kb-bootstrap KB=gdrive)" >&2
+  exit 1
+fi
+dr=$(curl -sS --max-time 120 -X POST "${O}/index?kb_id=${KB_ID}&dir=gdrive&dry_run=1" "${adm[@]}")
+plan=$(printf '%s' "$dr" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  if not d.get("dry_run"): print("NOTDRY")
+  else: print("%d %d %d %d" % (int(d.get("added",0)), int(d.get("modified",0)), int(d.get("deleted",0)), int(d.get("unmodified",0))))
+except Exception: print("ERR")' 2>/dev/null || echo "ERR")
+if [ "$plan" = "ERR" ] || [ "$plan" = "NOTDRY" ]; then
+  say "FAIL  post-move dry_run /index did not return a dry-run plan (got: ${dr:0:160}) -- the gateway may be stale; aborting" >&2
+  exit 1
+fi
+read -r g_added g_mod g_del g_unmod <<< "$plan"
+say "post-move dry_run: added=${g_added} modified=${g_mod} deleted=${g_del} unmodified=${g_unmod}"
+if [ "$g_added" != "0" ] || [ "$g_mod" != "0" ] || [ "$g_del" != "0" ]; then
+  say "FAIL  key-shape parity broken: added=${g_added} modified=${g_mod} deleted=${g_del} (expected all 0; dir=gdrive keeps manifest keys identical)" >&2
+  say "       DO NOT run make gdrive-sync -- it would apply these deltas. Revert the move (mv root/gdrive gdrive) and investigate the dir= root." >&2
+  exit 1
+fi
+say "OK  key-shape parity holds (added=0 modified=0 deleted=0 unmodified=${g_unmod}) -- safe to run make gdrive-sync"
 say ""
 say "DONE  migration complete. Next:"
 say "  make kb-bootstrap KB=gdrive   # re-assert the public-read grant on the existing KB"
