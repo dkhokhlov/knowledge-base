@@ -37,7 +37,12 @@ ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
 MARKER="gdrive-fixture-marker-7f3a2"
 
 # --- skip condition ----------------------------------------------------------
-src_count=$(find root/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
+# Exclude .meta/.meta.json sidecars: the gateway's _entry_for skips them by
+# name (app.py), so they are never indexed. src_count must match what the drain
+# can account, not what the allowlist regex alone matches (.meta.json ends in
+# .json, so the regex alone would over-count sidecars the gateway drops).
+src_count=$(find root/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" \
+  ! -name '*.meta' ! -name '*.meta.json' 2>/dev/null | wc -l)
 if [ "${src_count:-0}" -eq 0 ]; then
   section "gdrive index (fixture)"
   pass "SKIP: root/.tests has no allowlisted fixture files (committed fixtures missing)"

@@ -131,7 +131,12 @@ fi
 pass "committed fixture set present: $(python3 -c 'import sys,json;print(",".join(sorted(json.load(open(sys.argv[1]))["files"])))' "$MANIFEST")"
 
 # --- source count (all allowlisted files under .tests) -----------------------
-src_count=$(find root/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
+# Exclude .meta/.meta.json sidecars: the gateway's _entry_for skips them by
+# name (app.py), so they are never indexed. src_count must match what the drain
+# can account, not what the allowlist regex alone matches (.meta.json ends in
+# .json, so the regex alone would over-count sidecars the gateway drops).
+src_count=$(find root/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" \
+  ! -name '*.meta' ! -name '*.meta.json' 2>/dev/null | wc -l)
 
 # --- create temp KB + grant '*' read ------------------------------------------
 section "create temp chunk-quality KB"
