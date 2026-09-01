@@ -95,9 +95,13 @@ ensure_secret .env.local WEBUI_SECRET_KEY
 # default local.test) + a generated password. A `make bootstrap KB_DOMAIN=<d>`
 # override wins; else read KB_DOMAIN from the .env bootstrap just created (plain
 # KEY=VALUE; source in a subshell, default if unset or source fails). ensure_value
-# keeps an existing non-empty value (operator edits / e2e-restore-creds survive a
-# re-bootstrap); clean-all wipes .env.local so a fresh bootstrap recomputes for a
-# new KB_DOMAIN.
+# keeps an existing non-empty value (operator edits survive a re-bootstrap);
+# clean-all wipes .env.local so a fresh bootstrap recomputes for a new KB_DOMAIN.
+# Capture the raw make-tunable override BEFORE the resolution below so it can be
+# persisted into .env (see the KB_DOMAIN persistence block near OCR_ENABLED) --
+# the resolution overwrites KB_DOMAIN with the .env/default value, so the raw
+# override would be lost otherwise.
+_KB_DOMAIN_OVERRIDE="${KB_DOMAIN:-}"
 KB_DOMAIN="${KB_DOMAIN:-$(. ./.env 2>/dev/null; printf '%s' "${KB_DOMAIN:-local.test}")}"
 ensure_value .env.local OPENWEBUI_FIRST_USER "admin@${KB_DOMAIN}"
 ensure_secret .env.local OPENWEBUI_FIRST_PASSWORD
@@ -149,6 +153,21 @@ if [ -n "${OCR_ENABLED:-}" ]; then
   printf '  persisted OCR_ENABLED=%s into .env (defines the compose profile)\n' "$OCR_ENABLED"
 fi
 
+# Persist a `make bootstrap KB_DOMAIN=<d>` override into .env so a clean-shell
+# re-bootstrap keeps it -- the override DEFINES the domain, it is not transient.
+# Without an override the existing .env KB_DOMAIN is the source of truth
+# (idempotent, not rewritten). _KB_DOMAIN_OVERRIDE is the raw make-tunable
+# (captured before the admin-account resolution above), so this fires ONLY on an
+# explicit override -- it never rewrites the .env value with the resolved default.
+if [ -n "$_KB_DOMAIN_OVERRIDE" ]; then
+  if grep -qE '^KB_DOMAIN=' .env; then
+    sed -i "s|^KB_DOMAIN=.*|KB_DOMAIN=${_KB_DOMAIN_OVERRIDE}|" .env
+  else
+    printf 'KB_DOMAIN=%s\n' "$_KB_DOMAIN_OVERRIDE" >> .env
+  fi
+  printf '  persisted KB_DOMAIN=%s into .env (durable domain)\n' "$_KB_DOMAIN_OVERRIDE"
+fi
+
 # KB_HOST is the single source for the public URL (shell env or make-tunable;
 # see .env.template). KB_HOST_PORT (the Caddy host bind) is DERIVED from
 # KB_HOST's URL port here and persisted into .env (compose cannot parse a URL,
@@ -158,10 +177,11 @@ fi
 # ONLY for the tunnel case (client URL port != bind port, e.g.
 # KB_HOST=http://tunnel:443 KB_HOST_PORT=3000); an explicit tunable wins over
 # the derivation. The iso tests (iso_env / iso_env_named in tests/conftest.py)
-# pin KB_HOST (+ OLLAMA_HOST) the same way so they survive the at-scale
-# provision's internal clean-all (rm .env) -> bootstrap; they no longer pass
-# KB_HOST_PORT (the port is derived from KB_HOST=http://localhost:<auto-picked
-# port>).
+# pin KB_HOST (+ OLLAMA_HOST) the same way so bootstrap force-persists the iso
+# port over the live-.env template e2e_isolate seeds into the clone (the
+# clone's .env starts from the live operator .env, then the iso KB_HOST
+# override wins); they no longer pass KB_HOST_PORT (the port is derived from
+# KB_HOST=http://localhost:<auto-picked port>).
 #
 # Resolve KB_HOST: process env (shell/make-tunable) first, then a prior
 # persisted value in the existing .env (so a CLEAN-SHELL re-bootstrap -- no
