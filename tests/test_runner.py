@@ -129,3 +129,9 @@ def test_16_generic_kb(iso_env_named):
 def test_17_gdrive_meta_sidecar(iso_env):
     """gdrive `.meta.json` sidecar -> File.meta.data.gdrive -> kb skill retrieve gdrive-join, e2e on a real stack: index a committed fixture set (docs + sidecars + one no-sidecar control) and assert each hit's joined gdrive record (grounded/labels/approval) over the kb skill `retrieve` path."""
     iso_env("tests/test_17_gdrive_meta_sidecar.sh")
+
+@pytest.mark.iso
+@pytest.mark.shared
+def test_18_projects_exclude(iso_env):
+    """index-projects honors <root>/.kb-ignore (gitignore-style allowlist) e2e on a real stack: throwaway projects root with 3 project dirs + `.kb-ignore` (`*` + `!allowA` + `!allowB`) -> real `index-projects --root <fixture> --host test18h --wait` (kb skill, user key) -> assert only allowA + allowB selected/created (denyC excluded), and allowA's marker is retrievable (drain landed vectors)."""
+    iso_env("tests/test_18_projects_exclude.sh")

@@ -9,7 +9,9 @@ One key (KB_API_KEY, an Open WebUI key), one URL (KB_HOST). Two surfaces:
     per project). The KB surface is read-scoped; the projects-memory surface
     writes to OWNED KBs (the user key creates + owns each project KB; run
     `make projects-bootstrap` once to enable KB creation before the first
-    index-projects).
+    index-projects). index-projects honors <root>/.kb-ignore (.gitignore-style,
+    with `!` negation; `--project` is a candidate filter and does NOT override it
+    -- to index an excluded project, add `!<glob>` to the allowlist).
 
   * Facts memory surface (the `memory` subcommand): remember/retrieve/forget
     Graphiti facts via the api-gateway /memory/* endpoints. Authorization is
@@ -33,6 +35,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import sys
 import tempfile
 import time
@@ -512,6 +515,151 @@ def _wait_deadline():
     return time.time() + 600
 
 
+# --- .kb-ignore matcher (CLONED from scripts/kb_ignore.py — keep in sync) ------
+# A .gitignore-style per-directory ignore file honored by the projects walk. `!`
+# re-includes; `*` does not cross '/'; `**` does; a trailing '/' = dir + contents;
+# a leading '/' anchors at the .kb-ignore directory; a no-slash name matches a
+# file or directory of that name at any depth. Monolithic deploy: this body is
+# duplicated from scripts/kb_ignore.py (the deployed skill has no repo scripts/
+# on its import path). Canonical UTs: tests/test_kb_ignore.py; this clone is
+# covered via _select_projects in tests/test_kb_projects_select.py.
+_KI_NAME = ".kb-ignore"
+_ki_cache = {}  # abs-dir -> (mtime, rules); rules = list[(negated, kind, regex)]
+
+
+def _ki_translate_glob(pat):
+    out = []
+    i, n = 0, len(pat)
+    while i < n:
+        c = pat[i]
+        if c == "*":
+            if i + 1 < n and pat[i + 1] == "*":
+                if i + 2 < n and pat[i + 2] == "/":
+                    out.append("(?:.*/)?")
+                    i += 3
+                else:
+                    out.append(".*")
+                    i += 2
+            else:
+                out.append("[^/]*")
+                i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return "".join(out)
+
+
+def _ki_normalize(pat):
+    anchored = pat.startswith("/")
+    body = pat[1:] if anchored else pat
+    if body.endswith("/"):
+        body = body[:-1] + "/**"
+    return anchored, body
+
+
+def _ki_compile(pat):
+    negated = pat.startswith("!")
+    if negated:
+        pat = pat[1:]
+    anchored, body = _ki_normalize(pat)
+    if body in ("*", "**"):
+        return (negated, "star", None)
+    rx = re.compile(_ki_translate_glob(body))
+    if anchored or "/" in body:
+        return (negated, "path", rx)
+    return (negated, "basename", rx)
+
+
+def _ki_parse_file(path):
+    rules = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or line.startswith(";"):
+                    continue
+                rules.append(_ki_compile(line))
+    except OSError:
+        return None
+    return rules
+
+
+def _ki_rules_for(dir_abs):
+    p = os.path.join(dir_abs, _KI_NAME)
+    try:
+        mtime = os.path.getmtime(p)
+    except OSError:
+        mtime = None
+    cached = _ki_cache.get(dir_abs)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    rules = _ki_parse_file(p) if mtime is not None else []
+    if rules is None:
+        rules = []
+    _ki_cache[dir_abs] = (mtime, rules)
+    return rules
+
+
+def _ki_rule_matches(rule, rel_to_dir):
+    _negated, kind, rx = rule
+    if kind == "star":
+        return True
+    if kind == "basename":
+        for seg in rel_to_dir.split("/"):
+            if rx.fullmatch(seg) is not None:
+                return True
+        return False
+    return rx.fullmatch(rel_to_dir) is not None
+
+
+def _ki_allowed(root, relpath):
+    """True if `relpath` (relative to `root`) is NOT ignored by the ancestor
+    .kb-ignore chain. Missing .kb-ignore -> allowed."""
+    rel = relpath.strip().lstrip("./")
+    if rel == "":
+        return True
+    rel = rel.strip("/")
+    parts = rel.split("/")
+    root_abs = os.path.abspath(root)
+    excluded = False
+    for i in range(len(parts)):
+        d = root_abs if i == 0 else os.path.join(root_abs, *parts[:i])
+        rules = _ki_rules_for(d)
+        if not rules:
+            continue
+        rel_to_dir = "/".join(parts[i:])
+        for rule in rules:
+            if _ki_rule_matches(rule, rel_to_dir):
+                excluded = not rule[0]
+    return not excluded
+
+
+def _ki_clear_cache():
+    _ki_cache.clear()
+
+
+def _select_projects(root, project):
+    """Select project dirs under `root` that have a `memory/` subdir, filtered by
+    `--project` (substring) FIRST, then by <root>/.kb-ignore (with `!`). `--project`
+    does NOT override .kb-ignore: to index an excluded project, add `!<glob>` to
+    the allowlist. Returns [(encoded, mem_path), ...]. Pure: no stack, no network,
+    no stderr side effects."""
+    selected = []
+    for encoded in sorted(os.listdir(root)):
+        mem = os.path.join(root, encoded, "memory")
+        if encoded in ("-", "") or not os.path.isdir(mem):
+            continue
+        if project and project not in encoded:
+            continue
+        if not _ki_allowed(root, encoded):
+            continue
+        selected.append((encoded, mem))
+    return selected
+
+
 def cmd_index_projects(base, key, a):
     me = _whoami(base, key)
     account = me.get("email", "?")
@@ -519,14 +667,12 @@ def cmd_index_projects(base, key, a):
     root = os.path.expanduser(a.root)
     if not os.path.isdir(root):
         sys.exit("FAIL  projects root not found: %s" % root)
-    projects = []
-    for encoded in sorted(os.listdir(root)):
-        mem = os.path.join(root, encoded, "memory")
-        if encoded in ("-", "") or not os.path.isdir(mem):
-            continue
-        if a.project and a.project not in encoded:
-            continue
-        projects.append((encoded, mem))
+    projects = _select_projects(root, a.project)
+    if a.project is None and projects and not os.path.isfile(os.path.join(root, _KI_NAME)):
+        sys.stderr.write(
+            "WARN  no %s under %s -- full-scan indexes every project dir; set an "
+            "allowlist (`*` + `!<project-glob>`) to exclude private projects.\n"
+            % (_KI_NAME, root))
     result = {"projects": [],
               "total": {"added": 0, "modified": 0, "reused": 0,
                         "deleted": 0, "failed": 0},
@@ -867,10 +1013,12 @@ def main():
                     help="fetch the ORIGINAL bytes (/content) instead of the extracted text")
 
     sp = sub.add_parser("index-projects",
-                        help="index ~/.claude/projects/*/memory/*.md into OWUI KBs (one KB per project, user key)")
-    sp.add_argument("--root", default="~/.claude/projects", help="projects root")
+                        help="index ~/.claude/projects/*/memory/*.md into OWUI KBs (one KB per project, user key). "
+                             "Honors <root>/.kb-ignore (.gitignore-style, with `!`); --project does not override it.")
+    sp.add_argument("--root", default="~/.claude/projects", help="projects root (the .kb-ignore lives here)")
     sp.add_argument("--host", default=None, help="host segment of KB name (default $HOSTNAME short)")
-    sp.add_argument("--project", default=None, help="substring filter on the encoded project dir")
+    sp.add_argument("--project", default=None,
+                    help="substring filter on the encoded project dir (a candidate filter; .kb-ignore still applies)")
     sp.add_argument("--dry-run", action="store_true", help="plan only; no writes")
     sp.add_argument("--wait", action="store_true", help="poll until the drain completes (deadline 600s)")
     sp.add_argument("--no-cleanup", action="store_true", help="do not delete KB files whose source is gone")

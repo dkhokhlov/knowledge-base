@@ -158,6 +158,47 @@ with a clear message if this has not been done.
 delete-then-uploaded (router `DELETE` cleans the old vectors); and orphans
 (source file gone) are deleted so the KB mirror stays exact.
 
+## Project selection (`.kb-ignore`)
+
+`index-projects` selects project dirs under `<root>` (default
+`~/.claude/projects`): a dir is a candidate when it has a `memory/` subdir. Two
+filters apply, in order:
+
+1. `--project <name>` — substring filter on the encoded dir name (a candidate
+   filter; applied first).
+2. `<root>/.kb-ignore` — a `.gitignore`-style ignore file. A candidate that
+   `.kb-ignore` excludes is dropped, **even when `--project` matched it**.
+   `--project` does NOT override `.kb-ignore`.
+
+A full scan (`--project` absent) with **no** `<root>/.kb-ignore` prints a warning
+and indexes every project dir under `<root>` — including private ones. Set an
+allowlist to keep only the projects you intend to publish.
+
+`.kb-ignore` format (gitignore, one level for the projects root):
+
+- one pattern per line; `#` and `;` start comments; blank lines are skipped.
+- `*` matches all (excludes everything); `!pattern` re-includes (negation).
+- `*` does not cross `/`; `**` does; `?` = one non-`/` char.
+- a leading `/` anchors at the `.kb-ignore` directory; a trailing `/` marks a
+  directory and its contents; a no-slash name matches a file or dir of that name
+  at any depth.
+- rules apply in file order; the **last** matching rule wins.
+
+**Allowlist pattern** (the common case — index only named projects):
+
+```
+*
+!-home-user-projects-PubTeam*
+!-home-user-projects-myrepo
+```
+
+`*` excludes every project; the two `!` lines re-include `PubTeam*` (any subdir)
+and `myrepo` (exact). Every other project dir (private repos, `--test-e2e-*`
+clones) is excluded from a full scan.
+
+`.kb-ignore` is local-only (never pushed); a per-project encoded name is a path
+on the host, not PII-safe to publish.
+
 ## Wrapper subcommands (projects memory)
 
 ```
@@ -172,8 +213,9 @@ python3 "$KB" retrieve-projects "QPU scheduling"        # across ALL your projec
 python3 "$KB" retrieve-projects "memory" --host <host> --project myrepo  # filtered
 ```
 
-`index-projects`: `--dry-run`, `--project <name>` (select; overrides cwd
-walk-up), `--root <dir>` (default `~/.claude/projects`), `--no-cleanup` (do not
+`index-projects`: `--dry-run`, `--project <name>` (substring filter on the
+encoded dir; overrides cwd walk-up; does NOT override `.kb-ignore`),
+`--root <dir>` (default `~/.claude/projects`), `--no-cleanup` (do not
 delete KB files whose source is gone), `--wait` (poll until the drain completes;
 600s deadline).
 
