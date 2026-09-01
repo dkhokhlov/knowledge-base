@@ -44,7 +44,7 @@
 #                                              # (PORT omitted -> auto-pick a free port)
 #   e2e_provision                 # make start + wait healthy + admin-signup + api-keys
 #                                 # + projects-bootstrap + rag-config (prod-exact) + ephemeral user
-#   e2e_provision_at_scale        # DESTRUCTIVE at-scale: clean-all + re-bootstrap + image
+#   e2e_provision_at_scale        # at-scale: re-bootstrap + image
 #                                 # rebuild + preflight + gdrive (rclone) + make ci (test_09)
 #   e2e_stop_docker <NAME> <STAMP> # stop+remove docker, KEEP the clone (success path)
 #   e2e_down <NAME> [STAMP]        # stop docker + remove the clone (quick tests' EXIT
@@ -243,6 +243,22 @@ e2e_isolate() {
   # no change" idempotency).
   local ocr_arg=()
   [ -n "$ocr" ] && ocr_arg=(OCR_ENABLED="$ocr")
+
+  # Use the LIVE repo's .env as the clone's TEMPLATE (the operator's current
+  # config: model + RAG knobs, image tags, OCR_ENABLED, KB_DOMAIN, ...) so the
+  # iso env is prod-exact, not .env.template defaults. The live .env is
+  # gitignored (git clone does NOT bring it), so seed it from $E2E_SRC here.
+  # `make bootstrap` (next) is idempotent on an EXISTING .env: it keeps the
+  # live values and force-persists ONLY the iso de-confliction overrides --
+  # KB_HOST (the auto-picked port) + the re-derived KB_HOST_PORT -- so the
+  # clone's port never collides with the live stack's. The container-prefix
+  # de-confliction is compose-level (COMPOSE_PROJECT_NAME + the generated
+  # override file above; never in .env), so it is untouched here. A missing
+  # live .env (fresh source repo) -> bootstrap falls back to .env.template.
+  if [ -f "$E2E_SRC/.env" ]; then
+    cp "$E2E_SRC/.env" "$clone/.env"
+    echo "==> seeded clone .env from the live $E2E_SRC/.env (template); bootstrap applies the iso port override"
+  fi
   echo "==> make bootstrap (seed .env/.env.local for $clone, port $port${ocr:+, OCR=$ocr})"
   make bootstrap KB_HOST="$kb_host" OLLAMA_HOST="$OLLAMA_HOST" \
     "${ocr_arg[@]}" || return 1
@@ -298,47 +314,40 @@ e2e_provision() {
   e2e_ephemeral_user || return 1
 }
 
-# Destructive AT-SCALE provision of the isolated stack: the comprehensive
-# from-scratch path (clean-all wipe + re-bootstrap + restore admin creds + [OCR
-# model pull] + preflight + image rebuild + start + wait healthy + admin-signup +
-# api-keys + ephemeral user + projects-bootstrap + rag-config + kb-bootstrap
-# KB=gdrive + gdrive-sync + make ci). This is the at-scale variant of
-# e2e_provision: it wipes the clone's data, re-provisions from scratch, rebuilds
-# the locally-built images, and syncs the REAL gdrive corpus (rclone).
-# test_09_gdrive_index (the comprehensive at-scale e2e) uses it via the
-# iso_env_named(..., at_scale=True) fixture.
+# AT-SCALE provision of the isolated stack: the comprehensive path
+# (re-bootstrap + [OCR model pull] + preflight + image rebuild + start + wait
+# healthy + admin-signup + api-keys + ephemeral user + projects-bootstrap +
+# rag-config + kb-bootstrap KB=gdrive + gdrive-sync + make ci). This is the
+# at-scale variant of e2e_provision: it rebuilds the locally-built images and
+# syncs the REAL gdrive corpus (rclone). test_09_gdrive_index (the comprehensive
+# at-scale e2e) uses it via the iso_env_named(..., at_scale=True) fixture.
 #
-# Call AFTER e2e_isolate (which seeded .env/.env.local + the admin account). The
-# caller's gdrive-exclude.conf must ALREADY be copied into the clone (the conftest
-# fixture does this -- the provision bash has no E2E_SRC to reach the source
-# repo). Stashes OPENWEBUI_FIRST_USER/PASSWORD before clean-all (which wipes
-# .env.local) + restores them after bootstrap via scripts/e2e-restore-creds.sh.
-# Every bare `docker compose` / `make` honors COMPOSE_PROJECT_NAME/COMPOSE_FILE
-# from the clean child env (set by e2e_isolate), so clean-all/build/start target
-# THIS iso project, never the live stack. rclone uses the host
-# ~/.config/rclone/rclone.conf via HOME (carried in the child env). No fallback:
-# any step failing aborts (return 1).
+# Call AFTER e2e_isolate (which seeded .env from the live template + .env.local
+# with the admin account). The caller's gdrive-exclude.conf must ALREADY be
+# copied into the clone (the conftest fixture does this -- the provision bash
+# has no E2E_SRC to reach the source repo). No clean-all: a fresh stamped clone
+# (e2e_isolate reserves a new empty leaf each run) has no prior .env/./data to
+# wipe, so the within-clone wipe was redundant; the live-.env template +
+# .env.local (admin creds + secrets) survive straight through. Every bare
+# `docker compose` / `make` honors COMPOSE_PROJECT_NAME/COMPOSE_FILE from the
+# clean child env (set by e2e_isolate), so build/start target THIS iso project,
+# never the live stack. rclone uses the host ~/.config/rclone/rclone.conf via
+# HOME (carried in the child env). No fallback: any step failing aborts (return 1).
 e2e_provision_at_scale() {
-  echo "==> DESTRUCTIVE at-scale provision: wipes all data + re-provisions from scratch."
-  test -f .env.local || { echo "FAIL  no .env.local (no admin creds to stash) -- run e2e_isolate first" >&2; return 1; }
+  echo "==> at-scale provision: image rebuild + preflight + real rclone gdrive corpus (fresh clone)."
+  test -f .env.local || { echo "FAIL  no .env.local (no admin creds) -- run e2e_isolate first" >&2; return 1; }
   set -a; . ./.env; . ./.env.local; set +a
-  # Capture KB_HOST / OLLAMA_HOST from the just-sourced .env (after the source, so
-  # this reads the persisted localhost:<E2E_PORT> KB_HOST, not the empty shell env).
-  # Re-forwarded to the internal `make bootstrap` as make-tunables so the freshly
-  # recreated .env keeps the e2e host + Ollama URL (clean-all deletes .env;
-  # bootstrap force-persists KB_HOST + derives KB_HOST_PORT from it).
+  # Capture KB_HOST / OLLAMA_HOST from the just-sourced .env (the iso port +
+  # Ollama URL e2e_isolate persisted) and re-forward them to the internal
+  # `make bootstrap` as make-tunables. bootstrap is idempotent on the live-.env
+  # template e2e_isolate seeded: it keeps the operator config + force-persists
+  # ONLY KB_HOST (+ re-derives KB_HOST_PORT) + OLLAMA_HOST -- the iso port
+  # override, never the live stack's. No clean-all: .env (live template) +
+  # .env.local (admin creds + secrets) survive straight through.
   _E2E_KB_HOST="${KB_HOST:-}"; _E2E_OLLAMA_HOST="${OLLAMA_HOST:-}"
   [ -n "${OPENWEBUI_FIRST_USER:-}" ] && [ -n "${OPENWEBUI_FIRST_PASSWORD:-}" ] \
     || { echo "FAIL  OPENWEBUI_FIRST_USER/PASSWORD not set in .env.local -- fill them first" >&2; return 1; }
-  stash=$(mktemp); chmod 600 "$stash"
-  { printf 'OPENWEBUI_FIRST_USER=%s\nOPENWEBUI_FIRST_PASSWORD=%s\n' "$OPENWEBUI_FIRST_USER" "$OPENWEBUI_FIRST_PASSWORD"; } > "$stash"
-  # EXIT trap (not RETURN): this runs in a one-shot `bash -c ". lib;
-  # e2e_provision_at_scale"`, so EXIT fires after the function returns + cleans the
-  # stash whether the function succeeded or failed mid-way (return 1).
-  trap 'rm -f "$stash"' EXIT
-  make clean-all || return 1
   make bootstrap KB_HOST="$_E2E_KB_HOST" OLLAMA_HOST="$_E2E_OLLAMA_HOST" || return 1
-  ./scripts/e2e-restore-creds.sh "$stash" || return 1
   # Pull the OCR vision model before preflight (preflight hard-fails on a missing
   # OCR model when OCR_ENABLED=true). Pull only the OCR model, NOT full
   # `make pull-models` (that `ollama rm`s + recreates GRAPHITI_MODEL, disrupting the
@@ -348,10 +357,10 @@ e2e_provision_at_scale() {
     ollama pull "${OCR_MODEL:-deepseek-ocr}" || return 1
   fi
   make preflight || return 1
-  # Rebuild locally-built images whose code changed since the last run (clean-all
-  # wipes volumes/data, NOT images; `up -d` without --build reuses the existing
-  # image). api-gateway is stdlib-only (fast). markitdown-ocr is rebuilt (gated on
-  # OCR_ENABLED) so the at-scale run uses current OCR code.
+  # Rebuild locally-built images whose code changed since the last run (`up -d`
+  # without --build reuses the existing image). api-gateway is stdlib-only
+  # (fast). markitdown-ocr is rebuilt (gated on OCR_ENABLED) so the at-scale run
+  # uses current OCR code.
   docker compose build api-gateway || return 1
   if [ "${OCR_ENABLED:-true}" = "true" ]; then
     docker compose build markitdown-ocr || return 1

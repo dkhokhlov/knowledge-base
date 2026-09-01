@@ -17,7 +17,7 @@ Three concerns:
    non-zero on FAIL>0; ``require_stack_up`` exits 2 when the stack is down).
 
 3. Provide the iso fixtures for isolated tests (throwaway clean-prod stacks,
-   auto-picked free host port): ``iso_env`` (session-scoped, shared by the 9
+   auto-picked free host port): ``iso_env`` (session-scoped, shared by the 10
    iso+shared tests) and ``iso_env_named`` (function-scoped factory, a named
    own-iso stack per destructive/heavy test). See their docstrings for the
    clean-env / split-setup / outcome-branched teardown model.
@@ -182,14 +182,14 @@ def _setup_iso_env(name, ocr, request, remove_fn, at_scale=False):
              OLLAMA_HOST resolution; e2e_isolate strips BASH_ENV/KB_HOST/
              KB_API_KEY before the clone sees them.)
     call B -- ``e2e_provision`` (clean-prod) or, when ``at_scale``,
-             ``e2e_provision_at_scale`` (destructive: clean-all + image rebuild +
-             preflight + real rclone gdrive corpus + make ci) in the clone with
-             the clean child env, output streams live. When ``at_scale``, the
-             fixture first copies the source repo's root/.exclude.conf into the
-             clone's ./root/ (the provision bash has no E2E_SRC to reach it; clean-all
-             does not touch clone-root files, so the copy survives to gdrive-sync). A
-             failure here still hits the finalizer (registered after A), so no
-             half-up stack is stranded.
+             ``e2e_provision_at_scale`` (image rebuild + preflight + real rclone
+             gdrive corpus + make ci) in the clone with the clean child env,
+             output streams live. When ``at_scale``, the fixture first copies the
+             source repo's root/.exclude.conf into the clone's ./root/ (the
+             provision bash has no E2E_SRC to reach it; the clone-root is not
+             wiped, so the copy survives to gdrive-sync). A failure here still
+             hits the finalizer (registered after A), so no half-up stack is
+             stranded.
 
     The body runs in a CLEAN child env (only the iso vars + PATH/HOME/LANG/TERM;
     no operator BASH_ENV, no live KB_HOST/KB_API_KEY) so the operator's profile
@@ -213,10 +213,10 @@ def _setup_iso_env(name, ocr, request, remove_fn, at_scale=False):
         # `make gdrive-sync` so rclone does not abort on non-downloadable paths.
         # The provision bash has no E2E_SRC (_child_env/_ISO_VARS do not carry
         # it), so the fixture -- which has REPO = the source repo root -- copies
-        # it into the clone's ./root/.exclude.conf now, before the provision's
-        # `make clean-all`. clean-all removes .env/.env.local/./data/./.gdrive-backup,
-        # NOT clone-root files, so the copy survives. mkdir -p the clone's ./root
-        # first (a fresh clone has the tracked root/.exclude.conf.example +
+        # it into the clone's ./root/.exclude.conf now, before the provision
+        # runs. The clone-root is not wiped, so the copy survives. mkdir -p the
+        # clone's ./root first (a fresh clone has the tracked
+        # root/.exclude.conf.example +
         # root/.tests/, but the copy target is the gitignored root/.exclude.conf
         # beside them). Transitional: a
         # pre-migration source repo still has the OLD gdrive-exclude.conf (not
@@ -281,8 +281,8 @@ def iso_env_named(request):
     ``.test-env/<stamp>-<suffix>/``). The iso env is clean / prod-exact: the only
     diffs from prod are ``KB_HOST`` (the auto-picked port) + the ephemeral
     ``KB_API_KEY`` (file-based in the clone .env.local). No env hacks. Pass
-    ``at_scale=True`` for the comprehensive at-scale provision (clean-all + image
-    rebuild + real rclone gdrive corpus; used by test_09_gdrive_index).
+    ``at_scale=True`` for the comprehensive at-scale provision (image rebuild +
+    real rclone gdrive corpus; used by test_09_gdrive_index).
 
     Setup is split (isolate -> finalizer -> provision) so a provision failure
     does not strand a half-up stack. Teardown branches on the test's own
@@ -297,7 +297,7 @@ def iso_env_named(request):
 @pytest.fixture(scope="session")
 def iso_env(request):
     """Session-scoped SHARED clean-prod stack for the iso+shared tests
-    (test_04/05/06/07/10/11/13/14/15). Provisions ONE isolated stack
+    (test_04/05/06/07/10/11/13/14/15/17). Provisions ONE isolated stack
     (e2e_isolate "iso-shared", auto-picked port, OCR=true template default) +
     e2e_provision, shared across all of them. Each shared test's body runs in a
     CLEAN child env via the returned ``_run``; the tests self-clean (delete
