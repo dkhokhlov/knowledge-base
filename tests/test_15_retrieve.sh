@@ -3,10 +3,12 @@
 # -> OWUI). Proves:
 #   - the Caddyfile @retrieve route reaches the api-gateway (validation matrix:
 #     no key -> 401, non-UUID kb_id -> 400, bad mode -> 400, empty query -> 400);
-#   - all three modes (hybrid/lexical/vector) -> 200 against a synthetic fixture KB;
-#   - acceptance: mode=lexical returns a rare exact-token chunk (the point of the
-#     pgvector-FTS redesign — pure FTS finds terse keyword chunks pure-vector
-#     misses). Gated on VECTOR_DB=pgvector (lexical is not pure FTS on Chroma).
+#   - all three modes (hybrid/lexical/vector) -> 200 + the full response validated
+#     against a synthetic fixture KB (schema + the fixture chunk at rank 0). The
+#     fixture is one small .txt with a rare synthetic token, so every mode that
+#     returns anything must return that chunk. Content validation is gated on
+#     VECTOR_DB=pgvector (lexical is not pure FTS on Chroma); 200 is checked on
+#     every backend.
 #
 # Self-contained: the temp KB is created with the admin key, granted '*' read so
 # the agent (user) key can retrieve, and deleted on EXIT (its files too). The
@@ -139,38 +141,73 @@ else
   finish; exit 1
 fi
 
-# --- all three modes -> 200 against the fixture KB ---------------------------
-section "POST /retrieve all three modes -> 200"
-for mode in hybrid lexical vector; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$G/retrieve" "${RD[@]}" -H "$CT" \
-    -d "{\"kb_id\":\"${KB_ID}\",\"query\":\"${FIXTURE_TOKEN}\",\"k\":10,\"mode\":\"${mode}\"}")
-  [ "$code" = 200 ] && pass "mode=$mode -> 200" || fail "mode=$mode -> $code (want 200)"
-done
-
-# --- acceptance: mode=lexical returns the rare exact token (pgvector FTS) -----
-# The lexical mode is the point of the redesign: pure FTS (ts_rank_cd) returns
-# the exact-token chunk, where pure-vector can miss terse keyword chunks.
-# Requires VECTOR_DB=pgvector + the OWUI P7/P8/P9 patches. On a non-pgvector
-# backend lexical is not pure FTS, so SKIP (not a regression).
-section "acceptance: mode=lexical returns the exact-token chunk"
+# --- all three modes -> 200 + full response validated against the fixture -----
+# The fixture KB holds ONE chunk containing FIXTURE_TOKEN, so every mode that
+# returns anything must return that chunk (rank 0, the only hit). Per mode we
+# validate the FULL response -- not just a 200, not just ">=1 hit": the schema
+# (mode / kb_id / k / score_order / hits) AND that the fixture chunk is returned
+# at rank 0. score_order: hybrid + lexical rank by RRF score (desc); vector by
+# cosine distance (asc). Gated on VECTOR_DB=pgvector (lexical is not pure FTS
+# on Chroma, so content validation would false-fail there; the 200 path is
+# checked on every backend).
+section "POST /retrieve all three modes -> 200 + response validated"
 if [ "${VECTOR_DB:-}" != "pgvector" ]; then
-  pass "SKIP: VECTOR_DB!=pgvector (lexical is not pure FTS on this backend)"
+  for mode in hybrid lexical vector; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$G/retrieve" "${RD[@]}" -H "$CT" \
+      -d "{\"kb_id\":\"${KB_ID}\",\"query\":\"${FIXTURE_TOKEN}\",\"k\":10,\"mode\":\"${mode}\"}")
+    [ "$code" = 200 ] && pass "mode=$mode -> 200 (content SKIP: VECTOR_DB!=pgvector)" \
+      || fail "mode=$mode -> $code (want 200)"
+  done
 else
-  body=$(curl -s -X POST "$G/retrieve" "${RD[@]}" -H "$CT" \
-    -d "{\"kb_id\":\"${KB_ID}\",\"query\":\"${FIXTURE_TOKEN}\",\"k\":10,\"mode\":\"lexical\"}")
-  rank0=$(printf '%s' "$body" | python3 -c 'import sys,json
-tok=sys.argv[1]
+  for mode in hybrid lexical vector; do
+    case "$mode" in hybrid|lexical) want_order=desc ;; vector) want_order=asc ;; esac
+    bf="$(mktemp)"
+    code=$(curl -s -o "$bf" -w '%{http_code}' -X POST "$G/retrieve" "${RD[@]}" -H "$CT" \
+      -d "{\"kb_id\":\"${KB_ID}\",\"query\":\"${FIXTURE_TOKEN}\",\"k\":10,\"mode\":\"${mode}\"}")
+    if [ "$code" != 200 ]; then
+      fail "mode=$mode -> HTTP $code (want 200): $(head -c 200 "$bf" 2>/dev/null)"
+      rm -f "$bf"; continue
+    fi
+    verdict=$(python3 -c '
+import sys, json
+mode, kb_id, want_order, tok = sys.argv[1:5]
 try:
-    d=json.load(sys.stdin)
-    hits=d.get("hits") or []
-    print(str(len(hits)>0 and tok in (hits[0].get("text") or "")).lower())
-except Exception:
-    print("error")' "$FIXTURE_TOKEN" 2>/dev/null)
-  if [ "$rank0" = "true" ]; then
-    pass "mode=lexical returns the exact-token chunk at rank 0"
-  else
-    fail "mode=lexical did not return the exact-token chunk at rank 0 (rank0=$rank0)"
-  fi
+    d = json.load(sys.stdin)
+except Exception as ex:
+    print("FAIL non-JSON: %s" % ex); sys.exit(0)
+errs = []
+if d.get("mode") != mode:
+    errs.append("mode=%r want %s" % (d.get("mode"), mode))
+if d.get("kb_id") != kb_id:
+    errs.append("kb_id=%r want %s" % (d.get("kb_id"), kb_id))
+if d.get("k") != 10:
+    errs.append("k=%r want 10" % (d.get("k"),))
+if d.get("score_order") != want_order:
+    errs.append("score_order=%r want %s" % (d.get("score_order"), want_order))
+hits = d.get("hits")
+if not isinstance(hits, list):
+    errs.append("hits=%r want list" % (hits,))
+elif len(hits) == 0:
+    errs.append("hits empty (mode returned no chunks for the fixture token)")
+else:
+    h0 = hits[0] or {}
+    if tok not in (h0.get("text") or ""):
+        errs.append("rank0 text missing the fixture token (text=%r)" % (h0.get("text"),))
+    for i, h in enumerate(hits):
+        if not isinstance(h, dict) or "text" not in h or "distance" not in h:
+            errs.append("hit[%d] not a flattened chunk (keys=%r)" % (i, list((h or {}).keys())))
+            break
+if errs:
+    print("FAIL " + "; ".join(errs))
+else:
+    print("OK n=%d score_order=%s rank0-has-token" % (len(hits), d.get("score_order")))
+' "$mode" "$KB_ID" "$want_order" "$FIXTURE_TOKEN" < "$bf" 2>/dev/null || echo "FAIL validator crashed")
+    rm -f "$bf"
+    case "$verdict" in
+      OK*) pass "mode=$mode -> 200 + ${verdict#OK }" ;;
+      *)   fail "mode=$mode -> ${verdict}" ;;
+    esac
+  done
 fi
 
 finish
