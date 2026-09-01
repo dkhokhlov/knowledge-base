@@ -478,9 +478,20 @@ e2e_stop_docker() {
   local orphans had
   had="$(docker ps -aq --filter label=com.docker.compose.project="$proj" 2>/dev/null | wc -l)"
   if [ -d "$clone" ]; then
-    ( cd "$clone" && COMPOSE_PROJECT_NAME="$proj" \
-        COMPOSE_FILE="compose.yml:compose.$name.override.yml" \
-        docker compose down --remove-orphans 2>/dev/null || true )
+    (
+      cd "$clone" || exit 0
+      # Detect the override file e2e_isolate wrote instead of reconstructing its
+      # name from $name: the filesystem is the single source of truth, so a
+      # naming-convention drift between e2e_isolate and here cannot make
+      # `compose down` load the wrong COMPOSE_FILE (which would skip the
+      # override, leave the renamed containers' network, and leak it). A missing
+      # override (legacy clone) -> bare compose.yml, same as before.
+      cf="compose.yml"
+      ov="$(ls compose.*.override.yml 2>/dev/null | head -1)"
+      [ -n "$ov" ] && cf="compose.yml:$ov"
+      COMPOSE_PROJECT_NAME="$proj" COMPOSE_FILE="$cf" \
+        docker compose down --remove-orphans 2>/dev/null || true
+    )
   fi
   # Label-based orphan sweep (exact project label) -- works even if the clone dir
   # is gone. Safe: the live project is `knowledgebase`, never kb-<name>[-<stamp>].
