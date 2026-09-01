@@ -287,10 +287,20 @@ def iso_env_named(request):
     Setup is split (isolate -> finalizer -> provision) so a provision failure
     does not strand a half-up stack. Teardown branches on the test's own
     outcome (passed -> e2e_down remove the clone; failed -> e2e_stop_docker
-    keep it for ``make clean-tests`` to flush)."""
+    keep it for ``make clean-tests`` to flush) -- EXCEPT long runs
+    (@pytest.mark.long), which are NEVER auto-removed (kept on pass too; flush
+    via `make clean-tests`)."""
     def _make(suffix, ocr=None, at_scale=False):
-        return _setup_iso_env(suffix, ocr, request,
-                              lambda: _test_passed(request), at_scale=at_scale)
+        # Long runs (@pytest.mark.long: test_08, test_09) are NEVER auto-removed
+        # at teardown -- they are expensive to rebuild (at-scale provision +
+        # real-corpus drain) and are kept for inspection / reuse; the operator
+        # flushes them manually via `make clean-tests` (or
+        # `make clean-test NAME=<suffix> STAMP=<stamp>`). Quick named iso tests
+        # (test_12, test_16) still auto-remove on pass. See
+        # [[long-runs-never-auto-cleaned]].
+        is_long = request.node.get_closest_marker("long") is not None
+        remove_fn = (lambda: False) if is_long else (lambda: _test_passed(request))
+        return _setup_iso_env(suffix, ocr, request, remove_fn, at_scale=at_scale)
     return _make
 
 
