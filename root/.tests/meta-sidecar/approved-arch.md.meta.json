@@ -1,0 +1,11 @@
+{
+  "id": "synthetic-fixture-0003",
+  "name": "approved-arch.md",
+  "description": "Synthetic approved architecture fixture for the meta-sidecar integration test. [approved] [architecture]",
+  "labels": ["approved", "architecture"],
+  "grounded": true,
+  "approval": {"status": "approved", "complete_time": "2026-01-03T00:00:00Z"},
+  "mimeType": "text/markdown",
+  "createdTime": "2026-01-03T00:00:00Z",
+  "modifiedTime": "2026-01-03T00:00:00Z"
+}

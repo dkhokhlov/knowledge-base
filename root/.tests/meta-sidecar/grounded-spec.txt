@@ -1,0 +1,5 @@
+Meta-sidecar grounding fixture. meta-sidecar-marker-9d4e1 is the rare retrieval
+token for the integration test. This document is marked grounded and approved in
+its .meta.json sidecar. The api-gateway reads the sidecar at index time and
+stores it in File.meta.data.gdrive. The kb skill retrieve joins it per file_id so
+the grounded flag, labels, and approval status travel with each retrieved chunk.

@@ -1,0 +1,11 @@
+{
+  "id": "synthetic-fixture-0002",
+  "name": "pending-draft.md",
+  "description": "Synthetic pending draft fixture for the meta-sidecar integration test. [draft]",
+  "labels": ["draft"],
+  "grounded": false,
+  "approval": {"status": "pending_review", "complete_time": null},
+  "mimeType": "text/markdown",
+  "createdTime": "2026-01-02T00:00:00Z",
+  "modifiedTime": "2026-01-02T00:00:00Z"
+}

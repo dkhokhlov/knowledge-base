@@ -18,7 +18,7 @@ Markers are on each test, in-file:
 
 Fixtures (tests/conftest.py):
   run_sh        live stack (integration, test_01/02/03).
-  iso_env       session-shared clean-prod stack (iso+shared, 9 tests).
+  iso_env       session-shared clean-prod stack (iso+shared, 10 tests).
   iso_env_named a named own-iso stack (iso+long / iso single).
 
 The python unit tests are separate: native stdlib unittest.TestCase modules
@@ -123,3 +123,9 @@ def test_12_kb_check(iso_env_named):
 def test_16_generic_kb(iso_env_named):
     """Generic (non-gdrive) KB under ./root/<name>/: the additive .exclude.conf deny-list ([*] global + per-KB [<name>]) on a non-gdrive KB + the generic shell pipeline (make kb-bootstrap/kb-sync/kb-finalize by name). Named own-iso stack (REINDEX is instance-wide)."""
     iso_env_named("gentest")("tests/test_16_generic_kb.sh")
+
+@pytest.mark.iso
+@pytest.mark.shared
+def test_17_gdrive_meta_sidecar(iso_env):
+    """gdrive `.meta.json` sidecar -> File.meta.data.gdrive -> kb skill retrieve gdrive-join, e2e on a real stack: index a committed fixture set (docs + sidecars + one no-sidecar control) and assert each hit's joined gdrive record (grounded/labels/approval) over the kb skill `retrieve` path."""
+    iso_env("tests/test_17_gdrive_meta_sidecar.sh")

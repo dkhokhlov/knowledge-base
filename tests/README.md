@@ -29,7 +29,7 @@ groups are `unit`, `integration`, `iso`.
 |---|---|---|---|
 | no stack | `test_gateway_unit`, `test_kb_check`, `test_offset_aware_chunking`, `test_output_json` | `unit` | stdlib UTs |
 | live (RO) | `test_01`, `test_02`, `test_03` | `integration` | read-only; verify the LIVE deployment's infra (Neo4j not host-published, pg_isready on live kb-postgres) |
-| shared-iso | `test_04`, `05`, `06`, `07`, `10`, `11`, `13`, `14`, `15` | `iso` + `shared` | contaminate but self-clean (traps delete temp KBs/files) → share ONE clean-prod stack |
+| shared-iso | `test_04`, `05`, `06`, `07`, `10`, `11`, `13`, `14`, `15`, `17` | `iso` + `shared` | contaminate but self-clean (traps delete temp KBs/files) → share ONE clean-prod stack |
 | own-iso (named) | `test_08_e2e`, `test_09_gdrive_index`, `test_12_kb_check` | `iso` (+`long`) | destructive / heavy / no self-cleanup → each gets its own named clean-prod stack |
 
 `test_09_gdrive_index` is the comprehensive at-scale e2e (`iso long`): clean-all +
@@ -48,7 +48,7 @@ Leaf targets select by marker; aggregator targets compose the leaves.
 | `make test-unit` | `-m unit` | the python UTs |
 | `make test-live-RO` | `-m "integration"` | live-RO (`test_01/02/03`) |
 | `make test-iso` | `test-iso-shared` + `test-iso-single` | all short iso (shared + single) |
-| `make test-iso-shared` | `-m "iso and shared"` | the 9 shared-iso tests (one session stack) |
+| `make test-iso-shared` | `-m "iso and shared"` | the 10 shared-iso tests (one session stack) |
 | `make test-iso-single` | `-m "iso and not long and not shared"` | the named own-iso short tests (`test_12`) |
 | `make test-long` | `test-iso-long` | long iso (`test_08` + `test_09`) |
 | `make test-iso-long` | `-m "iso and long"` | long iso (`test_08` + `test_09`) |
@@ -82,7 +82,7 @@ Two kinds of test, both collected natively by pytest:
   fixture (`tests/conftest.py`) with the `.sh` path:
     - `run_sh` — live stack (`integration`, `test_01/02/03`). Runs `bash <script>`
       from the repo root with the caller's env; output streams live.
-    - `iso_env` — session-shared clean-prod stack (`iso`+`shared`, 9 tests). The
+    - `iso_env` — session-shared clean-prod stack (`iso`+`shared`, 10 tests). The
       first test provisions ONE stack; each body runs in a CLEAN child env (only
       the iso vars + `PATH`/`HOME`/`LANG`/`TERM`; no operator `BASH_ENV`, no live
       `KB_HOST`/`KB_API_KEY`) so the operator profile never reaches the body.
@@ -128,6 +128,7 @@ regenerate with `--out root/.tests/chunkq`). test_13 runs it with
 | `test_15_retrieve` | `tests/test_15_retrieve.sh` | `iso shared` |
 | `test_12_kb_check` | `tests/test_12_kb_check.sh` | `iso` |
 | `test_16_generic_kb` | `tests/test_16_generic_kb.sh` | `iso` |
+| `test_17_gdrive_meta_sidecar` | `tests/test_17_gdrive_meta_sidecar.sh` | `iso shared` |
 | (native UT) | `test_gateway_unit.py` | `unit` |
 | (native UT) | `test_kb_check.py` | `unit` |
 | (native UT) | `test_offset_aware_chunking.py` | `unit` |

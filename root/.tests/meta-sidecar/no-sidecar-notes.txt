@@ -1,0 +1,4 @@
+No-sidecar control fixture. meta-sidecar-marker-3e6d9 is the rare retrieval token.
+This document has NO .meta.json sidecar, so the gateway stores no gdrive meta for
+it. The kb skill retrieve join must return gdrive=null (None) for this hit, not a
+fabricated record.
