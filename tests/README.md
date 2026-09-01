@@ -127,6 +127,7 @@ regenerate with `--out root/.tests/chunkq`). test_13 runs it with
 | `test_14_rag_config` | `tests/test_14_rag_config.sh` | `iso shared` |
 | `test_15_retrieve` | `tests/test_15_retrieve.sh` | `iso shared` |
 | `test_12_kb_check` | `tests/test_12_kb_check.sh` | `iso` |
+| `test_16_generic_kb` | `tests/test_16_generic_kb.sh` | `iso` |
 | (native UT) | `test_gateway_unit.py` | `unit` |
 | (native UT) | `test_kb_check.py` | `unit` |
 | (native UT) | `test_offset_aware_chunking.py` | `unit` |

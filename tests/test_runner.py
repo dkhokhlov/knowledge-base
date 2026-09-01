@@ -117,3 +117,9 @@ def test_15_retrieve(iso_env):
 def test_12_kb_check(iso_env_named):
     """Isolated e2e for make kb-check on pgvector: named throwaway stack (fixture owns isolate+provision+teardown), create a reproducible leak class, detect -> PURGE=1 export+purge -> re-audit 0."""
     iso_env_named("kbcheck")("tests/test_12_kb_check.sh")
+
+
+@pytest.mark.iso
+def test_16_generic_kb(iso_env_named):
+    """Generic (non-gdrive) KB under ./root/<name>/: the additive .exclude.conf deny-list ([*] global + per-KB [<name>]) on a non-gdrive KB + the generic shell pipeline (make kb-bootstrap/kb-sync/kb-finalize by name). Named own-iso stack (REINDEX is instance-wide)."""
+    iso_env_named("gentest")("tests/test_16_generic_kb.sh")
