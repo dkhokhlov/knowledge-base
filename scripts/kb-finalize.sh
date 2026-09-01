@@ -39,9 +39,11 @@
 #                              the live index).
 #
 # Preconditions:
-#   - Stack running + the gdrive drain dispatched (make gdrive-sync) for --wait.
+#   - Stack running + the target drain dispatched (make gdrive-sync / make kb-sync)
+#     for --wait. KB=<name> selects the KB to wait on (default: gdrive).
 #   - PGVECTOR_USER / PGVECTOR_DB in .env (scaffolded by make bootstrap).
-#   - OPENWEBUI_ADMIN_API_KEY + GDRIVE_KB_ID in .env.local (for --wait only).
+#   - OPENWEBUI_ADMIN_API_KEY in .env.local + KB_HOST (always: the global terminal
+#     guard below polls /status for every KB under ./root/ before REINDEX).
 # Container name: POSTGRES_CONTAINER (iso-fixture-injected) or kb-postgres (live).
 #
 # test_09_gdrive_index.sh keeps its OWN inlined REINDEX (with POSTGRES_CONTAINER
@@ -98,13 +100,20 @@ PG_CTN="${POSTGRES_CONTAINER:-kb-postgres}"
 # exact race this tool exists to prevent). Mirrors tests/test_09_gdrive_index.sh;
 # src_count is read from /status (the gateway's authoritative source walk) instead
 # of a local `find`, so this stays allowlist-agnostic.
+# KB_HOST + admin key are ALWAYS required now: the global terminal guard (B11)
+# below polls /status for every KB under ./root/ before REINDEX, in both modes.
+: "${KB_HOST:?FAIL  KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}"
+: "${OPENWEBUI_ADMIN_API_KEY:?FAIL  OPENWEBUI_ADMIN_API_KEY not set in .env.local (run: make api-keys)}"
+adm=(-H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}")
+KB="${KB:-gdrive}"
+if ! KB_ID=$(KB="$KB" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null); then
+  echo "FAIL  could not resolve KB '$KB' by name (run: make kb-bootstrap KB=$KB ; then retry)" >&2
+  exit 1
+fi
+
 if [ "$WAIT" = "1" ]; then
-  : "${KB_HOST:?FAIL  KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}"
-  : "${GDRIVE_KB_ID:?FAIL  GDRIVE_KB_ID not set in .env.local (run: make gdrive-index-bootstrap)}"
-  : "${OPENWEBUI_ADMIN_API_KEY:?FAIL  OPENWEBUI_ADMIN_API_KEY not set in .env.local (run: make api-keys)}"
   wait_s="${GDRIVE_TEST_WAIT:-2400}"
-  status_url="${KB_HOST}/status?source=gdrive&kb_id=${GDRIVE_KB_ID}&json=1"
-  adm=(-H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}")
+  status_url="${KB_HOST}/status?kb_id=${KB_ID}&dir=${KB}&json=1"
 
   # source_count: the drain's reference set. Read ONCE before polling (the source
   # dir is stable after `make gdrive-sync`, so this is a constant for the drain).
@@ -156,6 +165,60 @@ except Exception:
   [ "$src_count" -gt 0 ] \
     || echo 'WARN  source_count=0 (empty corpus) — REINDEXing anyway (idempotent, harmless)'
 fi
+
+# --- global terminal guard + lock (B11) ---------------------------------------
+# REINDEX is INSTANCE-WIDE: idx_document_chunk_vector / idx_document_chunk_text_search
+# are fixed names on the single shared document_chunk table, so REINDEX takes an
+# ACCESS EXCLUSIVE lock on the whole table, not one KB. The per-KB --wait above
+# proves only the TARGET KB is terminal; another KB under ./root/ can still be
+# inserting vectors (its extract->embed->link in flight), and the index lock would
+# block those inserts -> failed files (the exact race this tool exists to prevent).
+# So before REINDEX: (1) acquire a host-side lock to serialize concurrent finalizes;
+# (2) require EVERY top-level non-dot subdir of ./root/ to be terminal.
+LOCK="./.kb-finalize.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  if ! flock -n 9; then
+    echo "FAIL  another kb-finalize is holding $LOCK -- wait for it, or remove the stale lock if no finalize is running" >&2
+    exit 1
+  fi
+else
+  echo "WARN  flock not found -- cannot serialize concurrent finalizes (B11); proceeding without a lock" >&2
+fi
+
+# Poll every KB under ./root/ until all are terminal (pending+processing == 0).
+# Fail loud if any KB is still in flight after KB_FINALIZE_WAIT (default 300s) -- do
+# NOT REINDEX while inserts are running. A KB that cannot be resolved or whose
+# /status is unreadable counts as non-terminal (fail-closed: never REINDEX blind).
+gwait_s="${KB_FINALIZE_WAIT:-300}"
+gdeadline=$(( $(date +%s) + gwait_s ))
+all_terminal=0; nonterminal=""
+while :; do
+  all_terminal=1; nonterminal=""
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    kid=$(KB="$d" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null) || { nonterminal="$nonterminal $d(unresolved)"; all_terminal=0; continue; }
+    inflight=$(curl -sS --max-time 120 "${KB_HOST}/status?kb_id=${kid}&dir=${d}&json=1" "${adm[@]}" 2>/dev/null \
+      | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin); print(int(d.get("pending",0)) + int(d.get("processing",0)))
+except Exception:
+    print("ERR")
+' 2>/dev/null || echo "ERR")
+    if [ "$inflight" != "0" ] 2>/dev/null; then
+      nonterminal="$nonterminal $d(pending+processing=${inflight})"; all_terminal=0
+    fi
+  done < <(find root -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort)
+  if [ "$all_terminal" = "1" ]; then break; fi
+  if [ "$(date +%s)" -ge "$gdeadline" ]; then break; fi
+  sleep 10
+done
+if [ "$all_terminal" != "1" ]; then
+  echo "FAIL  not all KBs terminal after ${gwait_s}s (still in flight:${nonterminal}) -- refusing to REINDEX (instance-wide lock would block in-flight inserts). Check: make kb-status" >&2
+  exit 1
+fi
+echo "==> all KBs under ./root/ terminal -- safe to REINDEX"
 
 # --- REINDEX ivfflat vector + GIN FTS (the finalize step) ---------------------
 # Fixed index names (the schema owns them). A future HNSW migration renames

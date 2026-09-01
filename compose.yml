@@ -193,11 +193,11 @@ services:
       dockerfile: Dockerfile
     container_name: kb-api-gateway
     restart: unless-stopped
-    # Run as the host gdrive owner uid so the read-only ./gdrive bind mount
-    # (0700/0600, owner-only from rclone) is readable. Non-root (just the host
+    # Run as the host owner uid so the read-only ./root bind mount
+    # (0700/0600, owner-only from rclone/rsync) is readable. Non-root (just the host
     # owner uid, not root); the gateway writes nothing (stateless). Override
     # HOST_UID/HOST_GID in .env (auto-set by `make bootstrap` from the
-    # current user's id -u/id -g) if the gdrive owner is not the operator uid.
+    # current user's id -u/id -g) if the ./root owner is not the operator uid.
     user: "${HOST_UID:?HOST_UID required in .env}:${HOST_GID:?HOST_GID required in .env}"
     networks: [graph_internal, edge, owui_net]
     security_opt:
@@ -221,17 +221,20 @@ services:
       - KB_GATEWAY_PORT=8010
       - KB_MAX_CONCURRENCY=${KB_MAX_CONCURRENCY:?KB_MAX_CONCURRENCY required in .env}
       - LOG_LEVEL=${LOG_LEVEL:?LOG_LEVEL required in .env}
-      # gdrive index path: the gateway holds the admin key (in docker) and
+      # KB index path: the gateway holds the admin key (in docker) and
       # drives OWUI's sync protocol for /index. Caller's KB_API_KEY is
-      # authorization only. GDRIVE_KB_ID + KB_MAX_SIZE default the /index call.
+      # authorization only. dir=<name> + kb_id=<id> + KB_MAX_SIZE scope the call.
       - OPENWEBUI_ADMIN_API_KEY=${OPENWEBUI_ADMIN_API_KEY:-}
       # Chat model the gateway inserts for POST /memory/rag (the /kb skill's
       # RAG path). INDEPENDENT from GRAPHITI_MODEL (the extraction LLM): the
       # defaults are equal so one 14B instance fits the GPU, but they may differ.
       # `make api-keys` grants the agent `*` read on this model. Empty -> 503.
       - OPENWEBUI_MODEL=${OPENWEBUI_MODEL:-}
-      - GDRIVE_KB_ID=${GDRIVE_KB_ID:-}
-      - GDRIVE_ROOT=/gdrive
+      # KB_SOURCE_ROOT: the in-container mount point of the ./root source tree.
+      # Each top-level subdir is one KB; POST /index?dir=<name>&kb_id=<id> walks
+      # $KB_SOURCE_ROOT/<name>. The gateway is stateless (no *_KB_ID env); name
+      # resolution is the caller's job (scripts/kb-bootstrap.sh --resolve).
+      - KB_SOURCE_ROOT=/kb-source
       - KB_MAX_SIZE=${KB_MAX_SIZE:?KB_MAX_SIZE required in .env}
       # /index sync-protocol call timeout (sync/diff, dirs/create, batch/add,
       # sync/cleanup, list files). The 15s identity timeout is too short for a
@@ -242,10 +245,11 @@ services:
       - KB_RETRIEVE_K_DEFAULT=${KB_RETRIEVE_K_DEFAULT:?KB_RETRIEVE_K_DEFAULT required in .env}
       - KB_RETRIEVE_K_MAX=${KB_RETRIEVE_K_MAX:?KB_RETRIEVE_K_MAX required in .env}
       - KB_MAX_QUERY=${KB_MAX_QUERY:?KB_MAX_QUERY required in .env}
-    # Stateless: no persisted data. The read-only gdrive mount is an INPUT
-    # (source files to index), not state. The gateway never writes to it.
+    # Stateless: no persisted data. The read-only ./root mount is an INPUT
+    # (source trees to index, one KB per top-level subdir), not state. The gateway
+    # never writes to it.
     volumes:
-      - ./gdrive:/gdrive:ro
+      - ./root:/kb-source:ro
     healthcheck:
       # python:3-slim has no curl/wget — use the stdlib (codex #7). /health
       # reflects the OWUI identity dependency (codex #8).
@@ -272,7 +276,7 @@ services:
       postgres:
         condition: service_healthy
     # Chroma 1.5.x (rust backend) opens a SQLite db per RAG collection. Bulk
-    # ingest (api-gateway /index syncing the gdrive tree) creates 100s of collections and
+    # ingest (api-gateway /index syncing a ./root KB tree) creates 100s of collections and
     # exhausts the default 1024 fd soft limit -> SQLITE_CANTOPEN "unable to open
     # database file" on every insert (KB file_count stays 0, uploads time out,
     # OWUI goes unhealthy). Raise nofile so collection creation under load does

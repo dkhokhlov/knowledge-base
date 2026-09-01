@@ -79,7 +79,7 @@ class EntryMtimeTests(unittest.TestCase):
         # gdrive-meta sidecars must NOT be indexed. `.meta` (YAML) is dropped by
         # the ext allowlist (meta ∉ DEFAULT_ALLOW); `.meta.json` (JSON, ext `json`
         # which IS allowed) is dropped by the name skip in _entry_for. Guards the
-        # "exclude sidecars from indexing" claim (gdrive-exclude.conf [*] protects
+        # "exclude sidecars from indexing" claim (./root/.exclude.conf [*] protects
         # the local sidecars from sync deletion; the walk excludes them from the
         # index).
         root = tempfile.mkdtemp()
@@ -132,6 +132,107 @@ class EntryMtimeTests(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(root)
+
+
+class TestApplyExcludes(unittest.TestCase):
+    """apply_excludes: the additive .exclude.conf deny-list (B3/B5/B6/B7/B8).
+    Each test builds a temp KB_SOURCE_ROOT + .exclude.conf and runs the filter on
+    synthetic walk entries ({path, filename}); no stack needed."""
+
+    def _root_with(self, conf_text):
+        root = tempfile.mkdtemp()
+        with open(os.path.join(root, ".exclude.conf"), "w", encoding="utf-8") as f:
+            f.write(conf_text)
+        return root
+
+    def _e(self, path, filename):
+        return {"path": path, "filename": filename}
+
+    def test_missing_conf_is_noop(self):
+        # B5: no .exclude.conf -> files returned unchanged (the hardcoded sidecar
+        # skip in _entry_for is independent of this deny-list).
+        root = tempfile.mkdtemp()
+        try:
+            files = [self._e("", "a.pdf"), self._e("sub", "b.md")]
+            self.assertEqual(app.apply_excludes(files, "gdrive", root), files)
+        finally:
+            import shutil; shutil.rmtree(root)
+
+    def test_star_is_global_every_kb(self):
+        # B6: [*] applies to EVERY KB dir, not just gdrive.
+        root = self._root_with("[*]\n*.json\n")
+        try:
+            files = [self._e("", "a.json"), self._e("", "b.pdf")]
+            out = app.apply_excludes(files, "mydocs", root)
+            self.assertEqual([f["filename"] for f in out], ["b.pdf"])
+        finally:
+            import shutil; shutil.rmtree(root)
+
+    def test_section_selection_descendant_not_unrelated(self):
+        # B3: dir=gdrive selects [*], [gdrive], AND descendant [gdrive/Team Mtgs];
+        # NOT an unrelated [mydocs] section.
+        conf = ("[*]\n*.pyc\n"
+                "[gdrive]\nsecret.txt\n"
+                "[gdrive/Team Mtgs]\n/notes.md\n"
+                "[mydocs]\n*.md\n")
+        root = self._root_with(conf)
+        try:
+            files = [
+                self._e("", "a.pyc"),              # [*] global -> drop
+                self._e("", "secret.txt"),         # [gdrive] basename -> drop
+                self._e("Team Mtgs", "notes.md"),  # [gdrive/Team Mtgs] /anchored -> drop
+                self._e("", "keep.pdf"),           # nothing matches -> keep
+                self._e("", "doc.md"),             # [mydocs] *.md does NOT apply to gdrive -> keep
+            ]
+            out = app.apply_excludes(files, "gdrive", root)
+            self.assertEqual(sorted(f["filename"] for f in out), ["doc.md", "keep.pdf"])
+        finally:
+            import shutil; shutil.rmtree(root)
+
+    def test_glob_star_does_not_cross_slash(self):
+        # B7: "*" matches within one segment; "sub/*.pdf" must NOT match
+        # "sub/deep/b.pdf". "**" crosses "/".
+        root = self._root_with("[gdrive]\nsub/*.pdf\nsub2/**/*.pdf\n")
+        try:
+            files = [
+                self._e("sub", "a.pdf"),           # sub/*.pdf -> drop
+                self._e("sub/deep", "b.pdf"),      # sub/*.pdf no (crosses /); sub2/** no -> keep
+                self._e("sub2/deep", "c.pdf"),     # sub2/**/*.pdf -> drop
+            ]
+            out = app.apply_excludes(files, "gdrive", root)
+            self.assertEqual([f["filename"] for f in out], ["b.pdf"])
+        finally:
+            import shutil; shutil.rmtree(root)
+
+    def test_anchored_pattern_anchors_at_section_root(self):
+        # B7: a leading "/" anchors at the section root. [gdrive/sub] /a.pdf drops
+        # gdrive/sub/a.pdf but NOT gdrive/sub/deep/a.pdf.
+        root = self._root_with("[gdrive/sub]\n/a.pdf\n")
+        try:
+            files = [
+                self._e("sub", "a.pdf"),           # /a.pdf anchored -> drop
+                self._e("sub/deep", "a.pdf"),      # rel is deep/a.pdf -> keep
+            ]
+            out = app.apply_excludes(files, "gdrive", root)
+            self.assertEqual([f["filename"] for f in out], ["a.pdf"])
+        finally:
+            import shutil; shutil.rmtree(root)
+
+    def test_anchored_in_nonleaf_rejected(self):
+        # B8: an anchored ("/"-led) pattern in a NON-leaf section ([*], [gdrive]
+        # with a deeper [gdrive/sub]) is rejected at load time -> GatewayError(400).
+        import shutil
+        for conf in ("[*]\n/x.pdf\n",
+                     "[gdrive]\n/x.pdf\n[gdrive/sub]\n*.md\n"):
+            root = tempfile.mkdtemp()
+            try:
+                with open(os.path.join(root, ".exclude.conf"), "w", encoding="utf-8") as f:
+                    f.write(conf)
+                with self.assertRaises(app.GatewayError) as cm:
+                    app.apply_excludes([self._e("", "a.pdf")], "gdrive", root)
+                self.assertEqual(cm.exception.status, 400)
+            finally:
+                shutil.rmtree(root)
 
 
 class _Resp:
@@ -569,7 +670,7 @@ class TestStatusRoute(unittest.TestCase):
         if now is None:
             now = self.T0 + 100
         h = _FakeHandler({}, auth="Bearer caller-key")
-        qs = "source=gdrive&kb_id=%s&json=1" % self.KB
+        qs = "kb_id=%s&dir=gdrive&json=1" % self.KB
         patches = [
             mock.patch.object(owui, "_admin_key", return_value="admin-key"),
             mock.patch.object(app, "walk_source", return_value=[{"path": "x"}]),

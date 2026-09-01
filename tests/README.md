@@ -104,8 +104,8 @@ runner's functions are. `tests/lib.sh` is the shared bash helpers (`pass`/`fail`
 `section`/`finish`/`load_env`/`require_env`/`require_stack_up`/`kb_host`); not a
 test. `scripts/lib-e2e-env.sh` is the reusable iso isolation lib; not a test.
 `tests/fixtures_chunkq_gen.py` is the deterministic generator that produced the
-committed chunk-quality fixtures at `gdrive/.tests/chunkq/` (not a test itself;
-regenerate with `--out gdrive/.tests/chunkq`). test_13 runs it with
+committed chunk-quality fixtures at `root/.tests/chunkq/` (not a test itself;
+regenerate with `--out root/.tests/chunkq`). test_13 runs it with
 `--manifest-only` to re-derive the manifest JSON oracle without writing files.
 
 ## Inventory

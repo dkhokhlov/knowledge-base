@@ -61,7 +61,7 @@ kb_host() {
 # Bail early if the stack is not up and healthy. Exits with status 2.
 # Retries: Caddy returns a transient 502 when an upstream (OWUI/api-gateway) is
 # briefly unavailable -- e.g. under the async gdrive extraction/embedding drain
-# load right after `make gdrive-index`. A single non-retried probe would flake
+# load right after `make kb-index`. A single non-retried probe would flake
 # on that blip; a genuinely-down stack still fails after the retries (5 probes,
 # --max-time 5 each + 2s sleep -> ~30s worst case; a 200 returns on the first).
 require_stack_up() {

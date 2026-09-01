@@ -8,10 +8,50 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Nothing yet.
+- **Generic `./root/` multi-KB source root.** Every top-level subdir of `./root/`
+  is one knowledge base, named after the subdir. The `gdrive` KB becomes one
+  instance of the pattern (`./root/gdrive/`); to add a non-gdrive KB, drop a
+  folder at `./root/<name>/` and run `make kb-bootstrap KB=<name>` +
+  `make kb-sync KB=<name>`. The gateway `POST /index` roots each walk at the
+  named subdir via `dir=<name>` (`root = join(KB_SOURCE_ROOT, dir)`); manifest
+  keys stay subdir-relative, `path` stays an in-KB subpath filter. The gateway is
+  stateless and takes `kb_id` per call; name→id resolution is paginated +
+  unique-or-fail (0 or >1 matches error) in the shell
+  (`scripts/kb-bootstrap.sh --resolve`), not a persisted id.
+- **Unified `./root/.exclude.conf` deny-list.** Replaces the gdrive-only
+  `gdrive-exclude.conf`. INI format: section headers are paths relative to
+  `./root/` (`[gdrive/<drive name>]`, `[my-docs]`, ...), `[*]` is a genuine
+  global deny-list (its patterns are not indexed in ANY KB). Both rclone (gdrive
+  download) and the gateway walk (index) read it with shared rclone-style glob
+  semantics (`*` does not cross `/`, `**` does, a leading `/` anchors at the
+  section root; leaf-only anchored patterns). A gitignored
+  `./root/.exclude.conf.example` documents the format with generic placeholders.
+- **`make kb-migrate-root`** — one-time migration from the old `./gdrive` layout
+  to the generic `./root/` source root: guards the gdrive drain is terminal
+  (tries the new `dir=gdrive` shape, falls back to the old `source=gdrive` shape;
+  refuses if `/status` is unreachable), cross-filesystem move guard,
+  `mv gdrive root/gdrive`, rewrites the exclude section headers (`[*]` verbatim;
+  per-drive `[X]` → `[gdrive/X]`), removes `GDRIVE_KB_ID` from `.env.local`,
+  `make start`.
+- **New generic make targets**: `kb-sync` (reconcile each `./root/` subdir, or
+  one via `KB=<name>`; no rclone stage), `kb-sync-finalize` (the
+  sync→wait→finalize pipeline for any subdir), `kb-migrate-root` (above).
 
 ### Changed
 
+- **Target renames** (gdrive-specific → generic): `gdrive-index` → `kb-index`
+  (`KB=<name>` selects the subdir + resolves the KB by name; `dir=<name>` roots
+  the walk; `gdrive-sync` remains the rclone-equipped variant for the `gdrive`
+  subdir), `gdrive-index-bootstrap` → `kb-bootstrap` (`KB=<name>`; `--resolve`
+  mode for name→id lookup), `gdrive-status` → `kb-status` (`KB=<name>`).
+  `kb-finalize` now polls EVERY `./root/` subdir to a global terminal state first
+  + holds a `flock` lock (REINDEX is instance-wide on the shared
+  `document_chunk` table), not just the gdrive drain. `gdrive-sync-finalize` is
+  retained (gdrive rclone pipeline) alongside the new `kb-sync-finalize`.
+- **Deprecated `GDRIVE_KB_ID` and `GDRIVE_ROOT`.** Replaced by `KB_SOURCE_ROOT`
+  (the compose-mounted `/kb-source` root) + name-based KB resolution. The compose
+  mount is now `./root:/kb-source:ro`. `make kb-migrate-root` moves an existing
+  deployment off the old vars.
 - **Consolidated the `/kb` skill's two wrappers into one self-contained
   `skills/claude/scripts/kb.py`.** Merged `owui.py` (OWUI KBs + projects memory)
   + `kb_gateway.py` (Graphiti facts) into a single zero-dependency CLI. Verb

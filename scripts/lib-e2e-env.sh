@@ -281,9 +281,9 @@ e2e_provision() {
   # workspace.knowledge + sharing.public_knowledge (test_05 user-key KB create
   # 401s without it), rag-config sets the strict-grounding RAG template + syncs
   # rag.ollama.base_url. Both hit the OWUI admin API via Caddy at KB_HOST (not
-  # the api-gateway), so the stack-healthy wait above covers them. gdrive-index-
-  # bootstrap is deliberately excluded: it needs PII rclone creds absent from the
-  # clone, and the shared tests use synthetic fixtures (not the gdrive KB).
+  # the api-gateway), so the stack-healthy wait above covers them. kb-bootstrap is
+  # deliberately excluded here: the at-scale path runs it (needs the gdrive KB
+  # before gdrive-sync); the deterministic path uses synthetic fixtures only.
   make projects-bootstrap || return 1
   make rag-config || return 1
   e2e_ephemeral_user || return 1
@@ -292,8 +292,8 @@ e2e_provision() {
 # Destructive AT-SCALE provision of the isolated stack: the comprehensive
 # from-scratch path (clean-all wipe + re-bootstrap + restore admin creds + [OCR
 # model pull] + preflight + image rebuild + start + wait healthy + admin-signup +
-# api-keys + ephemeral user + projects-bootstrap + rag-config + gdrive-index-
-# bootstrap + gdrive-sync + make ci). This is the at-scale variant of
+# api-keys + ephemeral user + projects-bootstrap + rag-config + kb-bootstrap
+# KB=gdrive + gdrive-sync + make ci). This is the at-scale variant of
 # e2e_provision: it wipes the clone's data, re-provisions from scratch, rebuilds
 # the locally-built images, and syncs the REAL gdrive corpus (rclone).
 # test_09_gdrive_index (the comprehensive at-scale e2e) uses it via the
@@ -328,7 +328,6 @@ e2e_provision_at_scale() {
   # stash whether the function succeeded or failed mid-way (return 1).
   trap 'rm -f "$stash"' EXIT
   make clean-all || return 1
-  unset GDRIVE_KB_ID
   make bootstrap KB_HOST="$_E2E_KB_HOST" OLLAMA_HOST="$_E2E_OLLAMA_HOST" || return 1
   ./scripts/e2e-restore-creds.sh "$stash" || return 1
   # Pull the OCR vision model before preflight (preflight hard-fails on a missing
@@ -361,7 +360,7 @@ e2e_provision_at_scale() {
   e2e_ephemeral_user || return 1
   make projects-bootstrap || return 1
   make rag-config || return 1
-  make gdrive-index-bootstrap || return 1
+  make kb-bootstrap KB=gdrive || return 1
   make gdrive-sync || return 1
   echo "==> make ci (provision the clone .venv for the in-clone suite)"
   make ci || return 1

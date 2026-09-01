@@ -5,8 +5,8 @@
 # sliceability (base[si:si+len]==chunk), span/page correctness, coalescing,
 # distinct offsets, and content fidelity.
 #
-# Fixtures: COMMITTED (tracked in git) under gdrive/.tests/chunkq/, produced
-# by tests/fixtures_chunkq_gen.py (rerun it with --out gdrive/.tests/chunkq
+# Fixtures: COMMITTED (tracked in git) under root/.tests/chunkq/, produced
+# by tests/fixtures_chunkq_gen.py (rerun it with --out root/.tests/chunkq
 # to regenerate). The test re-derives only the manifest oracle via
 # --manifest-only; it writes no file. Every section carries a
 # unique marker (chunkq-<type>-s<N>), so the audit can find its chunks
@@ -15,8 +15,8 @@
 # when ENABLE_RAG_HYBRID_SEARCH=false in the config, and dense ranking over
 # near-identical filler bodies is noise -- never a chunking oracle).
 #
-# Pipeline mirrors test_11: index gdrive/.tests/ (a dot-dir the full gdrive
-# walk skips) into a throwaway temp KB via POST /index?path=.tests, poll the
+# Pipeline mirrors test_11: index root/.tests/ (a dot-dir the generic walk
+# skips) into a throwaway temp KB via POST /index?dir=.tests, poll the
 # real async drain via GET /status, then audit. The committed fixture files
 # (fixture-*, chunkq-*) and the Google-native trio (google_native.{docx,xlsx,
 # pptx}, when committed) ride along and get the universal checks too.
@@ -36,7 +36,7 @@ require_stack_up
 O="$(kb_host)"
 ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
 GEN="tests/fixtures_chunkq_gen.py"
-OUTDIR="gdrive/.tests/chunkq"
+OUTDIR="root/.tests/chunkq"
 # The e2e-iso wrapper forwards only GDRIVE_TEST_WAIT (2400s) to the inner
 # `make test`; fall back to it so the cold-stack budget reaches this test.
 CHUNKQ_WAIT="${CHUNKQ_WAIT:-${GDRIVE_TEST_WAIT:-300}}"
@@ -56,7 +56,7 @@ fi
 # yet); 1-2/3 -> broken commit, hard fail; 3/3 -> smoke audit.
 gn_count=0
 for f in google_native.docx google_native.xlsx google_native.pptx; do
-  [ -f "gdrive/.tests/$f" ] && gn_count=$((gn_count + 1))
+  [ -f "root/.tests/$f" ] && gn_count=$((gn_count + 1))
 done
 GOOGLE_ON=0
 if [ "$gn_count" -eq 3 ]; then
@@ -131,7 +131,7 @@ fi
 pass "committed fixture set present: $(python3 -c 'import sys,json;print(",".join(sorted(json.load(open(sys.argv[1]))["files"])))' "$MANIFEST")"
 
 # --- source count (all allowlisted files under .tests) -----------------------
-src_count=$(find gdrive/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
+src_count=$(find root/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
 
 # --- create temp KB + grant '*' read ------------------------------------------
 section "create temp chunk-quality KB"
@@ -148,10 +148,10 @@ else
   fail "grant '*' read failed: $(printf '%s' "$grant" | head -c 160)"; finish; exit 1
 fi
 
-# --- POST /index (admin): reconcile gdrive/.tests into the temp KB -----------
-section "POST /index (api-gateway, path=.tests)"
+# --- POST /index (admin): reconcile root/.tests into the temp KB (dir=.tests) -
+section "POST /index (api-gateway, dir=.tests)"
 idx_resp=$(curl -sS --max-time 1200 -X POST \
-  "$O/index?source=gdrive&kb_id=${KB_ID}&path=.tests" \
+  "$O/index?dir=.tests&kb_id=${KB_ID}" \
   "${ADM[@]}" -H 'Content-Type: application/json' -d '{}' 2>&1)
 read -r added modified deleted unmodified retried errn < <(printf '%s' "$idx_resp" | python3 -c '
 import sys, json
@@ -186,7 +186,7 @@ section "poll GET /status (real drain, path=.tests)"
 deadline=$(( $(date +%s) + CHUNKQ_WAIT ))
 completed=0; pending=0; processing=0; failed=0; status_json=""
 while :; do
-  status_json=$(curl -sS "$O/status?source=gdrive&kb_id=${KB_ID}&path=.tests&json=1" "${ADM[@]}" 2>/dev/null || true)
+  status_json=$(curl -sS "$O/status?dir=.tests&kb_id=${KB_ID}&json=1" "${ADM[@]}" 2>/dev/null || true)
   read -r completed pending processing failed < <(printf '%s' "$status_json" | python3 -c '
 import sys, json
 try:

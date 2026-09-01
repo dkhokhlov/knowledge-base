@@ -3,18 +3,18 @@
 # deterministic, committed fixture set (fast `make test` replacement for the
 # full real-gdrive drain in test_09).
 #
-# Indexes gdrive/.tests/ (a dot-dir the full gdrive walk skips, so it never
-# contaminates the real gdrive KB) into a throwaway temp KB via
-# POST /index?source=gdrive&kb_id=<temp>&path=.tests. The gateway uploads via
+# Indexes root/.tests/ (a dot-dir the generic walk skips, so it never
+# contaminates any real KB) into a throwaway temp KB via
+# POST /index?dir=.tests&kb_id=<temp>. The gateway uploads via
 # POST /files/ (process_in_background=True) and does NOT link files itself;
 # OWUI's per-upload background task is the sole linker (extract -> embed ->
-# link). That drain is async, so this test polls GET /status?path=.tests for the
+# link). That drain is async, so this test polls GET /status?dir=.tests for the
 # REAL drain terminal state, audits failures, and runs a deterministic semantic
 # search by a fixed marker token.
 #
 # Self-contained: the temp KB is created with the admin key, granted '*' read so
 # the agent (user) key can search it, and deleted on EXIT (its files too). The
-# committed fixture files under gdrive/.tests/ are NOT deleted (they are tracked
+# committed fixture files under root/.tests/ are NOT deleted (they are tracked
 # in the repo). The fixture set is small text files (.txt/.md/.json) plus minimal
 # binary files (.pdf/.docx/.pptx) so the binary extraction path is exercised too.
 # The text fixtures extract without markitdown-ocr; the binary fixtures exercise
@@ -22,7 +22,7 @@
 # extraction and surface as a genuine-failure notice (not a hard fail) — the text
 # fixtures still complete and the marker search still carries the test.
 #
-# Tolerant: SKIPs (passes with a notice) when gdrive/.tests has no allowlisted
+# Tolerant: SKIPs (passes with a notice) when root/.tests has no allowlisted
 # files (fixtures not provisioned in this checkout) so `make test` runs clean.
 set -u
 . "$(dirname "$0")/lib.sh"
@@ -37,10 +37,10 @@ ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
 MARKER="gdrive-fixture-marker-7f3a2"
 
 # --- skip condition ----------------------------------------------------------
-src_count=$(find gdrive/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
+src_count=$(find root/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
 if [ "${src_count:-0}" -eq 0 ]; then
   section "gdrive index (fixture)"
-  pass "SKIP: gdrive/.tests has no allowlisted fixture files (committed fixtures missing)"
+  pass "SKIP: root/.tests has no allowlisted fixture files (committed fixtures missing)"
   finish
   exit 0
 fi
@@ -95,10 +95,10 @@ else
   fail "grant '*' read failed: $(printf '%s' "$grant" | head -c 160)"; finish; exit 1
 fi
 
-# --- POST /index (admin): reconcile gdrive/.tests into the temp KB -----------
-section "POST /index (api-gateway, path=.tests)"
+# --- POST /index (admin): reconcile root/.tests into the temp KB (dir=.tests) -
+section "POST /index (api-gateway, dir=.tests)"
 idx_resp=$(curl -sS --max-time 1200 -X POST \
-  "$O/index?source=gdrive&kb_id=${KB_ID}&path=.tests" \
+  "$O/index?dir=.tests&kb_id=${KB_ID}" \
   "${ADM[@]}" -H 'Content-Type: application/json' -d '{}' 2>&1)
 read -r added modified deleted unmodified retried errn < <(printf '%s' "$idx_resp" | python3 -c '
 import sys, json
@@ -134,7 +134,7 @@ wait_s="${GDRIVE_FIXTURE_WAIT:-180}"
 deadline=$(( $(date +%s) + wait_s ))
 completed=0; pending=0; processing=0; failed=0; status_json=""
 while :; do
-  status_json=$(curl -sS "$O/status?source=gdrive&kb_id=${KB_ID}&path=.tests&json=1" "${ADM[@]}" 2>/dev/null || true)
+  status_json=$(curl -sS "$O/status?dir=.tests&kb_id=${KB_ID}&json=1" "${ADM[@]}" 2>/dev/null || true)
   read -r completed pending processing failed < <(printf '%s' "$status_json" | python3 -c '
 import sys, json
 try:

@@ -44,7 +44,7 @@ import yaml
 
 # --- repo root (run from anywhere) -------------------------------------------
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GDRIVE_DIR = os.path.join(REPO, "gdrive")
+GDRIVE_DIR = os.path.join(REPO, "root", "gdrive")
 RCLONE_REMOTE = "gdrive"  # the authenticated remote (scripts/gdrive-sync default)
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 

@@ -43,8 +43,8 @@
 # /index is idempotent (re-run reports unmodified + re-triggers any failed).
 #
 # No SKIP: the at-scale fixture always provisions the gdrive KB + syncs the
-# corpus (or provision fails first + this body never runs). A missing
-# GDRIVE_KB_ID or empty corpus is a hard fail (require_env / completed<source),
+# corpus (or provision fails first + this body never runs). A missing gdrive KB
+# (cannot resolve by name) or empty corpus is a hard fail (resolve / completed<source),
 # not a silent pass.
 set -u
 . "$(dirname "$0")/lib.sh"
@@ -73,18 +73,22 @@ O="$(kb_host)"
 # below MUST use -regextype posix-extended for the alternation to work.
 ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
 # Exclude dot-dirs (.tests, .sync-reports) from the source count: gateway.walk_source prunes them from a full walk (gateway/app.py "Prune dot-dirs"), so counting them leaves the drain `accounted < src_count` -> a false timeout. `path` opts into a dot-subtree (test_11); this full walk does not.
-src_count=$(find gdrive -type f -not -path '*/.*' -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
+src_count=$(find root/gdrive -type f -not -path '*/.*' -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
 
-require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY GDRIVE_KB_ID || { finish; exit 1; }
+require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }
+# Resolve the "gdrive" KB by name (the gateway is stateless; the e2e provision
+# bootstrapped it via `make kb-bootstrap KB=gdrive`). Fail fast if it is missing.
+GDRIVE_KB_ID=$(KB=gdrive ./scripts/kb-bootstrap.sh --resolve 2>/dev/null) \
+  || { fail "could not resolve the 'gdrive' KB by name (run: make kb-bootstrap KB=gdrive)"; finish; exit 1; }
 AK="$OPENWEBUI_ADMIN_API_KEY"
 UK="$KB_API_KEY"
 ADM=(-H "Authorization: Bearer $AK")
 RD=(-H "Authorization: Bearer $UK")
 
-# --- POST /index (admin): reconcile ./gdrive into the KB ---------------------
+# --- POST /index (admin): reconcile ./root/gdrive into the KB (dir=gdrive) ----
 section "POST /index (api-gateway)"
 idx_resp=$(curl -sS --max-time 1200 -X POST \
-  "$O/index?source=gdrive&kb_id=${GDRIVE_KB_ID}" \
+  "$O/index?kb_id=${GDRIVE_KB_ID}&dir=gdrive" \
   "${ADM[@]}" -H 'Content-Type: application/json' -d '{}' 2>&1)
 read -r added modified deleted unmodified retried errn < <(printf '%s' "$idx_resp" | python3 -c '
 import sys, json
@@ -126,7 +130,7 @@ wait_s="${GDRIVE_TEST_WAIT:-2400}"
 deadline=$(( $(date +%s) + wait_s ))
 completed=0; pending=0; processing=0; failed=0; status_json=""
 while :; do
-  status_json=$(curl -sS "$O/status?source=gdrive&kb_id=${GDRIVE_KB_ID}&json=1" "${ADM[@]}" 2>/dev/null || true)
+  status_json=$(curl -sS "$O/status?kb_id=${GDRIVE_KB_ID}&dir=gdrive&json=1" "${ADM[@]}" 2>/dev/null || true)
   read -r completed pending processing failed < <(printf '%s' "$status_json" | python3 -c '
 import sys, json
 try:

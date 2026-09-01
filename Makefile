@@ -24,7 +24,8 @@ PYTEST   ?= .venv/bin/python -m pytest
         health ci test test-unit test-live-RO test-iso test-iso-shared test-iso-single test-iso-long test-long test-output api-keys admin-signup rag-config \
         users-create users-list users-search \
         ocr-config \
-        gdrive-sync gdrive-index gdrive-index-bootstrap gdrive-status gdrive-sync-finalize \
+        gdrive-sync gdrive-meta \
+        kb-index kb-bootstrap kb-status kb-sync kb-sync-finalize kb-migrate-root \
         kb-public-read kb-check kb-finalize \
         projects-bootstrap \
         shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-test clean-tests clean-backup backup
@@ -32,7 +33,7 @@ PYTEST   ?= .venv/bin/python -m pytest
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + admin-signup + api-keys (auto OCR) + projects-bootstrap + rag-config + gdrive KB. Leaves the stack running.
+provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + admin-signup + api-keys (auto OCR) + projects-bootstrap + rag-config + gdrive KB. Leaves the stack running. Each top-level subdir of ./root/ is one KB (named after the subdir); ./root/gdrive/ is the gdrive KB.
 	@set -e; \
 	  echo "==> 1/8 bootstrap (creates .env/.env.local + secrets + ./data dirs)"; make bootstrap; \
 	  echo "==> 2/8 pull-models (BLOCKING: pulls base LLM + ctx variant + embedder + deepseek-ocr from Ollama)"; make pull-models; \
@@ -50,9 +51,10 @@ provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + adm
 	  echo "==> 5/8 api-keys (admin key; auto-configures OWUI -> markitdown-ocr when OCR_ENABLED=true)"; make api-keys; \
 	  echo "==> 6/8 projects-bootstrap (one-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs)"; make projects-bootstrap; \
 	  echo "==> 7/8 rag-config (strict-grounding RAG template + rag.ollama.base_url sync)"; make rag-config; \
-	  echo "==> 8/8 gdrive-index-bootstrap (creates the gdrive KB + grants public read + writes GDRIVE_KB_ID)"; make gdrive-index-bootstrap; \
+	  echo "==> 8/8 kb-bootstrap KB=gdrive (creates the gdrive KB + grants public read; name-based, no GDRIVE_KB_ID)"; make kb-bootstrap KB=gdrive; \
 	  echo; echo "==> provision complete — stack is running."; \
 	  echo "    Populate the gdrive KB (one-time):           make gdrive-sync"; \
+	  echo "    Add a new KB: drop a folder at ./root/<name>/ then: make kb-bootstrap KB=<name> && make kb-sync KB=<name>"; \
 	  echo "    Everyday restart:                            make start"
 
 bootstrap: ## Create .env.local (generate WEBUI_SECRET_KEY) + ./data dirs
@@ -170,30 +172,32 @@ ocr-config: ## Re-assert OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-o
 	    || { echo "MISSING OCR_SERVICE_TOKEN in .env.local (run: make bootstrap with OCR_ENABLED=true)"; exit 1; }; \
 	  ./scripts/ocr-config.sh
 
-gdrive-sync: ## Sync all shared-drive files into ./gdrive (delta; deleted/overwritten retained in ./.gdrive-backup), then POST /index to reconcile into the OWUI gdrive KB. Set INDEX_ALL=1 for a full re-index, RETRY_PENDING=1 to also retry stalled pending files. Fails fast if a drain is already in flight (pending+processing>0); exempt RETRY_PENDING=1. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
+gdrive-sync: ## Sync all shared-drive files into ./root/gdrive (delta; deleted/overwritten retained in ./.gdrive-backup), then POST /index (dir=gdrive) to reconcile into the OWUI gdrive KB. Set INDEX_ALL=1 for a full re-index, RETRY_PENDING=1 to also retry stalled pending files. Fails fast if a drain is already in flight (pending+processing>0); exempt RETRY_PENDING=1. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; relative to the gdrive KB root, no gdrive/ prefix).
 	@./scripts/gdrive-sync $${SCOPE_PATH:+--path "$$SCOPE_PATH"} $${INDEX_ALL:+--index-all} $${RETRY_PENDING:+--retry-pending}
 
-gdrive-meta: ## Generate per-file .meta YAML sidecars (Drive description, [labels], file attributes, approval) next to each synced gdrive file (read-only; reuses rclone token; never prints credentials). Set FILE=<id> for one file, DRIVE=<name> for one drive, DRY_RUN=1 to preview. .meta sidecars are excluded from indexing and protected from sync deletion (gdrive-exclude.conf [*] *.meta).
+gdrive-meta: ## Generate per-file .meta YAML sidecars (Drive description, [labels], file attributes, approval) next to each synced gdrive file under ./root/gdrive (read-only; reuses rclone token; never prints credentials). Set FILE=<id> for one file, DRIVE=<name> for one drive, DRY_RUN=1 to preview. .meta sidecars are excluded from indexing and protected from sync deletion (./root/.exclude.conf [*] *.meta).
 	@./scripts/gdrive-meta.py $${FILE:+--file "$$FILE"} $${DRIVE:+--drive "$$DRIVE"} $${DRY_RUN:+--dry-run}
 
-gdrive-index: ## Reconcile ./gdrive into the OWUI gdrive KB via api-gateway POST /index (admin; incremental). Self-heals FAILED files (delete + re-upload) by default. Set RETRY_PENDING=1 to also retry stalled PENDING files. Set INDEX_ALL=1 for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; use a KB whose whole scope is that path).
+kb-index: ## Reconcile one ./root/<KB>/ tree into its OWUI KB via api-gateway POST /index (admin; incremental). KB=<name> selects the KB (the top-level ./root/ subdir; default gdrive). Self-heals FAILED files (delete + re-upload) by default. Set RETRY_PENDING=1 to also retry stalled PENDING files. Set INDEX_ALL=1 for a full re-index. Set SCOPE_PATH=<relpath> to index only a subpath (FULL reconcile of that subpath; relative to the KB root, no <KB>/ prefix). The KB is resolved BY NAME (paginated, unique-or-fail); no GDRIVE_KB_ID.
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:?KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}; \
-	  [ -n "$${GDRIVE_KB_ID:-}" ] || { echo "MISSING GDRIVE_KB_ID in .env.local (run: make gdrive-index-bootstrap)"; exit 1; }; \
 	  [ -n "$${OPENWEBUI_ADMIN_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
-	  q="source=gdrive&kb_id=$$GDRIVE_KB_ID"; [ "$${INDEX_ALL:-0}" = "1" ] && q="$$q&reindex_all=1"; \
+	  KB="$${KB:-gdrive}"; \
+	  KID=$$(KB="$$KB" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null) \
+	    || { echo "FAIL  could not resolve KB '$$KB' by name (run: make kb-bootstrap KB=$$KB)"; exit 1; }; \
+	  q="kb_id=$$KID&dir=$$KB"; [ "$${INDEX_ALL:-0}" = "1" ] && q="$$q&reindex_all=1"; \
 	  [ "$${RETRY_PENDING:-0}" = "1" ] && q="$$q&retry_pending=1"; \
 	  [ -n "$${SCOPE_PATH:-}" ] && q="$$q&path=$$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$$SCOPE_PATH")"; \
 	  curl -sS --max-time 1200 -X POST "$$H/index?$$q" \
 	    -H "Authorization: Bearer $$OPENWEBUI_ADMIN_API_KEY" \
 	    -H "Content-Type: application/json" -d '{}'; echo
 
-gdrive-index-bootstrap: ## Create the OWUI "gdrive" KB + grant public read (user:*) + write GDRIVE_KB_ID to .env.local (run after `make api-keys`)
+kb-bootstrap: ## Create (or resolve) an OWUI KB named after a ./root/ subdir + grant public read (user:*). KB=<name> bootstraps one KB; no KB= bootstraps EVERY top-level non-dot subdir of ./root/. KB=<name> with --resolve (via the script) prints the kb_id only. Idempotent (re-run re-asserts the grant). Run after `make api-keys`. The gdrive KB is KB=gdrive.
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
-	@./scripts/gdrive-index-bootstrap.sh
+	@./scripts/kb-bootstrap.sh
 
 kb-public-read: ## Grant public read (user:*) on EVERY knowledge base + enable sharing.public_knowledge so all authenticated users read all KBs (admin). Backfills existing KBs; re-run as a safety net for KBs created outside the flows (e.g. via the OWUI UI).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
@@ -232,24 +236,36 @@ kb-check: ## Cross-DB health check (OWUI SQLite + vector store: Chroma or pgvect
 	      $${PURGE:+--purge} $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
 	  fi
 
-gdrive-status: ## Show gdrive index status via api-gateway GET /status (completed/pending/processing/failed), pretty JSON. Set SCOPE_PATH=<relpath> to scope source_count to a subpath (file counts are KB-wide; accurate when the KB's whole scope is that path).
+kb-status: ## Show one KB's index status via api-gateway GET /status (completed/pending/processing/failed), pretty JSON. KB=<name> selects the KB (default gdrive). Set SCOPE_PATH=<relpath> to scope source_count to a subpath (relative to the KB root; file counts are KB-wide; accurate when the KB's whole scope is that path). The KB is resolved BY NAME; no GDRIVE_KB_ID.
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:?KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}; \
-	  [ -n "$${GDRIVE_KB_ID:-}" ] || { echo "MISSING GDRIVE_KB_ID in .env.local (run: make gdrive-index-bootstrap)"; exit 1; }; \
 	  [ -n "$${KB_API_KEY:-}" ] || { echo "MISSING KB_API_KEY in the shell env (source ~/.api_keys, or run: make users-create EMAIL=...)"; exit 1; }; \
-	  q="source=gdrive&kb_id=$$GDRIVE_KB_ID"; [ -n "$${SCOPE_PATH:-}" ] && q="$$q&path=$$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$$SCOPE_PATH")"; \
+	  KB="$${KB:-gdrive}"; \
+	  KID=$$(KB="$$KB" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null) \
+	    || { echo "FAIL  could not resolve KB '$$KB' by name (run: make kb-bootstrap KB=$$KB)"; exit 1; }; \
+	  q="kb_id=$$KID&dir=$$KB"; [ -n "$${SCOPE_PATH:-}" ] && q="$$q&path=$$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$$SCOPE_PATH")"; \
 	  curl -sS "$$H/status?$$q&json=1" \
 	    -H "Authorization: Bearer $$KB_API_KEY" \
 	    | python3 -m json.tool --indent 2
 
-kb-finalize: ## Finalize a gdrive drain: rebuild the pgvector ivfflat vector + GIN FTS indexes so freshly-embedded vectors become queryable (pgvector only; Chroma/HNSW incremental -> no-op). Run AFTER the drain is terminal (or use gdrive-sync-finalize to wait). Logs each REINDEX duration. Named "finalize" not "reindex": on a fresh drain the vectors were never queryable (ivfflat folds post-build rows in only on REINDEX), and to avoid collision with the gateway reindex_all (POST /index?reindex_all=1 RE-PROCESSES files — a different op at a different layer).
+kb-finalize: ## Finalize a drain: rebuild the pgvector ivfflat vector + GIN FTS indexes so freshly-embedded vectors become queryable (pgvector only; Chroma/HNSW incremental -> no-op). KB=<name> selects the drain to wait on with --wait (default gdrive). Run AFTER the drain is terminal (or use kb-sync-finalize / gdrive-sync-finalize to wait). REINDEX is INSTANCE-WIDE on the shared document_chunk table, so this first requires EVERY KB under ./root/ terminal + acquires a host lock (serializes concurrent finalizes). Logs each REINDEX duration. Named "finalize" not "reindex": on a fresh drain the vectors were never queryable (ivfflat folds post-build rows in only on REINDEX), and to avoid collision with the gateway reindex_all (POST /index?reindex_all=1 RE-PROCESSES files — a different op at a different layer).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@./scripts/kb-finalize.sh
 
-gdrive-sync-finalize: gdrive-sync ## One-command full pipeline: dispatch the gdrive async drain (make gdrive-sync = rclone + POST /index), then wait for it to terminate (poll GET /status to pending+processing=0, timeout GDRIVE_TEST_WAIT default 2400s), then finalize (REINDEX ivfflat + GIN FTS) so the freshly-embedded vectors become queryable — the "block until the KB is searchable" command. Fails loud if the drain does not terminate (do not REINDEX while inserts are in flight — that races the live index). pgvector only; no-op on Chroma/HNSW. (gdrive-sync is .PHONY — re-dispatches the drain each invocation; make gdrive-sync fails fast if a drain is already in flight, pending+processing>0, exempt RETRY_PENDING=1.)
+gdrive-sync-finalize: gdrive-sync ## gdrive one-command pipeline: dispatch the gdrive async drain (make gdrive-sync = rclone + POST /index), then wait for it to terminate (poll GET /status to pending+processing=0, timeout GDRIVE_TEST_WAIT default 2400s), then finalize (REINDEX ivfflat + GIN FTS) so the freshly-embedded vectors become queryable. Fails loud if the drain does not terminate (do not REINDEX while inserts are in flight). pgvector only; no-op on Chroma/HNSW. gdrive-specific (rclone stage); for non-gdrive KBs use `make kb-sync-finalize KB=<name>`.
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@./scripts/kb-finalize.sh --wait
+
+kb-sync-finalize: kb-sync ## Generic one-command pipeline: dispatch the KB async drain (make kb-sync KB=<name> = POST /index), then wait for it to terminate (poll GET /status to pending+processing=0, timeout GDRIVE_TEST_WAIT default 2400s), then finalize (REINDEX ivfflat + GIN FTS). KB=<name> selects the KB (default gdrive; for gdrive prefer gdrive-sync-finalize which also runs the rclone stage). REINDEX is instance-wide, so kb-finalize first requires EVERY KB under ./root/ terminal + acquires a host lock. pgvector only; no-op on Chroma/HNSW.
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@./scripts/kb-finalize.sh --wait
+
+kb-sync: ## Reconcile one (or every) ./root/<name>/ tree into its OWUI KB via api-gateway POST /index (admin). KB=<name> reconciles one KB; no KB= reconciles EVERY top-level non-dot subdir of ./root/ in one loop (.tests dot-dir skipped). Set INDEX_ALL=1 for a full re-index, RETRY_PENDING=1 to also retry stalled pending files. Each KB is resolved BY NAME (paginated, unique-or-fail); a missing KB fails fast with a "run make kb-bootstrap" hint. Per-KB client-side in-flight guard (refuses to dispatch if pending+processing>0; exempt RETRY_PENDING=1).
+	@./scripts/kb-sync.sh $${KB:+--kb "$$KB"} $${INDEX_ALL:+--index-all} $${RETRY_PENDING:+--retry-pending}
+
+kb-migrate-root: ## ONE-TIME migration to the ./root/ source root: moves ./gdrive -> ./root/gdrive + gdrive-exclude.conf -> ./root/.exclude.conf (re-prefixes per-drive sections [X] -> [gdrive/X]; [*] stays verbatim/global), removes GDRIVE_KB_ID from .env.local, recreates api-gateway with KB_SOURCE_ROOT=/kb-source. Requires the gdrive drain terminal first (refuses if in flight). Idempotent. Run, then: make kb-bootstrap KB=gdrive && make gdrive-sync.
+	@./scripts/kb-migrate-root.sh
 
 projects-bootstrap: ## One-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
@@ -272,7 +288,7 @@ shell-caddy: ## Shell into the Caddy gateway container
 clean: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.local.
 	@$(COMPOSE) down --remove-orphans
 
-clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + backup-and-remove .env + .env.local. Keeps graphiti/config.yaml, caddy/Caddyfile, and the ./gdrive mirror.
+clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + backup-and-remove .env + .env.local. Keeps graphiti/config.yaml, caddy/Caddyfile, and the ./root source mirror (./root/gdrive corpus + ./root/.exclude.conf).
 	@$(COMPOSE) down --remove-orphans --volumes
 	@# Remove ./data as root via a throwaway container: OWUI (root) and Neo4j
 	@# (neo4j uid) write bind-mount files the host user cannot delete, so a host
@@ -286,7 +302,7 @@ clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + backup-and-r
 	  cp -p .env.local ".config-backup/$$TS/.env.local" 2>/dev/null || true; \
 	  rm -f .env .env.local
 	@rm -rf ./.gdrive-backup
-	@echo "Wiped containers, ./data, ./.gdrive-backup, .env, .env.local (backed up to ./.config-backup/<TS>). graphiti/config.yaml, caddy/Caddyfile, ./gdrive preserved."
+	@echo "Wiped containers, ./data, ./.gdrive-backup, .env, .env.local (backed up to ./.config-backup/<TS>). graphiti/config.yaml, caddy/Caddyfile, ./root source mirror preserved."
 	@echo "Next: make provision  (.env is gone; compose needs it for every command)."
 
 clean-backup: ## Remove the retention trees (./.gdrive-backup + ./.config-backup). Non-destructive: does not touch the stack, ./data, .env, or .env.local.

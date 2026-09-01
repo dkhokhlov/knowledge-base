@@ -2,7 +2,7 @@
 """Deterministic chunk-quality fixture generator for tests/test_13_chunk_quality.sh.
 
 Writes one synthetic file per allowlisted type (docx, pdf, pptx, xlsx, txt, md,
-html, json, log, tex) into --out (default gdrive/.tests/chunkq) and prints a
+html, json, log, tex) into --out (default root/.tests/chunkq) and prints a
 manifest JSON to stdout. The manifest is the test's oracle: per file it lists
 the unique marker strings and the chunk structure to expect.
 
@@ -29,9 +29,9 @@ tests/test_13_chunk_quality.sh and docs/ocr.md):
 Determinism: no timestamps, no RNG, fixed zip member mtimes -- two runs must
 produce byte-identical trees.
 
-The generated files are COMMITTED (tracked in git) at gdrive/.tests/chunkq/
+The generated files are COMMITTED (tracked in git) at root/.tests/chunkq/
 alongside the test_11 fixture set. Regenerate them with:
-  python3 tests/fixtures_chunkq_gen.py --out gdrive/.tests/chunkq
+  python3 tests/fixtures_chunkq_gen.py --out root/.tests/chunkq
 tests/test_13_chunk_quality.sh runs the generator with --manifest-only: it
 re-derives the manifest oracle without writing any file.
 
@@ -47,7 +47,7 @@ import zipfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-SKELETON_DIR = REPO / "gdrive" / ".tests"
+SKELETON_DIR = REPO / "root" / ".tests"
 
 # Word pool for filler bodies: alphabet-constrained (no markdownify-escapable
 # characters), no word that could start a line with '#'.
@@ -150,7 +150,7 @@ def _tex_text():
 
 
 def _docx_bytes(sec):
-    """Clone gdrive/.tests/fixture-doc.docx; swap in Heading1/Heading2 paragraphs.
+    """Clone root/.tests/fixture-doc.docx; swap in Heading1/Heading2 paragraphs.
 
     No styles.xml needed: mammoth's default style map matches pStyle
     Heading1/Heading2 by styleId, so bare <w:pStyle> emits #/## headers.
@@ -241,7 +241,7 @@ def _pdf_bytes():
 
 
 def _pptx_bytes():
-    """Clone gdrive/.tests/fixture-slide.pptx and grow it to 4 slides.
+    """Clone root/.tests/fixture-slide.pptx and grow it to 4 slides.
 
     Surgery per slide N: ppt/slides/slideN.xml (title text patched),
     ppt/slides/_rels/slideN.xml.rels (clone), one <p:sldId> in the presentation
@@ -519,7 +519,7 @@ def main(argv=None):
         description="Generate deterministic chunk-quality fixtures + manifest."
     )
     parser.add_argument(
-        "--out", default="gdrive/.tests/chunkq", help="output directory (default: gdrive/.tests/chunkq)"
+        "--out", default="root/.tests/chunkq", help="output directory (default: root/.tests/chunkq)"
     )
     parser.add_argument(
         "--types",

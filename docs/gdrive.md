@@ -2,11 +2,18 @@
 
 The `gdrive` knowledge base is populated from Google Drive shared drives through
 [rclone][rclone]. `make gdrive-sync` runs `rclone sync` of the shared drives
-into `./gdrive`, then POSTs `/index` to reconcile the tree into the KB. This
-doc covers the **one-time rclone setup** (the prerequisite). The sync / index
-mechanics, the exclude list, the backup-dir retention, and the make targets are
-in [docs/operations.md](operations.md) ("Populating the source") and the
-README gdrive section.
+into `./root/gdrive`, then POSTs `/index?dir=gdrive` to reconcile the tree into
+the KB. The `gdrive` KB is one instance of the generic source-root pattern:
+every top-level subdir of `./root/` is one KB, named after the subdir. To add a
+non-gdrive KB, drop a folder at `./root/<name>/` and run
+`make kb-bootstrap KB=<name>` + `make kb-sync KB=<name>` (no rclone stage).
+
+This doc covers the **one-time rclone setup** (the gdrive prerequisite). The
+sync / index mechanics, the exclude list, the backup-dir retention, and the
+make targets are in [docs/operations.md](operations.md) ("Populating the
+source") and the README gdrive section. For an existing deployment still on the
+old `./gdrive` layout, run `make kb-migrate-root` (one-time) to move to
+`./root/gdrive` (see [docs/operations.md](operations.md) "Migrating to ./root").
 
 ## Prerequisite
 
@@ -97,20 +104,23 @@ or the sync fail-fasts on `cannot list shared drives`.
 
 ## How indexing uses the remote
 
-`make gdrive-sync` (and `make gdrive-index`, the `/index`-only variant):
+`make gdrive-sync` (and `make kb-index KB=gdrive`, the `/index`-only variant):
 
 - enumerates shared drives with `rclone backend --json drives gdrive:`;
 - runs `rclone sync --backup-dir --delete-after` of each drive into a per-drive
-  subdir of `./gdrive` (delta: files removed from Drive are deleted from
-  `./gdrive`; deleted/overwritten files are retained in `./.gdrive-backup/`);
+  subdir of `./root/gdrive` (delta: files removed from Drive are deleted from
+  `./root/gdrive`; deleted/overwritten files are retained in `./.gdrive-backup/`);
 - normalizes the synced tree to owner-only perms (dirs 700, files 600) because
   Drive content is business-sensitive — rclone v1.60 has no `--umask`, so the
   script normalizes after the sync;
-- POSTs `/index` to api-gateway to reconcile `./gdrive` into the `gdrive` KB.
+- POSTs `/index?dir=gdrive&kb_id=<id>` to api-gateway to reconcile
+  `./root/gdrive` into the `gdrive` KB. The KB is resolved by name
+  (`scripts/kb-bootstrap.sh --resolve`); the gateway is stateless and takes
+  `kb_id` + `dir`.
 
-The exclude list (`./gdrive-exclude.conf`, gitignored) and the backup-dir
+The exclude list (`./root/.exclude.conf`, gitignored) and the backup-dir
 recovery are documented in [docs/operations.md](operations.md). The
-`gdrive` KB itself is created + granted by `make gdrive-index-bootstrap`
+`gdrive` KB itself is created + granted by `make kb-bootstrap KB=gdrive`
 ([docs/operations.md](operations.md) "Provisioning").
 
 [rclone]: https://rclone.org

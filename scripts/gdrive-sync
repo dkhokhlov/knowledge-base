@@ -38,7 +38,8 @@ After the sync (unless --dry-run), the synced tree is reconciled into the OWUI
 the live KB; the gateway holds the admin key). Default is incremental (only
 new/changed files uploaded + extracted); --index-all drains + re-uploads every
 file. Fail-fast: a non-2xx /index response or ok=false aborts after the report.
-Skipped silently if GDRIVE_KB_ID is unset (run: make gdrive-index-bootstrap).
+Skipped silently if OPENWEBUI_ADMIN_API_KEY is unset (run: make api-keys), or if the
+"gdrive" KB cannot be resolved by name (run: make kb-bootstrap KB=gdrive).
 
 Fail-fast: ANY transfer error aborts the run immediately (the report is still
 written with the failing files + rclone reasons). A per-drive empty-source guard
@@ -71,8 +72,8 @@ EOF
 }
 
 remote="gdrive"
-destination="./gdrive"
-exclude_file="./gdrive-exclude.conf"
+destination="./root/gdrive"
+exclude_file="./root/.exclude.conf"
 dry_run=0
 index_all=0
 retry_pending=0
@@ -547,32 +548,60 @@ while IFS=$'\t' read -r drive_id drive_name; do
         write_report_and_exit 1
     fi
 
-    # --- exclude list (INI format: per-drive sections + [*] globals) ---------
-    # Convert the (gitignored) master exclude file on the fly into this drive's
-    # --exclude-from. Sections are [<drive name>] (matched by name; the wrapper
-    # resolves name -> id from `rclone backend drives`); [*] applies to every
-    # drive. Patterns are emitted VERBATIM — rclone-native: a pattern with no
-    # "/" matches the basename at any depth (file.pdf, *glob*, *.tmp, or a lone
-    # "*" = every file in the section); a "/" pattern matches the full path
-    # relative to the drive root. Per-drive scoping by name avoids mis-excluding
-    # same-named files in other drives.
+    # --- exclude list (INI: root-relative sections + [*] globals) --------------
+    # Convert the (gitignored) master exclude file (./root/.exclude.conf) on the
+    # fly into this drive's --exclude-from. Sections are paths relative to the
+    # source root ./root: [*] = global (every KB), [gdrive] = the gdrive KB,
+    # [gdrive/<drive>] = one drive. For this drive, active sections are [*],
+    # [gdrive], [gdrive/<safe_name>], and descendants [gdrive/<safe_name>/...].
+    # Patterns are emitted VERBATIM -- rclone-native: no "/" matches the basename
+    # at any depth; a leading "/" anchors at the drive root (= the section's
+    # content); "*" = every file in the section. Anchored ("/"-led) patterns are
+    # allowed only in LEAF sections (a section with no deeper section under it):
+    # a non-leaf section ([*], [gdrive]) anchors at different roots for the rclone
+    # download stage vs the gateway index stage, so an anchored pattern there is
+    # ambiguous and is rejected here AND by the gateway (fail-closed).
     tmp_exclude=""
     if [[ -f "$exclude_file" ]]; then
         tmp_exclude=$(mktemp); temp_files+=("$tmp_exclude")
-        awk -v target="$drive_name" '
+        if ! awk -v target="gdrive/$safe_name" -v file="$exclude_file" '
+            BEGIN {
+                while ((getline line < file) > 0) {
+                    if (line ~ /^\[.*\][[:space:]]*$/) {
+                        h = line; sub(/^\[/, "", h); sub(/\][[:space:]]*$/, "", h)
+                        secs[h] = 1
+                    }
+                }
+                close(file)
+                for (h in secs) nonleaf[h] = 0
+                for (h in secs) {
+                    if (h == "*") { nonleaf[h] = 1; continue }
+                    for (h2 in secs)
+                        if (h2 != h && substr(h2, 1, length(h) + 1) == h "/") { nonleaf[h] = 1; break }
+                }
+            }
             /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
             /^\[.*\][[:space:]]*$/ {
-                hdr = $0
-                sub(/^\[/, "", hdr); sub(/\][[:space:]]*$/, "", hdr)
-                active = (hdr == "*" || hdr == target)
+                hdr = $0; sub(/^\[/, "", hdr); sub(/\][[:space:]]*$/, "", hdr)
+                cur = hdr
+                active = (hdr == "*" || hdr == "gdrive" || hdr == target \
+                          || substr(hdr, 1, length(target) + 1) == target "/")
                 next
             }
             active {
-                line = $0
-                sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
-                if (line != "") print line
+                line = $0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+                if (line == "") next
+                if (cur != "" && nonleaf[cur] && line ~ /^\//) {
+                    print "FAIL  .exclude.conf: anchored pattern " line " in non-leaf section [" cur "] -- use a leaf [gdrive/<drive>] section" > "/dev/stderr"
+                    exit 1
+                }
+                print line
             }
-        ' "$exclude_file" > "$tmp_exclude"
+        ' "$exclude_file" > "$tmp_exclude"; then
+            rm -f "$tmp_exclude"; tmp_exclude=""
+            emit "FAIL: .exclude.conf rejected (anchored pattern in a non-leaf section); aborting before rclone"
+            write_report_and_exit 1
+        fi
         if [[ ! -s "$tmp_exclude" ]]; then
             rm -f "$tmp_exclude"; tmp_exclude=""
         fi
@@ -663,22 +692,29 @@ fi
 emit "Files backed up (deleted/overwritten): ${backed_up} (in ${backup_root})"
 
 # --- index chain: reconcile the synced tree into the OWUI KB via api-gateway ---
-# Stateless: the gateway walks ./gdrive (ro mount), drives OWUI sync/diff against
-# the live KB, uploads new/changed files (the OWUI per-upload background task is
-# the sole linker: extract -> embed -> link), cleans up removed ones, and
-# re-triggers failed files (delete + re-upload so a fresh background task is
-# queued). Default incremental; --index-all drains + re-uploads everything;
-# --retry-pending also re-triggers files still pending (stalled in OCR). Fail-
-# fast on a non-2xx response or ok=false. Skipped under --dry-run or if
-# GDRIVE_KB_ID unset.
+# Stateless: the gateway walks ./root/gdrive (ro mount, dir=gdrive), drives OWUI
+# sync/diff against the live KB, uploads new/changed files (the OWUI per-upload
+# background task is the sole linker: extract -> embed -> link), cleans up removed
+# ones, and re-triggers failed files (delete + re-upload so a fresh background task
+# is queued). Default incremental; --index-all drains + re-uploads everything;
+# --retry-pending also re-triggers files still pending (stalled in OCR). Fail-fast
+# on a non-2xx response or ok=false. The gdrive KB is resolved BY NAME (the gateway
+# is stateless; no GDRIVE_KB_ID env). Skipped under --dry-run or if the gdrive KB
+# cannot be resolved (run: make kb-bootstrap KB=gdrive).
 if (( !dry_run )); then
     set -a; . ./.env 2>/dev/null || true; . ./.env.local 2>/dev/null || true; set +a
-    if [[ -n "${GDRIVE_KB_ID:-}" && -n "${OPENWEBUI_ADMIN_API_KEY:-}" ]]; then
+    if [[ -n "${OPENWEBUI_ADMIN_API_KEY:-}" ]]; then
         if [[ -z "${KB_HOST:-}" ]]; then
             echo "FAIL  KB_HOST not set -- export KB_HOST=http://<host>:<port> (see .env.template)" >&2
             exit 1
         fi
         O="${KB_HOST%/}"
+        # Resolve the "gdrive" KB by name (paginated, unique-or-fail). The gateway
+        # holds the admin key but takes kb_id, so resolve here and pass it through.
+        if ! KB_ID=$(KB=gdrive ./scripts/kb-bootstrap.sh --resolve 2>/dev/null); then
+            emit "FAIL: could not resolve the 'gdrive' KB by name (0 or >1 match). Run: make kb-bootstrap KB=gdrive ; then retry. Diagnose: KB=gdrive ./scripts/kb-bootstrap.sh --resolve"
+            write_report_and_exit 1
+        fi
         # --- in-flight drain guard (client-side): refuse to POST /index if a gdrive
         #     drain is already running for this KB. A drain is in flight when OWUI
         #     still has un-finished files (pending+processing > 0); re-dispatching
@@ -689,14 +725,14 @@ if (( !dry_run )); then
         #     error body is valid JSON {"error":..} WITHOUT pending/processing, so a
         #     plain .get(,0) would parse it as 0 -> unsafe proceed); --max-time bounds
         #     the paginating scan; missing/invalid pending/processing -> refuse.
-        #     CLIENT-SIDE guard: bypassable by raw curl / make gdrive-index; has a
+        #     CLIENT-SIDE guard: bypassable by raw curl / make kb-index; has a
         #     check-then-dispatch TOCTOU; the /status scan caps at 10k files
         #     (owui.py page-200), so a pending file beyond that is missed.
         if (( ! retry_pending )); then
             if ! status_resp=$(curl -fsS --max-time 1200 \
-                    "${O}/status?source=gdrive&kb_id=${GDRIVE_KB_ID}&json=1" \
+                    "${O}/status?kb_id=${KB_ID}&dir=gdrive&json=1" \
                     -H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}" 2>/dev/null); then
-                emit "FAIL: could not read /status (gateway error/unreachable/timeout) for KB ${GDRIVE_KB_ID}; refusing to dispatch (cannot confirm no drain in flight). Check: ${O}/health ; make gdrive-status"
+                emit "FAIL: could not read /status (gateway error/unreachable/timeout) for KB ${KB_ID}; refusing to dispatch (cannot confirm no drain in flight). Check: ${O}/health ; make kb-status KB=gdrive"
                 write_report_and_exit 1
             fi
             inflight=$(printf '%s' "$status_resp" | python3 -c '
@@ -711,15 +747,15 @@ except Exception:
     print("ERR")
 ')
             if [[ "$inflight" == "ERR" ]]; then
-                emit "FAIL: /status response for KB ${GDRIVE_KB_ID} missing/invalid pending or processing (got: ${status_resp:0:120}); refusing to dispatch (cannot confirm no drain in flight)"
+                emit "FAIL: /status response for KB ${KB_ID} missing/invalid pending or processing (got: ${status_resp:0:120}); refusing to dispatch (cannot confirm no drain in flight)"
                 write_report_and_exit 1
             fi
             if (( inflight > 0 )); then
-                emit "FAIL: a gdrive drain is in flight for KB ${GDRIVE_KB_ID} (pending+processing=${inflight}). Refusing to re-dispatch (would race the in-flight extract->embed->link). Wait for terminal: make gdrive-status ; make gdrive-sync-finalize (polls then REINDEXes). Or retry stalled pending: make gdrive-sync RETRY_PENDING=1"
+                emit "FAIL: a gdrive drain is in flight for KB ${KB_ID} (pending+processing=${inflight}). Refusing to re-dispatch (would race the in-flight extract->embed->link). Wait for terminal: make kb-status KB=gdrive ; make gdrive-sync-finalize (polls then REINDEXes). Or retry stalled pending: make gdrive-sync RETRY_PENDING=1"
                 write_report_and_exit 1
             fi
         fi
-        idx_q="source=gdrive&kb_id=${GDRIVE_KB_ID}"
+        idx_q="kb_id=${KB_ID}&dir=gdrive"
         (( index_all )) && idx_q="${idx_q}&reindex_all=1"
         (( retry_pending )) && idx_q="${idx_q}&retry_pending=1"
         if [[ -n "${path}" ]]; then
@@ -766,8 +802,6 @@ except Exception:
             emit "FAIL: kb /index completed with errors (ok=false) — see per-file errors above"
             write_report_and_exit 1
         fi
-    elif [[ -z "${GDRIVE_KB_ID:-}" ]]; then
-        printf 'GDRIVE_KB_ID unset — skipping kb index (run: make gdrive-index-bootstrap)\n' >&2
     else
         printf 'OPENWEBUI_ADMIN_API_KEY unset — skipping kb index (run: make api-keys)\n' >&2
     fi

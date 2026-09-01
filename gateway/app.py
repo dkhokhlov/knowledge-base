@@ -12,6 +12,7 @@ groups (discovered from Neo4j).
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -455,43 +456,50 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             log.error("rollback: user delete failed for user %s: %s", user_id, e)
 
-    # -- gdrive index: stateless sync drive + status --
+    # -- KB index: stateless sync source -> KB + status --
 
     def _index(self, identity, qs):
-        """POST /index?source=gdrive&kb_id=<id>[&path=<relpath>][&force=1]
-        [&dry_run=1][&reindex_all=1][&retry_pending=1]. Admin-only. Walks the
-        source mount (or the `path` subpath under it), drives OWUI's sync/diff
-        protocol with the gateway's held admin key,
-        returns per-file results. Stateless: the KB is the state (no manifest
-        file). dry_run never mutates (returns the plan only). New source subdirs
-        are created via dirs/create before their files are uploaded (sync/diff's
-        directory_map only covers existing paths; without this, new-subdir files
-        would land at KB root). The gateway does NOT link files itself — OWUI's
-        per-upload background task is the sole linker (extract -> embed -> link)
-        — and re-triggers failed files (plus stalled pending with
-        retry_pending=1) by deleting + re-uploading them. `path` is a SOURCE
-        FILTER only: it scopes the walk (and thus the manifest) to a subpath;
-        the reconcile is a FULL reconcile of that manifest (sync/diff `deleted`
-        + `rmdir` flow through unscoped), so files removed from the source under
-        that subpath ARE removed from the KB. Use a KB whose whole scope is that
-        path (a dedicated/subpath KB, e.g. a throwaway test KB) — on a SHARED KB
-        `path` would delete every KB file outside the subpath."""
+        """POST /index?kb_id=<id>&dir=<name>[&path=<relpath>][&force=1]
+        [&dry_run=1][&reindex_all=1][&retry_pending=1]. Admin-only. `dir` is the
+        KB's top-level subdir under the source root (KB_SOURCE_ROOT): the walk
+        root is KB_SOURCE_ROOT/dir, so manifest keys stay subdir-relative (the
+        shape OWUI sync/diff keys on) and each KB's source is isolated. `path` is
+        an in-KB subpath filter (SCOPE_PATH). Drives OWUI's sync/diff protocol
+        with the gateway's held admin key, returns per-file results. Stateless:
+        the KB is the state (no manifest file). dry_run never mutates (returns
+        the plan only). New source subdirs are created via dirs/create before
+        their files are uploaded (sync/diff's directory_map only covers existing
+        paths; without this, new-subdir files would land at KB root). The
+        gateway does NOT link files itself — OWUI's per-upload background task
+        is the sole linker (extract -> embed -> link) — and re-triggers failed
+        files (plus stalled pending with retry_pending=1) by deleting +
+        re-uploading them. `path` is a SOURCE FILTER only: it scopes the walk
+        (and thus the manifest) to a subpath; the reconcile is a FULL reconcile
+        of that manifest (sync/diff `deleted` + `rmdir` flow through unscoped),
+        so files removed from the source under that subpath ARE removed from the
+        KB. Use a KB whose whole scope is that path (a dedicated/subpath KB,
+        e.g. a throwaway test KB) — on a SHARED KB `path` would delete every KB
+        file outside the subpath. `dir` is required (empty rejected) so a bare
+        call cannot reconcile every KB into one. `.exclude.conf` (at the source
+        root) is applied as an additive deny-list after the walk (see
+        apply_excludes)."""
         if not authorize.is_admin(identity):
             raise GatewayError(403, "admin role required for /index")
         admin_key = owui._admin_key()  # OwuiError -> 503 if unset
-        source = _qs(qs, "source", "gdrive")
-        if source != "gdrive":
-            raise GatewayError(400, "unknown source %r (Phase 1: 'gdrive' only)" % source)
-        kb_id = _qs(qs, "kb_id", os.environ.get("GDRIVE_KB_ID", ""))
+        kb_id = _qs(qs, "kb_id", "")
         if not kb_id:
-            raise GatewayError(400, "kb_id required (query kb_id or GDRIVE_KB_ID env)")
+            raise GatewayError(400, "kb_id required (query kb_id)")
         force = _qs_bool(qs, "force", False)
         dry_run = _qs_bool(qs, "dry_run", False)
         reindex_all = _qs_bool(qs, "reindex_all", False)
         retry_pending = _qs_bool(qs, "retry_pending", False)
         path = _normalize_path(_qs(qs, "path", ""))
         scope_path = path  # the upload loop reassigns `path`; preserve the query scope
-        root = os.environ.get("GDRIVE_ROOT", "/gdrive")
+        kb_source_root = os.environ.get("KB_SOURCE_ROOT", "/kb-source")
+        dir = _normalize_path(_qs(qs, "dir", ""))
+        if not dir:
+            raise GatewayError(400, "dir required (the KB subdir under the source root)")
+        root = os.path.join(kb_source_root, dir)  # per-KB walk root; keys stay subdir-relative
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
 
@@ -499,6 +507,7 @@ class Handler(BaseHTTPRequestHandler):
         # dropped file would reappear as `deleted` in sync/diff -> cleanup
         # removes its KB entry: data loss on a transient I/O error).
         files = walk_source(root, allow, max_size, path)  # [{filename,path,checksum,size,abspath}]
+        files = apply_excludes(files, dir, kb_source_root)  # additive deny-list (.exclude.conf)
         if not files and not force:
             raise GatewayError(422, "source walk yielded 0 files - refusing "
                                     "(mount failure?). Use force=1 to proceed.")
@@ -732,8 +741,10 @@ class Handler(BaseHTTPRequestHandler):
                   "errors": errors, "ok": len(errors) == 0})
 
     def _status(self, identity, qs):
-        """GET /status?source=gdrive&kb_id=<id>[&path=<relpath>][&file=<relpath>][&json=1].
-        Read-only. Reports real per-file progress from OWUI file.data.status
+        """GET /status?kb_id=<id>&dir=<name>[&path=<relpath>][&file=<relpath>][&json=1].
+        Read-only. `dir` is the KB's top-level subdir under the source root (the
+        walk root is KB_SOURCE_ROOT/dir). Reports real per-file progress from
+        OWUI file.data.status
         (via GET /files/?content=false, paged). OWUI's status vocabulary:
           pending    = extraction phase (the slow GPU/OCR work) or queued —
                        extraction does not update status until it finishes, so
@@ -749,12 +760,9 @@ class Handler(BaseHTTPRequestHandler):
         source_count to a subpath (the walk filter). The file-status counts are
         KB-wide (accurate when the KB's whole scope is `path`, the `path` use
         case)."""
-        source = _qs(qs, "source", "gdrive")
-        if source != "gdrive":
-            raise GatewayError(400, "unknown source %r (Phase 1: 'gdrive' only)" % source)
-        kb_id = _qs(qs, "kb_id", os.environ.get("GDRIVE_KB_ID", ""))
+        kb_id = _qs(qs, "kb_id", "")
         if not kb_id:
-            raise GatewayError(400, "kb_id required (query kb_id or GDRIVE_KB_ID env)")
+            raise GatewayError(400, "kb_id required (query kb_id)")
         as_json = _qs_bool(qs, "json", False)
         relpath = _qs(qs, "file", "")
         admin_key = owui._admin_key()  # OwuiError -> 503 if unset
@@ -764,10 +772,15 @@ class Handler(BaseHTTPRequestHandler):
         # (a dedicated/subpath KB — the `path` use case); on a shared KB they
         # cover the whole KB, not just the subpath.
         path = _normalize_path(_qs(qs, "path", ""))
-        root = os.environ.get("GDRIVE_ROOT", "/gdrive")
+        kb_source_root = os.environ.get("KB_SOURCE_ROOT", "/kb-source")
+        dir = _normalize_path(_qs(qs, "dir", ""))
+        if not dir:
+            raise GatewayError(400, "dir required (the KB subdir under the source root)")
+        root = os.path.join(kb_source_root, dir)
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
         files = walk_source(root, allow, max_size, path)
+        files = apply_excludes(files, dir, kb_source_root)  # additive deny-list (.exclude.conf)
         source_count = len(files)
         file_status = owui.list_file_status(admin_key, kb_id)
         completed = sum(1 for s in file_status if s.get("status") == "completed")
@@ -800,7 +813,7 @@ class Handler(BaseHTTPRequestHandler):
                    "failed_files": [{"filename": f.get("filename"),
                                      "size": f.get("size"),
                                      "error": f.get("error")} for f in failed],
-                   "source": source, "kb_id": kb_id,
+                   "dir": dir, "kb_id": kb_id,
                    "source_count": source_count,
                    "indexed_count": completed,
                    "pending": pending,
@@ -812,7 +825,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._ok(summary)
         # human-readable: glyphs (✓/✗/○), no emoji, no ETA (no daemon). pending
         # = GPU/OCR in flight (the busy signal); processing = embed + link.
-        lines = ["source (gdrive)   : %d allowlisted files" % source_count,
+        lines = ["%-18s: %d allowlisted files" % ("dir (%s)" % dir, source_count),
                  "indexed (OWUI KB) : %d completed (searchable)" % completed,
                  "pending (OWUI)    : %d in extraction (OCR/GPU)" % pending,
                  "processing (OWUI) : %d embedding + linking" % processing,
@@ -973,6 +986,179 @@ def walk_source(root, allow, max_size, path=""):
     return out
 
 
+# --- .exclude.conf additive deny-list (shared semantics with rclone) -------
+#
+# One INI file at <source-root>/.exclude.conf. Sections are paths relative to
+# the source root (e.g. [gdrive], [gdrive/Team Meetings], [my-docs]);
+# [*] is the global section (applies to every KB). Patterns are rclone-style:
+#   no "/"        -> match the basename at ANY depth (e.g. *.aux, *.json);
+#   leading "/"   -> anchor at the section root (e.g. /Weekly*.pdf);
+#   "/" elsewhere -> a path pattern, matched against the path relative to the
+#                   section (non-anchored: suffix-match on a "/" boundary);
+#   "*" / "**"    -> everything in the section ("*" = within a segment in other
+#                   positions; "**" crosses "/");
+#   "?"           -> one non-"/" char.
+# `*` does NOT cross "/" (unlike Python fnmatch); "**" does. Anchored ("/"-led)
+# patterns are allowed ONLY in leaf sections (a section under which no other
+# section sits): a non-leaf section (e.g. [*], [gdrive]) anchors at different
+# roots for the rclone download stage vs this index stage, so an anchored
+# pattern there is ambiguous and is rejected (fail-closed). The deny-list is
+# ADDITIVE: it only removes files. The hardcoded *.meta/*.meta.json sidecar
+# skip in _entry_for stays (a gateway invariant); .exclude.conf cannot un-deny
+# it. Missing .exclude.conf -> no denies (only the extension allowlist applies).
+
+def _translate_glob(pat):
+    """Translate one rclone-style glob body (no leading "/") to a regex string.
+    `*` -> [^/]* (within a segment), `**` -> .* (across "/"), `?` -> [^/],
+    every other char is re.escape'd."""
+    out = []
+    i, n = 0, len(pat)
+    while i < n:
+        c = pat[i]
+        if c == "*":
+            if i + 1 < n and pat[i + 1] == "*":
+                out.append(".*")
+                i += 2
+            else:
+                out.append("[^/]*")
+                i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return "".join(out)
+
+
+def _compile_exclude(pat):
+    """Compile one .exclude.conf pattern to a matchable form. Returns a tuple:
+    ("star",)                  -> matches everything;
+    ("basename", re)           -> no "/": fullmatch on the basename;
+    ("anchored", re)           -> leading "/" + contains "/": fullmatch on the
+                                  path relative to the section;
+    ("suffix", re)             -> contains "/" but no leading "/": the pattern
+                                  matches a path that ENDS in it on a "/" boundary."""
+    anchored = pat.startswith("/")
+    body = pat[1:] if anchored else pat
+    if body in ("*", "**"):
+        return ("star",)
+    has_slash = "/" in body
+    rx = _translate_glob(body)
+    if anchored:
+        # Leading "/" anchors at the section root: fullmatch the path relative to
+        # the section (a no-slash body still anchors — [^/]* won't cross a "/").
+        return ("anchored", re.compile(r"\A" + rx + r"\Z"))
+    if not has_slash:
+        return ("basename", re.compile(r"\A" + rx + r"\Z"))
+    return ("suffix", re.compile(r"(?:\A|/)" + rx + r"\Z"))
+
+
+def _load_excludes(path):
+    """Parse <source-root>/.exclude.conf into {section: [patterns]}. Returns {}
+    when the file is missing (no denies). Validates: anchored ("/"-led) patterns
+    are rejected in non-leaf sections (B8). A malformed file raises
+    GatewayError(400) so /index fails closed with a clear cause."""
+    if not os.path.isfile(path):
+        return {}
+    sections = {}
+    current = None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or line.startswith(";"):
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    current = line[1:-1].strip()
+                    sections.setdefault(current, [])
+                    continue
+                if current is None:
+                    raise GatewayError(400, ".exclude.conf pattern outside any section: %r" % line)
+                sections[current].append(line)
+    except OSError as e:
+        raise GatewayError(500, ".exclude.conf read failed: %s" % e)
+    # Non-leaf = a section with at least one other section under it. [*] is
+    # always non-leaf. Anchored patterns are rejected there (ambiguous root).
+    for S in sections:
+        non_leaf = S == "*" or any(o != S and o.startswith(S + "/") for o in sections)
+        if non_leaf:
+            for pat in sections[S]:
+                if pat.startswith("/"):
+                    raise GatewayError(400, ".exclude.conf: anchored pattern %r only allowed in a "
+                                            "leaf section (section [%s] is not a leaf)" % (pat, S))
+    return sections
+
+
+def _section_applies(S, dir):
+    """True if section S applies to a walk of KB `dir` (root-relative): [*]
+    always; S == dir; or S is an ancestor or descendant of dir (B3)."""
+    if S == "*":
+        return True
+    if S == dir:
+        return True
+    if dir.startswith(S + "/") or S.startswith(dir + "/"):
+        return True
+    return False
+
+
+def _rel_to_section(S, fr):
+    """File root-relative path `fr` -> path relative to section S, or None when
+    the file is not under S. For [*] the section root is the source root, so
+    rel-to-section is `fr` itself."""
+    if S == "*":
+        return fr
+    if fr == S:
+        return ""
+    if fr.startswith(S + "/"):
+        return fr[len(S) + 1:]
+    return None
+
+
+def apply_excludes(files, dir, kb_source_root):
+    """Drop walk entries matched by <source-root>/.exclude.conf. `dir` is the KB
+    subdir (root-relative); each entry's root-relative path is
+    `dir/<entry.path>/<filename>`. Additive only. No-op when .exclude.conf is
+    absent (returns `files` unchanged)."""
+    sections = _load_excludes(os.path.join(kb_source_root, ".exclude.conf"))
+    if not sections:
+        return files
+    compiled = {S: [_compile_exclude(p) for p in pats] for S, pats in sections.items()}
+    out = []
+    for f in files:
+        fr = "/".join(p for p in (dir, f.get("path", ""), f.get("filename", "")) if p)
+        base = f.get("filename", "")
+        drop = False
+        for S, rules in compiled.items():
+            if not _section_applies(S, dir):
+                continue
+            rel = _rel_to_section(S, fr)
+            if rel is None:
+                continue
+            for rule in rules:
+                kind = rule[0]
+                if kind == "star":
+                    drop = True
+                    break
+                if kind == "basename":
+                    if rule[1].fullmatch(base):
+                        drop = True
+                        break
+                elif kind == "anchored":
+                    if rule[1].fullmatch(rel):
+                        drop = True
+                        break
+                else:  # suffix
+                    if rule[1].search(rel):
+                        drop = True
+                        break
+            if drop:
+                break
+        if not drop:
+            out.append(f)
+    return out
+
+
 def _parse_size(s):
     """'100mb' / '100mb' -> bytes. Suffixes: b, k/kb, m/mb, g/gb (case-insensitive,
     optional 'b'). Default 100 MiB on bad input."""
@@ -1130,7 +1316,7 @@ OPENAPI_SPEC = {
     "openapi": "3.1.0",
     "info": {"title": "kb-gateway", "version": "1.0",
              "description": "Stack-side authorization + Graphiti bridge + admin "
-                            "user provisioning + stateless gdrive index sync."},
+                            "user provisioning + stateless KB index sync."},
     "paths": {
         "/health": {"get": {"summary": "Process + OWUI reachability", "security": []}},
         "/openapi.json": {"get": {"summary": "This document", "security": []}},
@@ -1138,8 +1324,11 @@ OPENAPI_SPEC = {
             "summary": "Index (reconcile) a source into an OWUI KB (admin only)",
             "security": [{"bearerAuth": []}],
             "parameters": [
-                {"name": "source", "in": "query", "schema": {"type": "string", "default": "gdrive"}},
-                {"name": "kb_id", "in": "query", "required": False, "schema": {"type": "string", "format": "uuid"}},
+                {"name": "kb_id", "in": "query", "required": True, "schema": {"type": "string", "format": "uuid"}},
+                {"name": "dir", "in": "query", "required": True, "schema": {"type": "string"},
+                 "description": "KB top-level subdir under the source root (KB_SOURCE_ROOT)"},
+                {"name": "path", "in": "query", "required": False, "schema": {"type": "string"},
+                 "description": "in-KB subpath filter (SCOPE_PATH)"},
                 {"name": "force", "in": "query", "schema": {"type": "boolean", "default": False}},
                 {"name": "dry_run", "in": "query", "schema": {"type": "boolean", "default": False}},
                 {"name": "reindex_all", "in": "query", "schema": {"type": "boolean", "default": False}},
@@ -1151,8 +1340,10 @@ OPENAPI_SPEC = {
             "summary": "KB index status (read; read-scoped key works)",
             "security": [{"bearerAuth": []}],
             "parameters": [
-                {"name": "source", "in": "query", "schema": {"type": "string", "default": "gdrive"}},
-                {"name": "kb_id", "in": "query", "required": False, "schema": {"type": "string", "format": "uuid"}},
+                {"name": "kb_id", "in": "query", "required": True, "schema": {"type": "string", "format": "uuid"}},
+                {"name": "dir", "in": "query", "required": True, "schema": {"type": "string"},
+                 "description": "KB top-level subdir under the source root (KB_SOURCE_ROOT)"},
+                {"name": "path", "in": "query", "required": False, "schema": {"type": "string"}},
                 {"name": "file", "in": "query", "required": False, "schema": {"type": "string"}},
                 {"name": "json", "in": "query", "schema": {"type": "boolean", "default": False}}],
             "responses": {"200": {"description": "status (text or json)"}}}},

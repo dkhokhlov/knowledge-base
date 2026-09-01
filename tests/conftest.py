@@ -24,7 +24,6 @@ Three concerns:
 """
 
 import os
-import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -186,9 +185,9 @@ def _setup_iso_env(name, ocr, request, remove_fn, at_scale=False):
              ``e2e_provision_at_scale`` (destructive: clean-all + image rebuild +
              preflight + real rclone gdrive corpus + make ci) in the clone with
              the clean child env, output streams live. When ``at_scale``, the
-             fixture first copies the source repo's gdrive-exclude.conf into the
-             clone (the provision bash has no E2E_SRC to reach it; clean-all does
-             not touch clone-root files, so the copy survives to gdrive-sync). A
+             fixture first copies the source repo's root/.exclude.conf into the
+             clone's ./root/ (the provision bash has no E2E_SRC to reach it; clean-all
+             does not touch clone-root files, so the copy survives to gdrive-sync). A
              failure here still hits the finalizer (registered after A), so no
              half-up stack is stranded.
 
@@ -210,20 +209,51 @@ def _setup_iso_env(name, ocr, request, remove_fn, at_scale=False):
         lambda: _iso_teardown(captured["E2E_NAME"], captured["E2E_STAMP"],
                               remove=remove_fn()))
     if at_scale:
-        # gdrive-exclude.conf (gitignored PII: Drive file paths) is read by
+        # The unified deny-list (gitignored PII: Drive file paths) is read by
         # `make gdrive-sync` so rclone does not abort on non-downloadable paths.
         # The provision bash has no E2E_SRC (_child_env/_ISO_VARS do not carry
         # it), so the fixture -- which has REPO = the source repo root -- copies
-        # it into the clone now, before the provision's `make clean-all`. clean-all
-        # removes .env/.env.local/./data/./.gdrive-backup, NOT clone-root files, so
-        # the copy survives. Fail loud if it is missing (no fallback -- rclone
-        # would abort anyway). It is discarded with the throwaway clone (never
-        # committed, never leaves the host).
-        src = REPO / "gdrive-exclude.conf"
-        if not src.is_file():
-            pytest.fail("gdrive-exclude.conf missing at %s -- required for the "
-                        "at-scale gdrive rclone" % src, pytrace=False)
-        shutil.copy2(src, Path(captured["E2E_CLONE"]) / "gdrive-exclude.conf")
+        # it into the clone's ./root/.exclude.conf now, before the provision's
+        # `make clean-all`. clean-all removes .env/.env.local/./data/./.gdrive-backup,
+        # NOT clone-root files, so the copy survives. mkdir -p the clone's ./root
+        # first (a fresh clone has the tracked root/.exclude.conf.example +
+        # root/.tests/, but the copy target is the gitignored root/.exclude.conf
+        # beside them). Transitional: a
+        # pre-migration source repo still has the OLD gdrive-exclude.conf (not
+        # root/.exclude.conf); accept either source, write to the new path. Fail
+        # loud only if NEITHER exists (no fallback -- rclone would abort anyway).
+        # It is discarded with the throwaway clone (never committed, never leaves
+        # the host).
+        new_src = REPO / "root" / ".exclude.conf"
+        old_src = REPO / "gdrive-exclude.conf"
+        if new_src.is_file():
+            text = new_src.read_text(encoding="utf-8")
+        elif old_src.is_file():
+            # Transitional: a pre-migration source repo still has the OLD
+            # gdrive-exclude.conf with per-drive [X] headers (not [gdrive/X]).
+            # Re-prefix them ([*] verbatim, [X] -> [gdrive/X]) -- the same transform
+            # `make kb-migrate-root` applies -- so the new-format clone's gdrive-sync
+            # + gateway apply per-drive excludes to the gdrive KB, not to a
+            # non-existent "Team Meetings" KB.
+            out = []
+            for line in old_src.read_text(encoding="utf-8").splitlines():
+                s = line.strip()
+                if s.startswith("[") and s.endswith("]") and len(s) > 2:
+                    h = s[1:-1].strip()
+                    if h == "*" or h.startswith("gdrive/"):
+                        out.append(line)
+                    else:
+                        out.append("[gdrive/" + h + "]")
+                else:
+                    out.append(line)
+            text = "\n".join(out) + "\n"
+        else:
+            pytest.fail("exclude deny-list missing: neither %s nor %s -- required "
+                        "for the at-scale gdrive rclone" % (new_src, old_src),
+                        pytrace=False)
+        clone_root = Path(captured["E2E_CLONE"]) / "root"
+        clone_root.mkdir(parents=True, exist_ok=True)
+        (clone_root / ".exclude.conf").write_text(text, encoding="utf-8")
     prov = subprocess.run(
         ["bash", "-c", ". scripts/lib-e2e-env.sh; %s" %
             ("e2e_provision_at_scale" if at_scale else "e2e_provision")],
