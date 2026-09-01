@@ -8,6 +8,25 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Unified `.kb-ignore` deny-list (per-directory, gitignore-style).** Replaces
+  the INI `./root/.exclude.conf`. Rules are relative to each `.kb-ignore`'s own
+  directory; `./root/.kb-ignore` holds the globals (apply to every KB),
+  `./root/gdrive/<drive>/.kb-ignore` and `./root/<kb>/.kb-ignore` scope to that
+  KB. All three walkers — the gateway index walk (`gateway/app.py`), the rclone
+  download stage (`scripts/gdrive-sync`), and the projects walker (`kb.py`) — read
+  the ancestor chain with shared gitignore semantics: `*` does not cross `/`,
+  `**` does, `?` is one non-`/` char, a leading `/` anchors at the file's own dir,
+  a no-slash name matches the basename at any depth. `!` negation re-includes a
+  file a shallower pattern denied (last match wins along the chain). The shared
+  matcher lives in `scripts/kb_ignore.py` (Python import + `filter` CLI); `kb.py`
+  clones it inline (monolithic deploy, no import). gdrive-sync becomes two-pass:
+  `rclone lsf -R --files-only` enumerates the remote list, the matcher filters it,
+  `rclone copy --files-from` downloads only the allowed files, and the wrapper
+  reconciles deletions (removed-from-Drive files not protected are moved to the
+  `--backup-dir`). `scripts/exclude_to_kb_ignore.py` translates the old INI to the
+  new per-directory chain (used by `make kb-migrate-root` and the at-scale e2e
+  fixture). Format documented in `docs/operations.md` (no tracked template file —
+  the live files are gitignored, Drive paths are business-sensitive).
 - **Generic `./root/` multi-KB source root.** Every top-level subdir of `./root/`
   is one knowledge base, named after the subdir. The `gdrive` KB becomes one
   instance of the pattern (`./root/gdrive/`); to add a non-gdrive KB, drop a

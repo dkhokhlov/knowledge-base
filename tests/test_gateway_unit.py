@@ -17,7 +17,11 @@ import unittest
 from unittest import mock
 
 GATEWAY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway")
+SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, os.path.abspath(GATEWAY))
+# app.py imports kb_ignore (scripts/kb_ignore.py) -- put scripts/ on sys.path so
+# that import resolves under pytest (which only had gateway/ here before).
+sys.path.insert(0, os.path.abspath(SCRIPTS))
 # No sys.modules["owui"] clash to evict: the skill's wrapper used to be named
 # `owui` (skills/claude/scripts/owui.py) and collided with gateway/owui.py under
 # pytest's single-process collection. The skill module is now `kb`, so
@@ -79,7 +83,7 @@ class EntryMtimeTests(unittest.TestCase):
         # gdrive-meta sidecars must NOT be indexed. `.meta` (YAML) is dropped by
         # the ext allowlist (meta ∉ DEFAULT_ALLOW); `.meta.json` (JSON, ext `json`
         # which IS allowed) is dropped by the name skip in _entry_for. Guards the
-        # "exclude sidecars from indexing" claim (./root/.exclude.conf [*] protects
+        # "exclude sidecars from indexing" claim (./root/.kb-ignore globals protect
         # the local sidecars from sync deletion; the walk excludes them from the
         # index).
         root = tempfile.mkdtemp()
@@ -134,127 +138,149 @@ class EntryMtimeTests(unittest.TestCase):
             shutil.rmtree(root)
 
 
-class TestApplyExcludes(unittest.TestCase):
-    """apply_excludes: the additive .exclude.conf deny-list (B3/B5/B6/B7/B8).
-    Each test builds a temp KB_SOURCE_ROOT + .exclude.conf and runs the filter on
-    synthetic walk entries ({path, filename}); no stack needed."""
+class TestKbIgnore(unittest.TestCase):
+    """apply_kb_ignores: the additive .kb-ignore ancestor-chain deny-list.
+    Each test builds a temp KB_SOURCE_ROOT with per-directory .kb-ignore files
+    and runs the filter on synthetic walk entries ({path, filename}); no stack.
+    Semantics: gitignore-style -- no-slash matches a basename at any depth; a
+    slash pattern is anchored at the .kb-ignore's own dir; `*` does not cross
+    `/`, `**` does; `!` re-includes; ancestor .kb-ignore files accumulate
+    (shallowest first, last match wins)."""
 
-    def _root_with(self, conf_text):
-        root = tempfile.mkdtemp()
-        with open(os.path.join(root, ".exclude.conf"), "w", encoding="utf-8") as f:
-            f.write(conf_text)
-        return root
+    def _ignore_at(self, root, rel, text):
+        """Write a .kb-ignore at <root>/<rel>/.kb-ignore (rel='' = root)."""
+        d = os.path.join(root, rel) if rel else root
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, ".kb-ignore"), "w", encoding="utf-8") as f:
+            f.write(text)
 
     def _e(self, path, filename):
         return {"path": path, "filename": filename}
 
-    def test_missing_conf_is_noop(self):
-        # B5: no .exclude.conf -> files returned unchanged (the hardcoded sidecar
-        # skip in _entry_for is independent of this deny-list).
+    def test_missing_ignore_is_noop(self):
+        # No .kb-ignore anywhere -> files returned unchanged (allowed() returns
+        # True for every path; the _entry_for sidecar skip is independent).
         root = tempfile.mkdtemp()
         try:
             files = [self._e("", "a.pdf"), self._e("sub", "b.md")]
-            self.assertEqual(app.apply_excludes(files, "gdrive", root), files)
+            self.assertEqual(app.apply_kb_ignores(files, "gdrive", root), files)
         finally:
             import shutil; shutil.rmtree(root)
 
-    def test_star_is_global_every_kb(self):
-        # B6: [*] applies to EVERY KB dir, not just gdrive.
-        root = self._root_with("[*]\n*.json\n")
+    def test_globals_apply_to_every_kb(self):
+        # root/.kb-ignore (globals) applies to EVERY KB dir, not just gdrive.
+        root = tempfile.mkdtemp()
         try:
+            self._ignore_at(root, "", "*.json\n")
             files = [self._e("", "a.json"), self._e("", "b.pdf")]
-            out = app.apply_excludes(files, "mydocs", root)
+            out = app.apply_kb_ignores(files, "mydocs", root)
             self.assertEqual([f["filename"] for f in out], ["b.pdf"])
         finally:
             import shutil; shutil.rmtree(root)
 
-    def test_section_selection_descendant_not_unrelated(self):
-        # B3: dir=gdrive selects [*], [gdrive], AND descendant [gdrive/Team Mtgs];
-        # NOT an unrelated [mydocs] section.
-        conf = ("[*]\n*.pyc\n"
-                "[gdrive]\nsecret.txt\n"
-                "[gdrive/Team Mtgs]\n/notes.md\n"
-                "[mydocs]\n*.md\n")
-        root = self._root_with(conf)
+    def test_per_drive_scoped_not_global(self):
+        # root/gdrive/.kb-ignore drops gdrive/secret.txt but NOT mydocs/secret.txt
+        # (a per-dir .kb-ignore is relative to its own location, not a global).
+        root = tempfile.mkdtemp()
         try:
+            self._ignore_at(root, "gdrive", "secret.txt\n")
+            files = [self._e("", "secret.txt")]
+            self.assertEqual(app.apply_kb_ignores(files, "gdrive", root), [])
+            self.assertEqual(app.apply_kb_ignores(files, "mydocs", root), files)
+        finally:
+            import shutil; shutil.rmtree(root)
+
+    def test_ancestor_chain_accumulates(self):
+        # root/.kb-ignore (*.pyc) + root/gdrive/Team Mtgs/.kb-ignore (/notes.md):
+        # both apply to gdrive/Team Mtgs/notes.md; the global applies elsewhere too.
+        root = tempfile.mkdtemp()
+        try:
+            self._ignore_at(root, "", "*.pyc\n")
+            self._ignore_at(root, "gdrive/Team Mtgs", "/notes.md\n")
             files = [
-                self._e("", "a.pyc"),              # [*] global -> drop
-                self._e("", "secret.txt"),         # [gdrive] basename -> drop
-                self._e("Team Mtgs", "notes.md"),  # [gdrive/Team Mtgs] /anchored -> drop
+                self._e("", "a.pyc"),              # global *.pyc -> drop
+                self._e("Team Mtgs", "notes.md"),  # /notes.md anchored at Team Mtgs -> drop
                 self._e("", "keep.pdf"),           # nothing matches -> keep
-                self._e("", "doc.md"),             # [mydocs] *.md does NOT apply to gdrive -> keep
+                self._e("Team Mtgs", "keep.pdf"),  # nothing matches -> keep
             ]
-            out = app.apply_excludes(files, "gdrive", root)
-            self.assertEqual(sorted(f["filename"] for f in out), ["doc.md", "keep.pdf"])
+            out = app.apply_kb_ignores(files, "gdrive", root)
+            self.assertEqual(sorted(f["filename"] for f in out), ["keep.pdf", "keep.pdf"])
+        finally:
+            import shutil; shutil.rmtree(root)
+
+    def test_negation_reinclude(self):
+        # root/.kb-ignore: *.pdf then !keep.pdf -> keep.pdf re-included; a deeper
+        # drop.pdf is still denied (last match wins).
+        root = tempfile.mkdtemp()
+        try:
+            self._ignore_at(root, "", "*.pdf\n!keep.pdf\n")
+            files = [self._e("", "drop.pdf"), self._e("", "keep.pdf"),
+                     self._e("sub", "drop2.pdf")]
+            out = app.apply_kb_ignores(files, "gdrive", root)
+            self.assertEqual([f["filename"] for f in out], ["keep.pdf"])
+        finally:
+            import shutil; shutil.rmtree(root)
+
+    def test_star_allowlist(self):
+        # root/gdrive/.kb-ignore: * then !subtree/** -> only subtree/** kept (the
+        # ! pattern is relative to gdrive/, where the .kb-ignore lives).
+        root = tempfile.mkdtemp()
+        try:
+            self._ignore_at(root, "gdrive", "*\n!subtree/**\n")
+            files = [
+                self._e("", "a.pdf"),                 # * -> drop
+                self._e("subtree", "keep.md"),        # !subtree/** -> keep
+                self._e("subtree/deep", "keep2.md"),  # !subtree/** -> keep
+            ]
+            out = app.apply_kb_ignores(files, "gdrive", root)
+            self.assertEqual(sorted(f["filename"] for f in out), ["keep.md", "keep2.md"])
         finally:
             import shutil; shutil.rmtree(root)
 
     def test_glob_star_does_not_cross_slash(self):
-        # B7 (rclone-aligned): "*" matches within one segment; a "/"-containing
-        # pattern is FULL-matched against the section-relative path. So "sub/*.pdf"
-        # drops "sub/a.pdf" but NOT "sub/deep/b.pdf" (crosses /) and NOT
-        # "foo/sub/a2.pdf" (a deeper "sub" -- full-path, not a suffix match).
-        # "**" crosses "/".
-        root = self._root_with("[gdrive]\nsub/*.pdf\nsub2/**/*.pdf\n")
+        # "sub/*.pdf" (slash pattern, anchored at the .kb-ignore's dir): drops
+        # sub/a.pdf but NOT sub/deep/b.pdf (* does not cross /) and NOT foo/sub/a2.pdf
+        # (anchored at gdrive/, foo/ comes first). "**" crosses "/".
+        root = tempfile.mkdtemp()
         try:
+            self._ignore_at(root, "gdrive", "sub/*.pdf\nsub2/**/*.pdf\n")
             files = [
                 self._e("sub", "a.pdf"),           # sub/*.pdf -> drop
-                self._e("sub/deep", "b.pdf"),      # sub/*.pdf no (crosses /); sub2/** no -> keep
-                self._e("foo/sub", "a2.pdf"),      # sub/*.pdf no (full-path, not a deeper "sub") -> keep
+                self._e("sub/deep", "b.pdf"),      # sub/*.pdf no (crosses /) -> keep
+                self._e("foo/sub", "a2.pdf"),      # sub/*.pdf no (anchored, foo/ first) -> keep
                 self._e("sub2/deep", "c.pdf"),     # sub2/**/*.pdf -> drop
             ]
-            out = app.apply_excludes(files, "gdrive", root)
+            out = app.apply_kb_ignores(files, "gdrive", root)
             self.assertEqual(sorted(f["filename"] for f in out), ["a2.pdf", "b.pdf"])
         finally:
             import shutil; shutil.rmtree(root)
 
-    def test_glob_slash_pattern_one_level_rclone_aligned(self):
-        # B7 (rclone-aligned): "*/Doc1.pdf" is a full-path match with "*" not
-        # crossing "/", so it drops a one-level "<seg>/Doc1.pdf" but NOT a deeper
-        # "a/b/Doc1.pdf" and NOT the section-root "Doc1.pdf" (no segment before it).
-        # Pre-alignment this was a suffix match that over-matched at any depth.
-        root = self._root_with("[gdrive]\n*/Doc1.pdf\n")
+    def test_anchored_at_dir_root(self):
+        # root/gdrive/sub/.kb-ignore: /a.pdf anchored at sub -> drops sub/a.pdf
+        # but NOT sub/deep/a.pdf (the anchor is sub, not deeper).
+        root = tempfile.mkdtemp()
         try:
+            self._ignore_at(root, "gdrive/sub", "/a.pdf\n")
             files = [
-                self._e("foo", "Doc1.pdf"),        # */Doc1.pdf -> drop (one level)
-                self._e("foo/bar", "Doc1.pdf"),    # */Doc1.pdf no (deeper) -> keep
-                self._e("", "Doc1.pdf"),           # */Doc1.pdf no (section root, no seg) -> keep
-            ]
-            out = app.apply_excludes(files, "gdrive", root)
-            kept = sorted((f["path"], f["filename"]) for f in out)
-            self.assertEqual(kept, [("", "Doc1.pdf"), ("foo/bar", "Doc1.pdf")])  # foo/Doc1.pdf dropped
-        finally:
-            import shutil; shutil.rmtree(root)
-
-    def test_anchored_pattern_anchors_at_section_root(self):
-        # B7: a leading "/" anchors at the section root. [gdrive/sub] /a.pdf drops
-        # gdrive/sub/a.pdf but NOT gdrive/sub/deep/a.pdf.
-        root = self._root_with("[gdrive/sub]\n/a.pdf\n")
-        try:
-            files = [
-                self._e("sub", "a.pdf"),           # /a.pdf anchored -> drop
+                self._e("sub", "a.pdf"),           # /a.pdf anchored at sub -> drop
                 self._e("sub/deep", "a.pdf"),      # rel is deep/a.pdf -> keep
             ]
-            out = app.apply_excludes(files, "gdrive", root)
+            out = app.apply_kb_ignores(files, "gdrive", root)
             self.assertEqual([f["filename"] for f in out], ["a.pdf"])
         finally:
             import shutil; shutil.rmtree(root)
 
-    def test_anchored_in_nonleaf_rejected(self):
-        # B8: an anchored ("/"-led) pattern in a NON-leaf section ([*], [gdrive]
-        # with a deeper [gdrive/sub]) is rejected at load time -> GatewayError(400).
-        import shutil
-        for conf in ("[*]\n/x.pdf\n",
-                     "[gdrive]\n/x.pdf\n[gdrive/sub]\n*.md\n"):
-            root = tempfile.mkdtemp()
-            try:
-                with open(os.path.join(root, ".exclude.conf"), "w", encoding="utf-8") as f:
-                    f.write(conf)
-                with self.assertRaises(app.GatewayError) as cm:
-                    app.apply_excludes([self._e("", "a.pdf")], "gdrive", root)
-                self.assertEqual(cm.exception.status, 400)
-            finally:
-                shutil.rmtree(root)
+    def test_kb_ignore_file_itself_not_indexed(self):
+        # .kb-ignore is a dot-name (walk_source drops dot-names in a normal walk);
+        # _entry_for hardcodes the skip for the single-file path= route, which
+        # deliberately opts into dot-files. Assert it returns None.
+        root = tempfile.mkdtemp()
+        try:
+            self._ignore_at(root, "gdrive", "*.pdf\n")
+            p = os.path.join(root, "gdrive", ".kb-ignore")
+            self.assertIsNone(app._entry_for(p, os.path.dirname(p), {"pdf"}, 100 << 20))
+        finally:
+            import shutil; shutil.rmtree(root)
 
 
 class _Resp:

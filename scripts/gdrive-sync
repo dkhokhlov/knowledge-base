@@ -43,37 +43,40 @@ Skipped silently if OPENWEBUI_ADMIN_API_KEY is unset (run: make api-keys), or if
 
 Fail-fast: ANY transfer error aborts the run immediately (the report is still
 written with the failing files + rclone reasons). A per-drive empty-source guard
-refuses to sync a drive whose remote listing is empty (sync deletes to match the
-source, so an empty remote would mass-delete the local drive dir).
+refuses to sync a drive whose remote listing is empty (an empty remote would make
+the deletion reconcile back up every local file in that drive).
 
 Concurrency: a hidden <destination>/.sync.lock (holder PID) prevents two runs
 from racing on the same destination; a stale lock whose PID is no longer alive
 is retaken. Aborts with exit 1 if another run is in progress.
 
-The (gitignored) ./gdrive-exclude.conf is an INI file (see the tracked
-gdrive-exclude.conf.example): [<drive name>] sections list patterns that apply
-only to that shared drive (matched by name; resolved to the drive id at
-runtime); a [*] section holds global patterns applied to every drive (e.g.
-*.tmp). Patterns are passed VERBATIM to rclone --exclude-from (rclone-native:
-no "/" matches the basename at any depth, "/" matches the full path). Per-drive
-entries list permanently non-downloadable files (Drive-admin download-forbidden
-403, dangling shortcuts); append one when a sync fails fast on a NEW
-non-downloadable file and re-run. Transient errors (network/5xx) are NOT
-excluded — those fail fast by design.
+Two-pass download + own deletion reconcile. Pass 1: rclone lsf -R --files-only
+enumerates the per-drive remote file list. The shared .kb-ignore matcher
+(scripts/kb_ignore.py; gitignore-style, ancestor-chain, `!` negation) filters it
+into the allowed list -- the same .kb-ignore the gateway index walk honors, so
+the download + index stages agree. Pass 2: rclone copy --files-from <allowed>
+downloads only allowed files (skips unchanged via mtime/size; --backup-dir backs
+up overwrites). rclone copy does NOT delete, so this script owns deletion: a local
+file not in the remote listing (removed from Drive) is moved to --backup-dir,
+unless PROTECTED (a dot-name; a .sync-reports file; or denied by .kb-ignore --
+denied files persist locally, same as the old sync --exclude-from). Per-drive
+.kb-ignore files list non-downloadable files (Drive-admin download-forbidden 403,
+dangling shortcuts); add one when a sync fails fast on a NEW non-downloadable file
+and re-run. Transient errors (network/5xx) are NOT excluded -- those fail fast by
+design.
 
 A sync report is written to <destination>/.sync-reports/sync-<UTC-ISO>.report
 containing the per-drive + total summary, a "Files changed" breakdown
-(COPY / UPDATE / DELETE, per file with drive prefix), a "Files excluded"
-section (Drive files that matched the exclude patterns, from rclone's DEBUG
-log), a "Duplicates ignored" section (Drive files rclone skipped because another
-file shares the same path — Drive permits duplicate names), and a "Files not
-downloaded" section (failing paths + rclone reasons).
+(COPY / UPDATE / DELETE, per file with drive prefix; DELETE from the reconcile),
+a "Files excluded" section (remote files denied by .kb-ignore, re-derived as
+remote_listing - allowed), a "Duplicates ignored" section (Drive files rclone
+skipped because another file shares the same path -- Drive permits duplicate
+names), and a "Files not downloaded" section (failing paths + rclone reasons).
 EOF
 }
 
 remote="gdrive"
 destination="./root/gdrive"
-exclude_file="./root/.exclude.conf"
 dry_run=0
 index_all=0
 retry_pending=0
@@ -548,103 +551,126 @@ while IFS=$'\t' read -r drive_id drive_name; do
         write_report_and_exit 1
     fi
 
-    # --- exclude list (INI: root-relative sections + [*] globals) --------------
-    # Convert the (gitignored) master exclude file (./root/.exclude.conf) on the
-    # fly into this drive's --exclude-from. Sections are paths relative to the
-    # source root ./root: [*] = global (every KB), [gdrive] = the gdrive KB,
-    # [gdrive/<drive>] = one drive. For this drive, active sections are [*],
-    # [gdrive], [gdrive/<safe_name>], and descendants [gdrive/<safe_name>/...].
-    # Patterns are emitted VERBATIM -- rclone-native: no "/" matches the basename
-    # at any depth; a leading "/" anchors at the drive root (= the section's
-    # content); "*" = every file in the section. Anchored ("/"-led) patterns are
-    # allowed only in LEAF sections (a section with no deeper section under it):
-    # a non-leaf section ([*], [gdrive]) anchors at different roots for the rclone
-    # download stage vs the gateway index stage, so an anchored pattern there is
-    # ambiguous and is rejected here AND by the gateway (fail-closed).
-    tmp_exclude=""
-    if [[ -f "$exclude_file" ]]; then
-        tmp_exclude=$(mktemp); temp_files+=("$tmp_exclude")
-        if ! awk -v target="gdrive/$safe_name" -v file="$exclude_file" '
-            BEGIN {
-                while ((getline line < file) > 0) {
-                    if (line ~ /^\[.*\][[:space:]]*$/) {
-                        h = line; sub(/^\[/, "", h); sub(/\][[:space:]]*$/, "", h)
-                        secs[h] = 1
-                    }
-                }
-                close(file)
-                for (h in secs) nonleaf[h] = 0
-                for (h in secs) {
-                    if (h == "*") { nonleaf[h] = 1; continue }
-                    for (h2 in secs)
-                        if (h2 != h && substr(h2, 1, length(h) + 1) == h "/") { nonleaf[h] = 1; break }
-                }
-            }
-            /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
-            /^\[.*\][[:space:]]*$/ {
-                hdr = $0; sub(/^\[/, "", hdr); sub(/\][[:space:]]*$/, "", hdr)
-                cur = hdr
-                active = (hdr == "*" || hdr == "gdrive" || hdr == target \
-                          || substr(hdr, 1, length(target) + 1) == target "/")
-                next
-            }
-            active {
-                line = $0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
-                if (line == "") next
-                if (cur != "" && nonleaf[cur] && line ~ /^\//) {
-                    print "FAIL  .exclude.conf: anchored pattern " line " in non-leaf section [" cur "] -- use a leaf [gdrive/<drive>] section" > "/dev/stderr"
-                    exit 1
-                }
-                print line
-            }
-        ' "$exclude_file" > "$tmp_exclude"; then
-            rm -f "$tmp_exclude"; tmp_exclude=""
-            emit "FAIL: .exclude.conf rejected (anchored pattern in a non-leaf section); aborting before rclone"
-            write_report_and_exit 1
-        fi
-        if [[ ! -s "$tmp_exclude" ]]; then
-            rm -f "$tmp_exclude"; tmp_exclude=""
-        fi
+    # --- allowed list (.kb-ignore ancestor-chain filter) ---------------------
+    # The shared gitignore-style matcher (scripts/kb_ignore.py) reads .kb-ignore
+    # at ./root and along each path's ancestor chain: ./root/.kb-ignore (globals),
+    # ./root/gdrive/.kb-ignore, ./root/gdrive/<safe_name>/.kb-ignore, + nested
+    # dirs. rclone lsf paths are drive-relative; prefix gdrive/<safe_name>/ so the
+    # matcher sees the same ./root-relative paths the gateway index walk does
+    # (download + index stages honor the SAME .kb-ignore rules). The filter drops
+    # denied files + resolves `!` negation natively -- no rclone-glob translation,
+    # no `!`-stripping. No-op when no .kb-ignore exists (every path allowed).
+    tmp_filesfrom=$(mktemp); temp_files+=("$tmp_filesfrom")
+    if ! awk -v p="gdrive/$safe_name/" '{print p $0}' <<<"$remote_listing" \
+        | python3 ./scripts/kb_ignore.py filter --root ./root \
+        | awk -v p="gdrive/$safe_name/" 'index($0,p)==1{print substr($0,length(p)+1)}' \
+        > "$tmp_filesfrom"; then
+        rm -f "$tmp_filesfrom"; tmp_filesfrom=""
+        emit "FAIL: .kb-ignore filter failed for drive ${drive_name} -- aborted (fail-fast)"
+        write_report_and_exit 1
     fi
 
-    # Per-drive rclone log: parsed right after the sync for COPY/UPDATE/DELETE,
-    # failures, and Excluded files (paths are drive-relative, so the drive name
-    # is added at parse time). DEBUG (not INFO) is required — rclone only logs
-    # ": Excluded" lines at DEBUG, and the report includes an excluded-files
-    # section. DEBUG is a superset of INFO, so the COPY/UPDATE/DELETE/FAIL
-    # lines still appear. Temp; the EXIT trap removes it.
+    # Per-drive rclone log: parsed right after the copy for COPY/UPDATE (paths
+    # are drive-relative, so the drive name is added at parse time). DELETE is
+    # NOT in the log -- rclone copy does not delete; the deletion reconcile
+    # below owns DELETE. EXCLUDE is NOT in the log either -- denied files are
+    # dropped by the filter before rclone; the denied-block below owns EXCLUDE.
+    # DEBUG (a superset of INFO) so the COPY/UPDATE/FAIL lines appear. Temp; the
+    # EXIT trap removes it.
     drive_log=$(mktemp); temp_files+=("$drive_log")
     log_args=(--log-level DEBUG --log-file "$drive_log")
 
     rclone_args=(
-        sync
+        copy
         "${remote}:"
         "$target"
         --drive-team-drive "$drive_id"
-        --create-empty-src-dirs
+        --files-from "$tmp_filesfrom"
         # Per-drive subdir: --backup-dir preserves hierarchy relative to each
-        # sync's destination root ($target), NOT including the drive name, so
+        # copy's destination root ($target), NOT including the drive name, so
         # without this two drives sharing a relative path would collide in the
-        # same backup_root/<subpath>.
+        # same backup_root/<subpath>. Overwritten files are moved here first;
+        # the deletion reconcile below also moves removed-from-Drive files here.
         --backup-dir "$backup_root/$safe_name"
-        --delete-after
         "${log_args[@]}"
     )
     ((dry_run)) && rclone_args+=(--dry-run)
-    [[ -n "$tmp_exclude" ]] && rclone_args+=(--exclude-from "$tmp_exclude")
 
     # --- fail-fast: any transfer error aborts the whole run ------------------
-    # Known non-downloadable files are excluded above, so a non-zero exit here is
-    # a genuine failure (new protected file, network error, ...) — do NOT
-    # continue to the next drive. The report is still written with the failures.
-    if ! rclone "${rclone_args[@]}"; then
-        printf 'FAIL: shared drive %s had transfer errors — aborting (fail-fast). See report for failing files; add new non-downloadable paths to %s.\n' "$drive_name" "$exclude_file" >&2
+    # Known non-downloadable files are dropped by the .kb-ignore filter above, so
+    # a non-zero exit here is a genuine failure (new protected file, network
+    # error, ...) — do NOT continue to the next drive. The report is still
+    # written with the failures. When the filter denies every remote file,
+    # tmp_filesfrom is empty: skip rclone (copy would be a no-op) and parse the
+    # empty log (0 changes); the denied-block + reconcile still run.
+    if [[ -s "$tmp_filesfrom" ]] && ! rclone "${rclone_args[@]}"; then
+        printf 'FAIL: shared drive %s had transfer errors — aborting (fail-fast). See report for failing files; add new non-downloadable paths to a .kb-ignore under ./root/gdrive/%s/.\n' "$drive_name" "$safe_name" >&2
         emit "FAIL: drive ${drive_name} had transfer errors — aborted (fail-fast)"
         parse_drive_log
         write_report_and_exit 1
     fi
 
     parse_drive_log
+
+    # --- .kb-ignore denied files (replaces rclone --exclude-from "Excluded") --
+    # The filter dropped denied files BEFORE rclone, so the copy log has no
+    # "Excluded" lines. Re-derive the denied set (remote_listing - allowed) and
+    # emit EXCLUDE tags for the report body. drive_excl_count = the allowed-typed
+    # (indexable-ext) subset NOT left on disk (denied-on-disk files are counted
+    # by find drive_indexable below, but the gateway also denies them -> known
+    # table imprecision, same as the old --exclude-from path).
+    remote_sorted=$(LC_ALL=C sort -u <<<"$remote_listing")
+    allowed_sorted=$(LC_ALL=C sort -u <"$tmp_filesfrom")
+    denied_listing=$(comm -23 <(printf '%s\n' "$remote_sorted") <(printf '%s\n' "$allowed_sorted"))
+    drive_excl_count=0
+    while IFS= read -r rel; do
+        [[ -z "$rel" ]] && continue
+        changes+=$'EXCLUDE\t'"$safe_name/$rel"$'\n'
+        printf '%s' "$rel" | grep -qiE "$allowed_re" || continue
+        [[ -e "$target/$rel" ]] && continue   # leftover on disk -> not subtracted
+        drive_excl_count=$((drive_excl_count + 1))
+    done <<<"$denied_listing"
+
+    # --- deletion reconcile (rclone copy does not delete; we own it) ----------
+    # A local file NOT in remote_listing was removed from Drive. Back it up to
+    # backup_root unless PROTECTED: a dot-name (find -not -name '.*' drops them),
+    # a .sync-reports file (-not -path drops them), or a file DENIED by .kb-ignore
+    # (denied files persist locally -- same as the old sync --exclude-from, which
+    # neither copied nor deleted excluded files). Replicates `sync --delete-after`
+    # (no --delete-excluded): removed-from-Drive + allowed -> backup; denied ->
+    # keep. Under --dry-run the would-be DELETE set is still emitted (no moves),
+    # so the dry-run report shows what WOULD be deleted.
+    if [[ -d "$target" ]]; then
+        local_listing=$(find "$target" -type f \
+            -not -path '*/.sync-reports/*' \
+            -not -name '.*' \
+            -printf '%P\n' | LC_ALL=C sort -u)
+        if [[ -n "$local_listing" ]]; then
+            local_only=$(comm -23 \
+                <(printf '%s\n' "$local_listing") \
+                <(printf '%s\n' "$remote_sorted"))
+            if [[ -n "$local_only" ]]; then
+                # Batch-check denied (protected) via one matcher pass: prefix +
+                # filter -> the OUTPUT is the allowed (not-protected) subset ->
+                # those get backed up. Denied (in input, absent from output) ->
+                # keep. Same prefix/strip convention as the main filter above.
+                if ! allowed_local_only=$(awk -v p="gdrive/$safe_name/" '{print p $0}' <<<"$local_only" \
+                    | python3 ./scripts/kb_ignore.py filter --root ./root \
+                    | awk -v p="gdrive/$safe_name/" 'index($0,p)==1{print substr($0,length(p)+1)}'); then
+                    emit "FAIL: .kb-ignore filter failed in reconcile for drive ${drive_name} -- aborted (fail-fast)"
+                    write_report_and_exit 1
+                fi
+                while IFS= read -r rel; do
+                    [[ -z "$rel" ]] && continue
+                    if (( ! dry_run )); then
+                        mkdir -p "$backup_root/$safe_name/$(dirname "$rel")"
+                        mv -- "$target/$rel" "$backup_root/$safe_name/$rel"
+                    fi
+                    changes+=$'DELETE\t'"$safe_name/$rel"$'\n'
+                done <<<"$allowed_local_only"
+            fi
+        fi
+    fi
 
     drive_files=0
     drive_indexable=0

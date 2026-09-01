@@ -3,29 +3,30 @@
 #
 # Proves the parts of the ./root/ multi-KB design that the gdrive + .tests iso
 # tests do NOT cover:
-#   1. The additive .exclude.conf deny-list on a NON-gdrive KB: the [*] section
-#      (global, verbatim) denies a type for EVERY KB, and a per-KB [<name>]
-#      section ADDS a further deny for that one KB. DEFAULT_ALLOW (gateway/app.py)
-#      = docx pdf pptx xlsx txt md html json log tex, so .json + .log ARE
-#      allowlisted -> it is the .exclude.conf (not the allowlist) that must drop
-#      them. (.aux is NOT allowlisted -> it would be dropped by the allowlist, so
-#      it cannot prove the per-KB additive deny; .log is.)
+#   1. The additive .kb-ignore ancestor-chain deny-list on a NON-gdrive KB:
+#      root/.kb-ignore (globals) denies a type for EVERY KB, and a per-KB
+#      root/<name>/.kb-ignore ADDS a further deny for that one KB. A `!` negation
+#      in the globals RE-INCLUDES a file a shallower pattern denied (gentest.md is
+#      denied by global *.md then re-included by !gentest.md -> still indexed).
+#      DEFAULT_ALLOW (gateway/app.py) = docx pdf pptx xlsx txt md html json log
+#      tex, so .json + .log + .md ARE allowlisted -> it is the .kb-ignore (not the
+#      allowlist) that must drop .json + .log, and the `!` that must keep .md.
 #   2. The generic shell pipeline BY NAME (no gdrive, no GDRIVE_KB_ID):
 #        make kb-bootstrap KB=<name>  (find-or-create + grant user:* read)
 #        make kb-sync KB=<name>       (POST /index?dir=<name>&kb_id=<id>)
 #        poll GET /status?dir=<name>  (drain terminal)
 #        make kb-finalize KB=<name>   (global-terminal guard + flock + REINDEX)
 #
-# Drops a synthetic ./root/gentest/ tree + a root/.exclude.conf in the throwaway
-# iso clone, then runs the pipeline. Asserts:
-#   - source_count == 2 (post-exclude): .md + .txt counted; .json + .log dropped
-#     at walk time (the exclude is upstream of the manifest, not a post-hoc filter).
+# Drops a synthetic ./root/gentest/ tree + root/.kb-ignore + root/gentest/.kb-ignore
+# in the throwaway iso clone, then runs the pipeline. Asserts:
+#   - source_count == 2 (post-ignore): .md (re-included by !) + .txt counted;
+#     .json + .log dropped at walk time (the ignore is upstream of the manifest).
 #   - indexed_files == {gentest.md, gentest.txt}; .json + .log absent.
 #   - semantic search for a fixed marker returns hits (vectors written + the
 #     REINDEX published them; ivfflat folds post-build rows in only on REINDEX).
 #
 # Self-contained: deletes the gentest KB + its files on EXIT. The synthetic
-# ./root/gentest/ + root/.exclude.conf live only in the throwaway clone (destroyed
+# ./root/gentest/ + .kb-ignore files live only in the throwaway clone (destroyed
 # on teardown). No gdrive, no real corpus, no PII. Uses a unique marker so a
 # re-run in a kept (failed) clone does not collide with stale vectors.
 set -u
@@ -37,7 +38,7 @@ O="$(kb_host)"
 NAME="gentest"
 MARKER="gentest-marker-3c5e1"
 ROOT_DIR="root/${NAME}"
-EXCLUDE="root/.exclude.conf"
+KBIGNORE="root/.kb-ignore"
 
 require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }
 AK="$OPENWEBUI_ADMIN_API_KEY"
@@ -67,31 +68,35 @@ for it in (d.get("items") or []):
     curl -sf -X DELETE "$O/api/v1/knowledge/${KB_ID}/delete" "${ADM[@]}" >/dev/null 2>&1 \
       || echo "  cleanup: DELETE kb ${KB_ID} failed" >&2
   fi
-  rm -rf "$ROOT_DIR" "$EXCLUDE" 2>/dev/null || true
+  rm -rf "$ROOT_DIR" "$KBIGNORE" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# --- drop a synthetic ./root/gentest/ tree + root/.exclude.conf ----------------
-section "synthetic ./root/gentest/ + .exclude.conf"
+# --- drop a synthetic ./root/gentest/ tree + .kb-ignore files ------------------
+section "synthetic ./root/gentest/ + .kb-ignore"
 mkdir -p "$ROOT_DIR"
 printf '# gentest doc\n\n%s alpha content for semantic search over the generic KB.\n' "$MARKER" > "$ROOT_DIR/gentest.md"
 printf '%s beta plain-text content for semantic search.\n' "$MARKER" > "$ROOT_DIR/gentest.txt"
-# .json: allowlisted, denied by the GLOBAL [*] section -> must NOT index.
-printf '{"marker": "%s", "note": "denied by [*] *.json (global)"}\n' "$MARKER" > "$ROOT_DIR/gentest.json"
-# .log: allowlisted, denied by the PER-KB [gentest] section -> must NOT index.
-printf '%s log line denied by [gentest] *.log (per-KB additive)\n' "$MARKER" > "$ROOT_DIR/gentest.log"
-# root/.exclude.conf: [*] global deny + [gentest] per-KB additive deny.
-cat > "$EXCLUDE" <<EOF
-# Global deny-list (applies to EVERY KB; [*] is verbatim/global).
-[*]
+# .json: allowlisted, denied by the GLOBAL root/.kb-ignore -> must NOT index.
+printf '{"marker": "%s", "note": "denied by global *.json"}\n' "$MARKER" > "$ROOT_DIR/gentest.json"
+# .log: allowlisted, denied by the PER-KB root/gentest/.kb-ignore -> must NOT index.
+printf '%s log line denied by per-KB *.log (additive)\n' "$MARKER" > "$ROOT_DIR/gentest.log"
+# root/.kb-ignore (globals): deny *.json + *.md, then !gentest.md re-includes the
+# .md (proves `!` negation: gentest.md survives -> indexed; without the ! it would
+# be dropped by *.md -> source_count would be 1, failing the assert below).
+cat > "$KBIGNORE" <<EOF
+# Global deny-list (applies to EVERY KB; rules relative to ./root).
 *.json
-
-# Per-KB additive deny (further denies for the gentest KB only).
-[$NAME]
+*.md
+!gentest.md
+EOF
+# root/gentest/.kb-ignore (per-KB additive): further deny *.log for this KB only.
+cat > "$ROOT_DIR/.kb-ignore" <<EOF
+# Per-KB additive deny (further denies for the gentest KB only; relative to gentest/).
 *.log
 EOF
 ls -1 "$ROOT_DIR"
-pass "dropped 4 fixtures (md, txt, json, log) + .exclude.conf ([*] *.json, [$NAME] *.log)"
+pass "dropped 4 fixtures (md, txt, json, log) + .kb-ignore (global *.json *.md !gentest.md; per-KB *.log)"
 
 # --- make kb-bootstrap KB=gentest (find-or-create + grant user:* read) ---------
 section "make kb-bootstrap KB=${NAME}"
@@ -110,7 +115,7 @@ added=$(printf '%s\n' "$sync_out" | sed -n 's/.*added=\([0-9][0-9]*\).*/\1/p' | 
 if [ "${added:-0}" -gt 0 ] 2>/dev/null; then
   pass "kb-sync: added=${added} (the .md + .txt; .json + .log excluded upstream)"
 else
-  fail "kb-sync added=0 (expected 2: the excludes may have over-denied, or /index failed)"; finish; exit 1
+  fail "kb-sync added=0 (expected 2: the .kb-ignore may have over-denied, or /index failed)"; finish; exit 1
 fi
 
 # --- poll GET /status until the drain is terminal ------------------------------
@@ -150,7 +155,7 @@ section "exclude semantics (source_count + indexed_files)"
 if [ "$src_count" = "2" ]; then
   pass "source_count=${src_count} (post-exclude: .md + .txt counted; .json + .log dropped at walk time)"
 else
-  fail "source_count=${src_count} != 2 ([*] *.json or [${NAME}] *.log was NOT applied -- excludes broken)"
+  fail "source_count=${src_count} != 2 (global *.json or per-KB *.log not applied, or !gentest.md re-include broken -- .kb-ignore broken)"
   finish; exit 1
 fi
 # Parse indexed_files filenames; assert the exact allowlisted set + deny absent.
@@ -171,7 +176,7 @@ for n in $excl_out; do
   esac
 done
 if [ "$have_md" = "1" ] && [ "$have_txt" = "1" ] && [ "$have_json" = "0" ] && [ "$have_log" = "0" ]; then
-  pass "indexed_files={gentest.md, gentest.txt}; .json ([*] global) + .log ([${NAME}] per-KB) excluded"
+  pass "indexed_files={gentest.md, gentest.txt}; .json (global) + .log (per-KB) excluded; gentest.md kept via !gentest.md re-include"
 else
   fail "indexed_files mismatch: md=${have_md} txt=${have_txt} json=${have_json} log=${have_log} (expected md=1 txt=1 json=0 log=0)"
   fail "got: ${excl_out}"

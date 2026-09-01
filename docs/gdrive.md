@@ -118,7 +118,7 @@ or the sync fail-fasts on `cannot list shared drives`.
   (`scripts/kb-bootstrap.sh --resolve`); the gateway is stateless and takes
   `kb_id` + `dir`.
 
-The exclude list (`./root/.exclude.conf`, gitignored) and the backup-dir
+The exclude list (per-directory `.kb-ignore`, gitignored) and the backup-dir
 recovery are documented in [docs/operations.md](operations.md). The
 `gdrive` KB itself is created + granted by `make kb-bootstrap KB=gdrive`
 ([docs/operations.md](operations.md) "Provisioning").

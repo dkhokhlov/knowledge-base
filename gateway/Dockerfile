@@ -9,7 +9,11 @@ RUN addgroup --system --gid 2000 kbg && \
     adduser --system --uid 2000 --ingroup kbg --no-create-home kbg
 
 WORKDIR /app
-COPY app.py neo4j.py owui.py graphiti.py authorize.py ./
+# Build context is the repo root (compose.yml) so the image can reach the shared
+# matcher `scripts/kb_ignore.py` (the gateway imports it; kb.py clones it inline;
+# gdrive-sync calls its CLI). The repo-root .dockerignore excludes everything
+# else -> the context stays tiny (gateway/ + scripts/kb_ignore.py).
+COPY gateway/app.py gateway/neo4j.py gateway/owui.py gateway/graphiti.py gateway/authorize.py scripts/kb_ignore.py ./
 
 USER kbg
 EXPOSE 8010

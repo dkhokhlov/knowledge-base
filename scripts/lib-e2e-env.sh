@@ -323,9 +323,10 @@ e2e_provision() {
 # at-scale e2e) uses it via the iso_env_named(..., at_scale=True) fixture.
 #
 # Call AFTER e2e_isolate (which seeded .env from the live template + .env.local
-# with the admin account). The caller's gdrive-exclude.conf must ALREADY be
-# copied into the clone (the conftest fixture does this -- the provision bash
-# has no E2E_SRC to reach the source repo). No clean-all: a fresh stamped clone
+# with the admin account). The caller's deny-list (.kb-ignore chain, or the
+# old .exclude.conf/gdrive-exclude.conf which the conftest fixture translates)
+# must ALREADY be copied into the clone (the conftest fixture does this -- the
+# provision bash has no E2E_SRC to reach the source repo). No clean-all: a fresh stamped clone
 # (e2e_isolate reserves a new empty leaf each run) has no prior .env/./data to
 # wipe, so the within-clone wipe was redundant; the live-.env template +
 # .env.local (admin creds + secrets) survive straight through. Every bare

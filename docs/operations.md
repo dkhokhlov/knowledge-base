@@ -335,8 +335,9 @@ tree at `./root/<name>/` and run `make kb-bootstrap KB=<name>` + `make kb-sync K
 An existing deployment on the old `./gdrive` layout moves to `./root/gdrive` with
 `make kb-migrate-root` (idempotent, fail-fast): it requires the gdrive drain
 terminal first (`pending+processing==0`; refuses if in flight), moves
-`./gdrive` → `./root/gdrive`, rewrites `gdrive-exclude.conf` → `./root/.exclude.conf`
-(`[*]` verbatim; per-drive `[X]` → `[gdrive/X]`), removes `GDRIVE_KB_ID` from
+`./gdrive` → `./root/gdrive`, translates `gdrive-exclude.conf` → the
+`.kb-ignore` chain (`[*]` → `./root/.kb-ignore` globals; per-drive `[X]` →
+`./root/gdrive/X/.kb-ignore`), removes `GDRIVE_KB_ID` from
 `.env.local`, and recreates api-gateway with the `./root:/kb-source:ro` mount.
 Then run `make kb-bootstrap KB=gdrive` (re-assert the grant) + `make gdrive-sync`
 (incremental — `dir=gdrive` keeps manifest keys identical to the old `source=gdrive`,
@@ -353,16 +354,18 @@ you index; `make gdrive-sync` fail-fasts if no drives are visible. Re-login
 only if the OAuth token expires or Drive access is revoked. Full one-time setup
 (headless auth, verify, re-auth): see [docs/gdrive.md](gdrive.md).
 
-`make gdrive-sync` runs `rclone sync --backup-dir --delete-after` of the shared
-drive into `./root/gdrive`, then POSTs `/index?dir=gdrive` to reconcile the tree
+`make gdrive-sync` runs `rclone copy --files-from --backup-dir` of the shared
+drive into `./root/gdrive` (downloads only the `.kb-ignore`-allowed files; the
+wrapper reconciles deletions — files removed from Drive that are not protected
+are moved to the backup dir), then POSTs `/index?dir=gdrive` to reconcile the tree
 into the KB (manual; `./root/*` is gitignored except tracked
-`root/.exclude.conf.example` + the `root/.tests/` fixtures). `sync` is delta:
-files removed from Drive are deleted from `./root/gdrive` (and the chained `/index`
+`root/.tests/` fixtures). It is delta:
+files removed from Drive are moved out of `./root/gdrive` (and the chained `/index`
 drops them from the KB via `sync/cleanup`). Deleted/overwritten files are NOT
-lost — rclone moves them (in their original hierarchy) into a dated
+lost — the wrapper / rclone moves them (in their original hierarchy) into a dated
 `./.gdrive-backup/<UTC-ISO>/` dir, which sits OUTSIDE `./root` so `/index`
 does not index them. That backup dir is the recovery net for a bad/empty mount:
-`sync` deletes to match the source, so an empty Drive mount empties `./root/gdrive`
+an empty Drive enumeration empties `./root/gdrive`
 — but the removed files are in `./.gdrive-backup/`, not gone. `make clean-backup`
 clears the backup tree (so does `make clean-all`).
 
@@ -379,41 +382,51 @@ local dir name (same Drive name, or a sanitization collision like `A:B` ->
 `A_B`); without it, the second sync would delete the first drive's files in the
 shared dir.
 
-**Exclude list (INI format).** `./root/.exclude.conf` (gitignored — Drive
-file paths are business-sensitive, no PII in the repo; the tracked
-`./root/.exclude.conf.example` documents the format) is ONE unified INI file
-read by BOTH index stages with the same rclone-style pattern semantics:
-`[*]` is the global deny-list (applies to EVERY KB, not just gdrive);
-`[gdrive/<drive name>]` sections list patterns that apply only to that shared
-drive, matched by name; `[<kb>]` sections apply only to the `./root/<kb>/` KB.
-`gdrive-sync` resolves each section name to the drive id at runtime (from
-`rclone backend drives`) and converts the current drive's section plus the
-`[*]` section into rclone `--exclude-from` on the fly, so the rest of each
-drive downloads cleanly (exit 0). The gateway walk applies the same sections as
-a post-walk filter on `POST /index?dir=<name>`. Patterns are passed VERBATIM
-(rclone-native): a pattern with no `/` matches the basename at any depth
-(`file.pdf`, `*draft*`, `*.tmp`, or a lone `*` = every file in the section); a
-pattern with a leading `/` anchors at the section root; `*` does not cross `/`,
-`**` does. Anchored `/`-patterns are allowed only in LEAF sections (a section
-with no deeper section under it); both stages reject them in a non-leaf section.
-Per-drive scoping by name avoids mis-excluding same-named files in other drives.
-Per-drive entries are for permanently non-downloadable
-files: admin download-forbidden (`403 cannotDownloadFile` / `forbidden to
-download`) or dangling shortcuts (target gone). When a sync fails fast on a NEW
-non-downloadable file, append an entry to `./root/.exclude.conf` and re-run;
-delete it only when the file becomes downloadable. Transient errors
-(network/5xx) are NOT excluded — those fail fast by design. (Detection: run
-`rclone copy gdrive: ./<scratch> --drive-team-drive <id> --log-level DEBUG
---log-file <log>` per drive; the 403/shortcut paths in the log are the exclude
-entries. Which drives/files are affected is specific to your Drive and is NOT
-recorded here — it lives only in the gitignored `./root/.exclude.conf`.)
+**Exclude list (`.kb-ignore`, gitignore-style).** The deny-list is a chain of
+`.kb-ignore` files, one per directory, read by BOTH index stages with the same
+semantics: `./root/.kb-ignore` holds the GLOBALS (apply to every KB, not just
+gdrive); `./root/gdrive/<drive name>/.kb-ignore` lists patterns that apply only
+to that shared drive; `./root/<kb>/.kb-ignore` applies only to the `./root/<kb>/`
+KB. The `gdrive-sync` download stage enumerates the per-drive remote file list
+(`rclone lsf -R --files-only`), filters it through the shared matcher
+(`scripts/kb_ignore.py`), and downloads only the allowed files
+(`rclone copy --files-from`); the gateway index walk applies the same ancestor
+chain as a post-walk filter on `POST /index?dir=<name>`. Both stages read the
+chain along each file's ancestor dirs within `./root/` (shallowest first; last
+match wins), so a `!` pattern in the same or a deeper `.kb-ignore` re-includes a
+file a shallower pattern denied. The `.kb-ignore` files are gitignored (Drive
+file paths are business-sensitive, no PII in the repo); the format is documented
+here (there is no tracked template file).
 
-**Global excludes.** The `[*]` section of `./root/.exclude.conf` holds the
-global deny-list, applied verbatim to every KB's rclone `--exclude-from` AND the
-gateway walk — a basename glob with no `/` matches at any depth, so a type you
-never want in any KB (e.g. `*.tmp`, `*.py`, `*.json`) is never indexed. Globals
-live in the gitignored file (not the tracked script). A type denied in `[*]`
-cannot be un-denied for a single KB (the deny-list is additive).
+Patterns are gitignore-style (shared by both stages): a pattern with no `/`
+matches the basename at ANY depth (`file.pdf`, `*draft*`, `*.tmp`, or a lone `*`
+= every file in that directory's tree); a pattern with a leading `/` anchors at
+the `.kb-ignore`'s own directory; a `/` elsewhere is a path pattern, full-matched
+against the path relative to that dir. `*` does not cross `/`, `**` does, `?`
+matches one non-`/` char. A leading `/` is allowed in ANY `.kb-ignore` (it
+anchors at that file's dir — no leaf/non-leaf restriction, unlike the old INI).
+Per-drive scoping by location (a file in `./root/gdrive/<drive>/`) avoids
+mis-excluding same-named files in other drives. Per-drive entries are for
+permanently non-downloadable files: admin download-forbidden (`403
+cannotDownloadFile` / `forbidden to download`) or dangling shortcuts (target
+gone). When a sync fails fast on a NEW non-downloadable file, add a pattern to
+`./root/gdrive/<drive>/.kb-ignore` and re-run; remove it only when the file
+becomes downloadable. Transient errors (network/5xx) are NOT excluded — those
+fail fast by design. (Detection: run `rclone copy gdrive: ./<scratch>
+--drive-team-drive <id> --log-level DEBUG --log-file <log>` per drive; the
+403/shortcut paths in the log are the exclude entries. Which drives/files are
+affected is specific to your Drive and is NOT recorded here — it lives only in
+the gitignored `.kb-ignore` files.)
+
+**Globals.** `./root/.kb-ignore` holds the global deny-list, applied to every
+KB's download + index stages — a basename glob with no `/` matches at any depth,
+so a type you never want in any KB (e.g. `*.tmp`, `*.py`, `*.json`) is never
+indexed. A `!` in the same or a deeper `.kb-ignore` CAN re-include a file a
+global denied (last match wins along the ancestor chain). Limitation: the
+gitignore parent-dir rule is NOT enforced — a deeper `!` can re-include a file
+even under a dir a shallower `.kb-ignore` excluded wholesale, so a wholesale
+dir exclude is not a hard wall. `*` + `!subtree/**` allowlists work (drop
+everything, keep one subtree).
 
 The sync writes `./root/gdrive/.sync-reports/sync-<UTC-ISO>.report` (mode `0600`) with
 the transfer summary, a per-drive `remote` / `local` / `excluded` / `dups` table,
@@ -654,7 +667,7 @@ dependency is down.
 | `kb-finalize` | finalize a drain: `REINDEX INDEX idx_document_chunk_vector` (pgvector ivfflat) + `idx_document_chunk_text_search` (GIN FTS) so freshly-embedded vectors become queryable. Polls EVERY `./root/` subdir to a global terminal state first (`pending+processing=0` for all KBs — REINDEX is instance-wide on the shared `document_chunk` table), guarded by a `flock` lock; fails loud if any KB is non-terminal. Run AFTER the drain is terminal (or use `kb-sync-finalize` / `gdrive-sync-finalize` to wait). Logs each REINDEX duration. pgvector-only — Chroma/HNSW are incremental, so it exits 0 (no-op) there. Named "finalize" not "reindex": the fresh vectors were never queryable (ivfflat folds post-build rows in only on `REINDEX`; OWUI hybrid = vector-fetch→BM25, no FTS fallback → vector=0 → hybrid=0), and to avoid collision with the gateway `reindex_all` (which re-PROCESSES files) |
 | `gdrive-sync-finalize` | one-command full pipeline for the `gdrive` KB: dispatch the gdrive async drain (`make gdrive-sync` = rclone + `POST /index?dir=gdrive`), then wait for it to terminate (poll GET `/status` to `pending+processing=0`, timeout `GDRIVE_TEST_WAIT` default 2400s), then finalize (`REINDEX` ivfflat + GIN FTS) — the "block until the gdrive KB is searchable" command. Fails loud if the drain does not terminate (do not `REINDEX` while inserts are in flight — that races the live index). `gdrive-sync` is `.PHONY` so the drain re-dispatches each invocation; `make gdrive-sync` fails fast if a drain is already in flight (`pending+processing>0`; exempt `RETRY_PENDING=1`) — `make kb-index` + raw `curl POST /index` are not guarded. pgvector-only; no-op on Chroma/HNSW |
 | `kb-sync-finalize` | generic variant of `gdrive-sync-finalize` for any `./root/` subdir: `KB=<name>` (default `gdrive`). Dispatch `make kb-sync KB=<name>` (POST `/index?dir=<name>`), wait to terminal, then finalize (`kb-finalize`). Same global-terminal + flock guard, same pgvector-only caveat. Use `gdrive-sync-finalize` for the rclone-equipped gdrive pipeline; use this for operator-supplied trees |
-| `kb-migrate-root` | ONE-TIME migration from the old `./gdrive` layout to the generic `./root/` source root: guards the gdrive drain is terminal (tries the new `dir=gdrive` shape, falls back to the old `source=gdrive`+`GDRIVE_KB_ID` shape; refuses if `/status` unreachable — `make stop` first), cross-filesystem move guard, `mv gdrive root/gdrive`, rewrites `gdrive-exclude.conf` section headers to `./root/.exclude.conf` (`[*]` verbatim; `[X]` → `[gdrive/X]`), removes `GDRIVE_KB_ID` from `.env.local`, `make start`. See "Migrating to ./root" above |
+| `kb-migrate-root` | ONE-TIME migration from the old `./gdrive` layout to the generic `./root/` source root: guards the gdrive drain is terminal (tries the new `dir=gdrive` shape, falls back to the old `source=gdrive`+`GDRIVE_KB_ID` shape; refuses if `/status` unreachable — `make stop` first), cross-filesystem move guard, `mv gdrive root/gdrive`, translates `gdrive-exclude.conf` into the `.kb-ignore` chain (`[*]` → `./root/.kb-ignore` globals; `[X]` → `./root/gdrive/X/.kb-ignore`), removes `GDRIVE_KB_ID` from `.env.local`, `make start`. See "Migrating to ./root" above |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
 | `clean-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + backup-and-delete `.env` + `.env.local` (dated backup under `./.config-backup/<TS>/`; preserves `graphiti/config.yaml`, `caddy/Caddyfile`, and the `./root` source mirror) |
@@ -783,20 +796,20 @@ startup source of `~/.bash_env` left in its env.)
 - The clone re-rclone-downloads the corpus (`./root/gdrive` is gitignored) — no
   symlink, no reuse. The live `./root/gdrive` mirror is untouched (the clone
   rclones from the `gdrive` remote, not from the live mirror).
-- `./root/.exclude.conf` is gitignored (Drive file paths are business-sensitive).
+- The `.kb-ignore` chain is gitignored (Drive file paths are business-sensitive).
   The `iso_env_named` fixture (Python, in `tests/conftest.py`) copies the source
-  repo's `root/.exclude.conf` into the throwaway clone's `./root/` before the
+  repo's `.kb-ignore` files into the throwaway clone's `./root/` before the
   at-scale provision (`e2e_provision_at_scale`), so rclone uses the same
   exclusions; the copy survives the provision's `make clean-all` (clean-all
   removes `.env`/`.env.local`/`./data`/`./.gdrive-backup`, not clone-root files).
   `make clean-test` discards it with the clone — it is never committed and never
-  leaves the host. (Transitional: a pre-migration source repo still has the old
-  `gdrive-exclude.conf`; the fixture accepts either source and re-prefixes the
-  old per-drive `[X]` headers to `[gdrive/X]` — the same transform
-  `make kb-migrate-root` applies. `test_12_kb_check.sh` does NOT use gdrive — it
-  uploads synthetic fixtures directly, so it needs no exclude copy.)
+  leaves the host. (Transitional: a pre-cutover source repo still has the old INI
+  `./root/.exclude.conf` or `gdrive-exclude.conf`; the fixture probes `.kb-ignore`
+  first, then translates whichever INI exists via `scripts/exclude_to_kb_ignore.py`
+  — the same transform `make kb-migrate-root` applies. `test_12_kb_check.sh` does
+  NOT use gdrive — it uploads synthetic fixtures directly, so it needs no exclude copy.)
 - The iso rclone yields the indexable set a **fresh sync** produces
-  (`allowed − excluded − dups`). `./root/.exclude.conf` `[*]` excludes `*.json`,
+  (`allowed − excluded − dups`). `./root/.kb-ignore` globals exclude `*.json`,
   so a mirror synced before that rule holds stale `*.json` on disk and counts
   higher than a fresh sync — a re-sync reconciles it. `test_09` counts the fresh
   source, excluding dot-dirs (`.tests`, `.sync-reports`), matching

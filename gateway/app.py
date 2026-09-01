@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import authorize
 import graphiti
+import kb_ignore
 import neo4j
 import owui
 
@@ -480,9 +481,9 @@ class Handler(BaseHTTPRequestHandler):
         KB. Use a KB whose whole scope is that path (a dedicated/subpath KB,
         e.g. a throwaway test KB) — on a SHARED KB `path` would delete every KB
         file outside the subpath. `dir` is required (empty rejected) so a bare
-        call cannot reconcile every KB into one. `.exclude.conf` (at the source
-        root) is applied as an additive deny-list after the walk (see
-        apply_excludes)."""
+        call cannot reconcile every KB into one. `.kb-ignore` (per-directory,
+        up the ancestor chain from the source root) is applied as an additive
+        deny-list after the walk (see apply_kb_ignores)."""
         if not authorize.is_admin(identity):
             raise GatewayError(403, "admin role required for /index")
         admin_key = owui._admin_key()  # OwuiError -> 503 if unset
@@ -507,7 +508,7 @@ class Handler(BaseHTTPRequestHandler):
         # dropped file would reappear as `deleted` in sync/diff -> cleanup
         # removes its KB entry: data loss on a transient I/O error).
         files = walk_source(root, allow, max_size, path)  # [{filename,path,checksum,size,abspath}]
-        files = apply_excludes(files, dir, kb_source_root)  # additive deny-list (.exclude.conf)
+        files = apply_kb_ignores(files, dir, kb_source_root)  # additive .kb-ignore deny-list
         if not files and not force:
             raise GatewayError(422, "source walk yielded 0 files - refusing "
                                     "(mount failure?). Use force=1 to proceed.")
@@ -780,7 +781,7 @@ class Handler(BaseHTTPRequestHandler):
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
         files = walk_source(root, allow, max_size, path)
-        files = apply_excludes(files, dir, kb_source_root)  # additive deny-list (.exclude.conf)
+        files = apply_kb_ignores(files, dir, kb_source_root)  # additive .kb-ignore deny-list
         source_count = len(files)
         file_status = owui.list_file_status(admin_key, kb_id)
         completed = sum(1 for s in file_status if s.get("status") == "completed")
@@ -906,10 +907,13 @@ def _entry_for(abspath, root, allow, max_size):
     uses. Raise GatewayError(500) on a stat or hash OSError (fail closed). Do not
     apply the dot-name skip here: a single-file `path` opts into a dot-file."""
     fn = os.path.basename(abspath)
-    # gdrive-meta sidecars sit next to source files but are never indexed.
-    # `.meta` (YAML) is already dropped by the ext allowlist below (meta ∉ allow);
-    # `.meta.json` (JSON) has ext `json`, which IS allowed, so skip it by name here.
-    if fn.endswith(".meta") or fn.endswith(".meta.json"):
+    # gdrive-meta sidecars + `.kb-ignore` sit next to source files but are never
+    # indexed. `.meta` (YAML) is already dropped by the ext allowlist below (meta
+    # ∉ allow); `.meta.json` (JSON) has ext `json`, which IS allowed, so skip it
+    # by name here. `.kb-ignore` is a dot-name (dropped by walk_source's dot-name
+    # skip in a normal walk); this guard covers the single-file `path=` route,
+    # which deliberately opts into dot-files.
+    if fn.endswith(".meta") or fn.endswith(".meta.json") or fn == ".kb-ignore":
         return None
     ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
     if ext not in allow:
@@ -986,180 +990,38 @@ def walk_source(root, allow, max_size, path=""):
     return out
 
 
-# --- .exclude.conf additive deny-list (shared semantics with rclone) -------
+# --- .kb-ignore per-directory ignore (shared matcher, gitignore semantics) --
 #
-# One INI file at <source-root>/.exclude.conf. Sections are paths relative to
-# the source root (e.g. [gdrive], [gdrive/Team Meetings], [my-docs]);
-# [*] is the global section (applies to every KB). Patterns are rclone-style:
-#   no "/"        -> match the basename at ANY depth (e.g. *.aux, *.json);
-#   leading "/"   -> anchor at the section root (e.g. /Weekly*.pdf);
-#   "/" elsewhere -> a path pattern, FULL-matched against the path relative to
-#                   the section (rclone-aligned: "*" does not cross "/", so
-#                   "*/x.pdf" matches a one-level "<seg>/x.pdf" only, NOT a
-#                   deeper "a/b/x.pdf"; a leading "/" is redundant here -- it
-#                   only gates the leaf-section check below);
-#   "*" / "**"    -> everything in the section ("*" = within a segment in other
-#                   positions; "**" crosses "/");
-#   "?"           -> one non-"/" char.
-# `*` does NOT cross "/" (unlike Python fnmatch); "**" does. Anchored ("/"-led)
-# patterns are allowed ONLY in leaf sections (a section under which no other
-# section sits): a non-leaf section (e.g. [*], [gdrive]) anchors at different
-# roots for the rclone download stage vs this index stage, so an anchored
-# pattern there is ambiguous and is rejected (fail-closed). The deny-list is
-# ADDITIVE: it only removes files. The hardcoded *.meta/*.meta.json sidecar
-# skip in _entry_for stays (a gateway invariant); .exclude.conf cannot un-deny
-# it. Missing .exclude.conf -> no denies (only the extension allowlist applies).
-
-def _translate_glob(pat):
-    """Translate one rclone-style glob body (no leading "/") to a regex string.
-    `*` -> [^/]* (within a segment), `**` -> .* (across "/"), `?` -> [^/],
-    every other char is re.escape'd."""
-    out = []
-    i, n = 0, len(pat)
-    while i < n:
-        c = pat[i]
-        if c == "*":
-            if i + 1 < n and pat[i + 1] == "*":
-                out.append(".*")
-                i += 2
-            else:
-                out.append("[^/]*")
-                i += 1
-        elif c == "?":
-            out.append("[^/]")
-            i += 1
-        else:
-            out.append(re.escape(c))
-            i += 1
-    return "".join(out)
+# One `.kb-ignore` file per directory under <source-root>, gitignore-style:
+# rules are relative to the file's location and accumulate up the ancestor chain
+# (shallowest first; the LAST matching rule wins; `!` re-includes). `*` does not
+# cross `/`; `**` does; `?` = one non-`/` char; a leading `/` anchors at the
+# file's dir; a trailing `/` = a directory and its contents; a no-slash name
+# matches a file or dir of that name at any depth. The matcher body lives in
+# `scripts/kb_ignore.py` (the gdrive-sync two-pass calls its `filter` CLI; kb.py
+# clones it inline for its monolithic deploy); the gateway imports
+# `kb_ignore.allowed`. Missing `.kb-ignore` everywhere -> no denies (only the
+# extension allowlist applies). The deny-list is ADDITIVE (it only removes
+# files; a deeper `!` re-includes). The hardcoded `.meta`/`.meta.json`/
+# `.kb-ignore` sidecar skip in `_entry_for` stays (a gateway invariant);
+# `.kb-ignore` cannot un-deny itself.
+#
+# Documented limitation (post-filter model): a `!` in a DEEPER `.kb-ignore` CAN
+# re-include a file under a directory excluded by a SHALLOWER `.kb-ignore` (the
+# gitignore parent-dir rule is NOT enforced). The `*` + `!subtree/**` allowlist
+# (the primary use case) works.
 
 
-def _compile_exclude(pat):
-    """Compile one .exclude.conf pattern to a matchable form (rclone-aligned: a
-    pattern containing "/" is FULL-matched against the path relative to the
-    section, with "*" not crossing "/"). Returns a tuple:
-    ("star",)        -> matches everything;
-    ("basename", re) -> no "/": fullmatch on the basename (any depth);
-    ("path", re)     -> leading "/" OR "/" elsewhere: fullmatch on the path
-                        relative to the section. A leading "/" anchors at the
-                        section root (so "/x.pdf" matches only the root x.pdf);
-                        without it the pattern is still full-matched against the
-                        section-relative path (rclone treats a "/"-containing
-                        pattern as a full-path match). "*" stays within a
-                        segment, so "*/x.pdf" matches a one-level "<seg>/x.pdf"
-                        only, not a deeper "a/b/x.pdf"."""
-    anchored = pat.startswith("/")           # only the B8 leaf-section gate uses this
-    body = pat[1:] if anchored else pat
-    if body in ("*", "**"):
-        return ("star",)
-    rx = _translate_glob(body)
-    if anchored or "/" in body:
-        # Full-path match relative to the section. "*" does not cross "/", so this
-        # is a one-level glob per segment -- identical to rclone's treatment of a
-        # "/"-containing exclude pattern. A leading "/" is redundant for the match
-        # (the path is already section-relative); it only restricts the pattern to
-        # leaf sections (B8, enforced in _load_excludes on the original pattern).
-        return ("path", re.compile(r"\A" + rx + r"\Z"))
-    return ("basename", re.compile(r"\A" + rx + r"\Z"))
-
-
-def _load_excludes(path):
-    """Parse <source-root>/.exclude.conf into {section: [patterns]}. Returns {}
-    when the file is missing (no denies). Validates: anchored ("/"-led) patterns
-    are rejected in non-leaf sections (B8). A malformed file raises
-    GatewayError(400) so /index fails closed with a clear cause."""
-    if not os.path.isfile(path):
-        return {}
-    sections = {}
-    current = None
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line or line.startswith("#") or line.startswith(";"):
-                    continue
-                if line.startswith("[") and line.endswith("]"):
-                    current = line[1:-1].strip()
-                    sections.setdefault(current, [])
-                    continue
-                if current is None:
-                    raise GatewayError(400, ".exclude.conf pattern outside any section: %r" % line)
-                sections[current].append(line)
-    except OSError as e:
-        raise GatewayError(500, ".exclude.conf read failed: %s" % e)
-    # Non-leaf = a section with at least one other section under it. [*] is
-    # always non-leaf. Anchored patterns are rejected there (ambiguous root).
-    for S in sections:
-        non_leaf = S == "*" or any(o != S and o.startswith(S + "/") for o in sections)
-        if non_leaf:
-            for pat in sections[S]:
-                if pat.startswith("/"):
-                    raise GatewayError(400, ".exclude.conf: anchored pattern %r only allowed in a "
-                                            "leaf section (section [%s] is not a leaf)" % (pat, S))
-    return sections
-
-
-def _section_applies(S, dir):
-    """True if section S applies to a walk of KB `dir` (root-relative): [*]
-    always; S == dir; or S is an ancestor or descendant of dir (B3)."""
-    if S == "*":
-        return True
-    if S == dir:
-        return True
-    if dir.startswith(S + "/") or S.startswith(dir + "/"):
-        return True
-    return False
-
-
-def _rel_to_section(S, fr):
-    """File root-relative path `fr` -> path relative to section S, or None when
-    the file is not under S. For [*] the section root is the source root, so
-    rel-to-section is `fr` itself."""
-    if S == "*":
-        return fr
-    if fr == S:
-        return ""
-    if fr.startswith(S + "/"):
-        return fr[len(S) + 1:]
-    return None
-
-
-def apply_excludes(files, dir, kb_source_root):
-    """Drop walk entries matched by <source-root>/.exclude.conf. `dir` is the KB
-    subdir (root-relative); each entry's root-relative path is
-    `dir/<entry.path>/<filename>`. Additive only. No-op when .exclude.conf is
-    absent (returns `files` unchanged)."""
-    sections = _load_excludes(os.path.join(kb_source_root, ".exclude.conf"))
-    if not sections:
-        return files
-    compiled = {S: [_compile_exclude(p) for p in pats] for S, pats in sections.items()}
+def apply_kb_ignores(files, dir, kb_source_root):
+    """Drop walk entries ignored by the `.kb-ignore` ancestor chain under
+    `kb_source_root`. `dir` is the KB subdir (root-relative); each entry's
+    root-relative path is `dir/<entry.path>/<filename>`. Additive only (a `!`
+    in a deeper `.kb-ignore` re-includes). No-op when no `.kb-ignore` exists
+    (`kb_ignore.allowed` returns True for every path -> `files` unchanged)."""
     out = []
     for f in files:
         fr = "/".join(p for p in (dir, f.get("path", ""), f.get("filename", "")) if p)
-        base = f.get("filename", "")
-        drop = False
-        for S, rules in compiled.items():
-            if not _section_applies(S, dir):
-                continue
-            rel = _rel_to_section(S, fr)
-            if rel is None:
-                continue
-            for rule in rules:
-                kind = rule[0]
-                if kind == "star":
-                    drop = True
-                    break
-                if kind == "basename":
-                    if rule[1].fullmatch(base):
-                        drop = True
-                        break
-                else:  # path (anchored or not): fullmatch the section-relative path
-                    if rule[1].fullmatch(rel):
-                        drop = True
-                        break
-            if drop:
-                break
-        if not drop:
+        if kb_ignore.allowed(kb_source_root, fr):
             out.append(f)
     return out
 

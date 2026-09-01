@@ -8,13 +8,15 @@
 # the old layout to the new one:
 #
 #   ./gdrive/                 -> ./root/gdrive/                 (gitignored corpus)
-#   gdrive-exclude.conf       -> ./root/.exclude.conf           (section headers re-prefixed)
+#   gdrive-exclude.conf       -> ./root/.kb-ignore (per-directory)  (INI -> gitignore)
 #   .env.local: GDRIVE_KB_ID  -> removed                        (name-based resolution)
 #   compose mount ./gdrive:/gdrive -> ./root:/kb-source:ro      (already in the new compose.yml)
 #
-# Section rewrite in .exclude.conf: [*] stays VERBATIM (it is the global deny-list,
-# applies to every KB); every per-drive [X] becomes [gdrive/X] (root-relative under
-# ./root/). Comment lines and pattern bodies are unchanged.
+# Exclude deny-list translation: the OLD INI (gdrive-exclude.conf / .exclude.conf,
+# [section] headers) becomes the NEW per-directory .kb-ignore chain (gitignore-style).
+# [*] -> ./root/.kb-ignore (globals); each [gdrive/X] -> ./root/gdrive/X/.kb-ignore.
+# scripts/exclude_to_kb_ignore.py does the translation (patterns verbatim; a bare
+# [X] is re-prefixed to gdrive/X). Idempotent on ./root/.kb-ignore already existing.
 #
 # Safety: the gdrive drain must be TERMINAL (pending+processing == 0) before the
 # move -- moving ./gdrive while a per-file extract->embed->link is in flight would
@@ -116,25 +118,30 @@ else
   fi
 fi
 
-# --- 3. gdrive-exclude.conf -> ./root/.exclude.conf (re-prefix sections) -------
-if [ -f root/.exclude.conf ]; then
-  say "OK  ./root/.exclude.conf already present (exclude rewrite already done)"
+# --- 3. exclude deny-list -> ./root/.kb-ignore (per-directory gitignore) -------
+# The deny-list is now .kb-ignore (gitignore-style, per-directory), not the old
+# INI .exclude.conf. Idempotent: if ./root/.kb-ignore (globals) already exists, the
+# translation was done. Otherwise translate whichever source exists -- the
+# post-migrate ./root/.exclude.conf (INI, sections already gdrive/-prefixed), or
+# the pre-migration gdrive-exclude.conf (INI, bare [X] headers -- the translator
+# re-prefixes them to gdrive/X). scripts/exclude_to_kb_ignore.py writes one
+# .kb-ignore per section ([*] -> ./root/.kb-ignore globals; [gdrive/X] ->
+# ./root/gdrive/X/.kb-ignore). Patterns are copied verbatim (rclone-native and
+# gitignore semantics agree), so no pattern rewriting is needed.
+if [ -f root/.kb-ignore ]; then
+  say "OK  ./root/.kb-ignore already present (deny-list translation already done)"
+elif [ -f root/.exclude.conf ]; then
+  if ! python3 scripts/exclude_to_kb_ignore.py --src root/.exclude.conf --target-root root >/dev/null; then
+    say "FAIL  exclude_to_kb_ignore failed on root/.exclude.conf"; exit 1
+  fi
+  say "OK  translated ./root/.exclude.conf -> ./root/.kb-ignore (per-directory .kb-ignore files)"
 elif [ -f gdrive-exclude.conf ]; then
-  # [*] stays verbatim (global deny); a non-* section already under gdrive/ stays;
-  # any other [X] -> [gdrive/X]. Comments + pattern bodies unchanged.
-  awk '
-    /^\[[^]]*\][[:space:]]*$/ {
-      h = $0; sub(/^\[/, "", h); sub(/\][[:space:]]*$/, "", h)
-      if (h == "*" )                 { print; next }
-      if (substr(h,1,7) == "gdrive/") { print; next }
-      print "[gdrive/" h "]"
-      next
-    }
-    { print }
-  ' gdrive-exclude.conf > root/.exclude.conf
-  say "OK  rewrote gdrive-exclude.conf -> ./root/.exclude.conf ([*] verbatim; per-drive [X] -> [gdrive/X])"
+  if ! python3 scripts/exclude_to_kb_ignore.py --src gdrive-exclude.conf --target-root root >/dev/null; then
+    say "FAIL  exclude_to_kb_ignore failed on gdrive-exclude.conf"; exit 1
+  fi
+  say "OK  translated gdrive-exclude.conf -> ./root/.kb-ignore ([*] globals; per-drive [X] -> gdrive/X/.kb-ignore)"
 else
-  say "OK  no gdrive-exclude.conf to migrate (a fresh .exclude.conf.example is tracked; create ./root/.exclude.conf from it if needed)"
+  say "OK  no exclude deny-list to migrate (create ./root/.kb-ignore files if needed)"
 fi
 
 # --- 4. remove GDRIVE_KB_ID from .env.local -----------------------------------

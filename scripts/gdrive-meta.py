@@ -15,7 +15,7 @@ structured `approval` field when the file has one.
 The sidecars are NOT indexed: `.meta` is dropped by the gateway document allowlist
 (`meta` not in gateway/app.py DEFAULT_ALLOW), and `.meta.json` (ext `json`, which IS
 allowed) is skipped by name in `_entry_for`. Both are protected from rclone sync
-deletion (gdrive-exclude.conf [*] `*.meta` + `*.json`). Source files keep indexing.
+deletion (./root/.kb-ignore globals `*.meta` + `*.json`). Source files keep indexing.
 
 Read-only: reuses the existing authenticated rclone `gdrive` remote for the access
 token (rclone stays the owner of token refresh) and the file id<->path map. No Drive
@@ -369,7 +369,7 @@ def _write_sidecar(local_path, meta, dry_run):
                            time (gateway is zero-dependency stdlib: no PyYAML) and
                            passes into OWUI File.meta.data.
     Same content, two formats. Both are excluded from the index walk and protected
-    from rclone sync deletion (gdrive-exclude.conf [*] *.meta + *.json)."""
+    from rclone sync deletion (./root/.kb-ignore globals *.meta + *.json)."""
     sidecar = local_path + ".meta"
     json_sidecar = local_path + ".meta.json"
     text = yaml.dump(meta, Dumper=_MetaDumper, sort_keys=False,

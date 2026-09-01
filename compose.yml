@@ -189,8 +189,8 @@ services:
     # (Caddy) and graphiti/neo4j (graph_internal) + OWUI (owui_net). No host
     # port: agents reach it through Caddy on ${KB_HOST_PORT}.
     build:
-      context: ./gateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: gateway/Dockerfile
     container_name: kb-api-gateway
     restart: unless-stopped
     # Run as the host owner uid so the read-only ./root bind mount

@@ -47,12 +47,11 @@ __pycache__/
 
 # KB source root: each top-level non-dot subdir of ./root/ is one KB (named after
 # the subdir). Ignore ./root CONTENTS but keep the directory itself tracked via
-# the committed .exclude.conf.example + .tests fixture set (so the compose
-# ./root:/kb-source:ro bind-mount target exists in a fresh checkout; rclone/rsync
-# populate it at runtime). .tests is a dot-dir so the generic walk skips it; the
-# fixture test indexes it via /index?dir=.tests.
+# the committed .tests fixture set (so the compose ./root:/kb-source:ro bind-mount
+# target exists in a fresh checkout; rclone/rsync populate it at runtime). .tests
+# is a dot-dir so the generic walk skips it; the fixture test indexes it via
+# /index?dir=.tests.
 /root/*
-!/root/.exclude.conf.example
 !/root/.tests/
 !/root/.tests/**
 
@@ -83,9 +82,10 @@ __pycache__/
 # (full stack state). Operator copies these off-host for disaster recovery.
 /.backups/
 
-# Unified KB deny-list (INI: [section] headers are paths relative to ./root/,
-# [*] = global). LOCAL ONLY — may contain Drive file paths (business-sensitive,
-# PII). Do NOT commit. Both gdrive-sync (rclone stage) and the gateway walk
-# (index stage) read it at runtime. The tracked ./root/.exclude.conf.example
-# documents the format.
-/root/.exclude.conf
+# Unified KB deny-list (per-directory .kb-ignore, gitignore-style: rules relative
+# to each file's own dir; ./root/.kb-ignore holds globals). LOCAL ONLY — may
+# contain Drive file paths (business-sensitive, PII). Do NOT commit. Both
+# gdrive-sync (rclone download stage) and the gateway walk (index stage) read the
+# ancestor chain at runtime. /root/* above already ignores these; the line below
+# documents intent. The format is documented in docs/operations.md.
+/root/.kb-ignore
