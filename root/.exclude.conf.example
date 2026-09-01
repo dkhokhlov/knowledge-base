@@ -30,6 +30,11 @@
 #   "/"     -> ANCHORS at the section root: a full path relative to the section.
 #              Example: in [gdrive/Team Meetings], /Weekly*.pdf anchors at
 #              ./root/gdrive/Team Meetings/ (NOT every drive's /Weekly*.pdf).
+#   "/" elsewhere (no leading "/") -> a path pattern, FULL-matched against the
+#              path relative to the section (rclone-native). "*" does not cross
+#              "/", so "*/x.pdf" matches a one-level "<seg>/x.pdf" only, NOT a
+#              deeper "a/b/x.pdf". Use "**/x.pdf" to cross directory boundaries,
+#              or a bare basename "x.pdf" to match it at ANY depth.
 #   *       -> matches any run of chars EXCEPT "/" (does NOT cross a "/");
 #   **      -> matches across "/" (crosses directory boundaries);
 #   ?       -> matches a single char except "/".

@@ -993,8 +993,11 @@ def walk_source(root, allow, max_size, path=""):
 # [*] is the global section (applies to every KB). Patterns are rclone-style:
 #   no "/"        -> match the basename at ANY depth (e.g. *.aux, *.json);
 #   leading "/"   -> anchor at the section root (e.g. /Weekly*.pdf);
-#   "/" elsewhere -> a path pattern, matched against the path relative to the
-#                   section (non-anchored: suffix-match on a "/" boundary);
+#   "/" elsewhere -> a path pattern, FULL-matched against the path relative to
+#                   the section (rclone-aligned: "*" does not cross "/", so
+#                   "*/x.pdf" matches a one-level "<seg>/x.pdf" only, NOT a
+#                   deeper "a/b/x.pdf"; a leading "/" is redundant here -- it
+#                   only gates the leaf-section check below);
 #   "*" / "**"    -> everything in the section ("*" = within a segment in other
 #                   positions; "**" crosses "/");
 #   "?"           -> one non-"/" char.
@@ -1032,26 +1035,32 @@ def _translate_glob(pat):
 
 
 def _compile_exclude(pat):
-    """Compile one .exclude.conf pattern to a matchable form. Returns a tuple:
-    ("star",)                  -> matches everything;
-    ("basename", re)           -> no "/": fullmatch on the basename;
-    ("anchored", re)           -> leading "/" + contains "/": fullmatch on the
-                                  path relative to the section;
-    ("suffix", re)             -> contains "/" but no leading "/": the pattern
-                                  matches a path that ENDS in it on a "/" boundary."""
-    anchored = pat.startswith("/")
+    """Compile one .exclude.conf pattern to a matchable form (rclone-aligned: a
+    pattern containing "/" is FULL-matched against the path relative to the
+    section, with "*" not crossing "/"). Returns a tuple:
+    ("star",)        -> matches everything;
+    ("basename", re) -> no "/": fullmatch on the basename (any depth);
+    ("path", re)     -> leading "/" OR "/" elsewhere: fullmatch on the path
+                        relative to the section. A leading "/" anchors at the
+                        section root (so "/x.pdf" matches only the root x.pdf);
+                        without it the pattern is still full-matched against the
+                        section-relative path (rclone treats a "/"-containing
+                        pattern as a full-path match). "*" stays within a
+                        segment, so "*/x.pdf" matches a one-level "<seg>/x.pdf"
+                        only, not a deeper "a/b/x.pdf"."""
+    anchored = pat.startswith("/")           # only the B8 leaf-section gate uses this
     body = pat[1:] if anchored else pat
     if body in ("*", "**"):
         return ("star",)
-    has_slash = "/" in body
     rx = _translate_glob(body)
-    if anchored:
-        # Leading "/" anchors at the section root: fullmatch the path relative to
-        # the section (a no-slash body still anchors — [^/]* won't cross a "/").
-        return ("anchored", re.compile(r"\A" + rx + r"\Z"))
-    if not has_slash:
-        return ("basename", re.compile(r"\A" + rx + r"\Z"))
-    return ("suffix", re.compile(r"(?:\A|/)" + rx + r"\Z"))
+    if anchored or "/" in body:
+        # Full-path match relative to the section. "*" does not cross "/", so this
+        # is a one-level glob per segment -- identical to rclone's treatment of a
+        # "/"-containing exclude pattern. A leading "/" is redundant for the match
+        # (the path is already section-relative); it only restricts the pattern to
+        # leaf sections (B8, enforced in _load_excludes on the original pattern).
+        return ("path", re.compile(r"\A" + rx + r"\Z"))
+    return ("basename", re.compile(r"\A" + rx + r"\Z"))
 
 
 def _load_excludes(path):
@@ -1144,12 +1153,8 @@ def apply_excludes(files, dir, kb_source_root):
                     if rule[1].fullmatch(base):
                         drop = True
                         break
-                elif kind == "anchored":
+                else:  # path (anchored or not): fullmatch the section-relative path
                     if rule[1].fullmatch(rel):
-                        drop = True
-                        break
-                else:  # suffix
-                    if rule[1].search(rel):
                         drop = True
                         break
             if drop:

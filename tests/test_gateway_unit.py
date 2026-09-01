@@ -190,17 +190,39 @@ class TestApplyExcludes(unittest.TestCase):
             import shutil; shutil.rmtree(root)
 
     def test_glob_star_does_not_cross_slash(self):
-        # B7: "*" matches within one segment; "sub/*.pdf" must NOT match
-        # "sub/deep/b.pdf". "**" crosses "/".
+        # B7 (rclone-aligned): "*" matches within one segment; a "/"-containing
+        # pattern is FULL-matched against the section-relative path. So "sub/*.pdf"
+        # drops "sub/a.pdf" but NOT "sub/deep/b.pdf" (crosses /) and NOT
+        # "foo/sub/a2.pdf" (a deeper "sub" -- full-path, not a suffix match).
+        # "**" crosses "/".
         root = self._root_with("[gdrive]\nsub/*.pdf\nsub2/**/*.pdf\n")
         try:
             files = [
                 self._e("sub", "a.pdf"),           # sub/*.pdf -> drop
                 self._e("sub/deep", "b.pdf"),      # sub/*.pdf no (crosses /); sub2/** no -> keep
+                self._e("foo/sub", "a2.pdf"),      # sub/*.pdf no (full-path, not a deeper "sub") -> keep
                 self._e("sub2/deep", "c.pdf"),     # sub2/**/*.pdf -> drop
             ]
             out = app.apply_excludes(files, "gdrive", root)
-            self.assertEqual([f["filename"] for f in out], ["b.pdf"])
+            self.assertEqual(sorted(f["filename"] for f in out), ["a2.pdf", "b.pdf"])
+        finally:
+            import shutil; shutil.rmtree(root)
+
+    def test_glob_slash_pattern_one_level_rclone_aligned(self):
+        # B7 (rclone-aligned): "*/Doc1.pdf" is a full-path match with "*" not
+        # crossing "/", so it drops a one-level "<seg>/Doc1.pdf" but NOT a deeper
+        # "a/b/Doc1.pdf" and NOT the section-root "Doc1.pdf" (no segment before it).
+        # Pre-alignment this was a suffix match that over-matched at any depth.
+        root = self._root_with("[gdrive]\n*/Doc1.pdf\n")
+        try:
+            files = [
+                self._e("foo", "Doc1.pdf"),        # */Doc1.pdf -> drop (one level)
+                self._e("foo/bar", "Doc1.pdf"),    # */Doc1.pdf no (deeper) -> keep
+                self._e("", "Doc1.pdf"),           # */Doc1.pdf no (section root, no seg) -> keep
+            ]
+            out = app.apply_excludes(files, "gdrive", root)
+            kept = sorted((f["path"], f["filename"]) for f in out)
+            self.assertEqual(kept, [("", "Doc1.pdf"), ("foo/bar", "Doc1.pdf")])  # foo/Doc1.pdf dropped
         finally:
             import shutil; shutil.rmtree(root)
 
