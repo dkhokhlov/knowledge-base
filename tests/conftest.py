@@ -277,8 +277,8 @@ def iso_env_named(request):
     / heavy iso test, and return a runner that executes a repo-relative .sh
     body in it.
 
-    The ``suffix`` IS the clone subdir name (operator traceability:
-    ``.test-<suffix>/<stamp>/``). The iso env is clean / prod-exact: the only
+    The ``suffix`` names the clone leaf (operator traceability:
+    ``.test-env/<stamp>-<suffix>/``). The iso env is clean / prod-exact: the only
     diffs from prod are ``KB_HOST`` (the auto-picked port) + the ephemeral
     ``KB_API_KEY`` (file-based in the clone .env.local). No env hacks. Pass
     ``at_scale=True`` for the comprehensive at-scale provision (clean-all + image

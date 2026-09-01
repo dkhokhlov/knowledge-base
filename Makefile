@@ -120,10 +120,10 @@ test-long: test-iso-long ## Run the long iso tests (same as test-iso-long).
 test-output: ci ## Unit-test CLI JSON output schemas (no stack needed)
 	@.venv/bin/python tests/test_output_json.py -v
 
-clean-test: ## Tear down ONE isolated e2e run + remove its clone. NAME=<name> (default e2e, legacy) + optional STAMP=<stamp> (latest stamp under .test-<name>/ if unset). Pass NAME=<suffix> to match an iso run (test_09 uses gdrive; the iso_env_named fixture names its clone .test-<suffix>/<stamp>/). Safe anytime (no-op if absent). Delegates to scripts/lib-e2e-env.sh (shared with the conftest iso fixtures, tests/conftest.py).
+clean-test: ## Tear down ONE isolated e2e run + remove its clone. NAME=<name> (default e2e) + optional STAMP=<stamp> (newest stamp under .test-env/ if unset). Pass NAME=<suffix> to match an iso run (test_09 uses gdrive; the iso_env_named fixture names its clone .test-env/<stamp>-<suffix>/). Safe anytime (no-op if absent). Delegates to scripts/lib-e2e-env.sh (shared with the conftest iso fixtures, tests/conftest.py).
 	@bash -c '. scripts/lib-e2e-env.sh; e2e_down "$${NAME:-e2e}" "$${STAMP:-}"'
 
-clean-tests: ## Manual hygiene flush: remove EVERY .test-*/<stamp>/ clone + legacy un-stamped clones + stranded stamped e2e docker. Prints each clone's HEAD + unmerged commits before removing (a warning, not a hard refuse). NAME=<name> flushes only .test-<name>/. Run periodically -- stamped clones accumulate per e2e run (no autoclean). Delegates to scripts/lib-e2e-env.sh.
+clean-tests: ## Manual hygiene flush: remove EVERY .test-env/<stamp>-<name>/ clone + stranded stamped e2e docker. Prints each clone's HEAD + unmerged commits before removing (a warning, not a hard refuse). NAME=<name> flushes only that name's clones. Run periodically -- stamped clones accumulate per e2e run (no autoclean). Delegates to scripts/lib-e2e-env.sh.
 	@bash -c '. scripts/lib-e2e-env.sh; e2e_clean_tests "$${NAME:-}"'
 
 api-keys: ## Provision the admin API key into .env.local (run after `make start` + admin signup)

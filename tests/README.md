@@ -88,7 +88,7 @@ Two kinds of test, both collected natively by pytest:
       `KB_HOST`/`KB_API_KEY`) so the operator profile never reaches the body.
     - `iso_env_named` — a named own-iso stack (`iso`+`long` / `iso` single). A
       function-scoped factory: `_make(suffix)` provisions a stack whose clone
-      subdir is `.test-<suffix>/<stamp>/` (operator traceability).
+      subdir is `.test-env/<stamp>-<suffix>/` (operator traceability).
   The test passes iff the script exits 0. Output is not captured, so progress
   streams live. Teardown: test passed → `e2e_down` (remove the clone); failed →
   `e2e_stop_docker` (keep the clone for inspection; flush with `make clean-tests`).
@@ -177,8 +177,8 @@ the marker on the test in-file.
          """<one-line description>"""
          iso_env_named("<suffix>")("tests/test_<name>.sh")
      ```
-     The `<suffix>` is the clone subdir name (operator traceability:
-     `.test-<suffix>/<stamp>/`). See `test_08_e2e.sh` / `test_12_kb_check.sh`.
+     The `<suffix>` names the clone leaf (operator traceability:
+     `.test-env/<stamp>-<suffix>/`). See `test_08_e2e.sh` / `test_12_kb_check.sh`.
      For a comprehensive at-scale run (clean-all + image rebuild + real rclone
      gdrive corpus), pass `at_scale=True` (the fixture then provisions via
      `e2e_provision_at_scale` instead of `e2e_provision`); see

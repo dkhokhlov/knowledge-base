@@ -642,7 +642,7 @@ dependency is down.
 | `config` | render effective compose config (secrets redacted) |
 | `health` | probe api-gateway `/health` (via Caddy) and Open Web UI `/health` |
 | `test` | `unit` + live-RO (`test_01/02/03`); iso tests run via `make test-iso` / `make test-long` (see [testing.md](testing.md)) |
-| `clean-test` | tear down ONE isolated e2e run + remove its clone. `NAME=<suffix>` (default `e2e`, legacy; the iso tests name their clones `.test-<suffix>/`) + optional `STAMP=<stamp>`. Safe anytime (no-op if absent); use after a failed iso run (`NAME=gdrive` for `test_09`, `NAME=kbcheck` for `test_12`) |
+| `clean-test` | tear down ONE isolated e2e run + remove its clone. `NAME=<suffix>` (default `e2e`; the iso tests name their clones `.test-env/<stamp>-<suffix>/`) + optional `STAMP=<stamp>`. Safe anytime (no-op if absent); use after a failed iso run (`NAME=gdrive` for `test_09`, `NAME=kbcheck` for `test_12`) |
 | `rag-config` | set the strict-grounding RAG template + sync `rag.ollama.base_url` to the translated `OLLAMA_HOST` (run after `make api-keys`; re-run after a DB reset or an `OLLAMA_HOST` change; see [Repointing OLLAMA_HOST](#repointing-ollama_host)) |
 | `ocr-config` | re-assert the OWUI external-extraction keys (engine + URL + API key); auto-set by `make api-keys` when `OCR_ENABLED=true`; re-run after a DB reset; no-ops (exit 0) when `OCR_ENABLED!=true` |
 | `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./root/gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./root/.exclude.conf` (`[gdrive/<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./root/gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections; then POSTs `/index?dir=gdrive` to reconcile the tree into the `gdrive` KB (`--index-all` for a full re-index; `--retry-pending` to re-trigger stalled pending; fail-fast on `ok=false`) |
@@ -668,8 +668,9 @@ dependency is down.
 ## Isolated end-to-end tests (the iso-fixture framework)
 
 The `iso` tests never touch the live stack. They run against a throwaway
-clean-prod stack provisioned in a gitignored `.test-<suffix>/<stamp>/` clone
-(stamp = `date +%Y%m%d-%H%M%S`) under a **separate compose project**
+clean-prod stack provisioned in a gitignored `.test-env/<stamp>-<suffix>/` clone
+(stamp = `date +%Y%m%d-%H%M%S`, stamp-first so `ls .test-env/` shows every run in
+time order across test types) under a **separate compose project**
 (`kb-<suffix>-<stamp>`), so the live `kb-*` stack on the same host keeps running
 (different container names, host port, project, volumes, networks). Each run gets
 a unique stamp, so re-runs never clobber a prior (possibly commit-bearing) clone.
@@ -719,7 +720,7 @@ template. The `e2e_*` functions in `scripts/lib-e2e-env.sh` apply it:
 |---|---|---|
 | 1. resolve `OLLAMA_HOST` | `e2e_resolve_ollama` | shell env, else the live `.env`, else the running `kb-graphiti` container's `OPENAI_BASE_URL` (strip `/v1`) |
 | 2. isolate from the operator's shell profile | `e2e_isolate` | `unset BASH_ENV KB_HOST` (see below) |
-| 3. stamped clone + generated override + compose env | `e2e_isolate` | `git clone --no-local` to `.test-<NAME>/<stamp>/`; sets `COMPOSE_PROJECT_NAME=kb-<NAME>-<stamp>`, `COMPOSE_FILE`, `OWUI_CONTAINER=kb-<NAME>-<stamp>-openwebui`, `MARKITDOWN_CONTAINER`, `KB_HOST` (auto-picked port; `KB_HOST_PORT` is derived, not set) |
+| 3. stamped clone + generated override + compose env | `e2e_isolate` | `git clone --no-local` to `.test-env/<stamp>-<NAME>/` (leaf reserved atomically with `mkdir` to close the same-second TOCTOU); sets `COMPOSE_PROJECT_NAME=kb-<NAME>-<stamp>`, `COMPOSE_FILE`, `OWUI_CONTAINER=kb-<NAME>-<stamp>-openwebui`, `MARKITDOWN_CONTAINER`, `KB_HOST` (auto-picked port; `KB_HOST_PORT` is derived, not set) |
 | 4. `make bootstrap KB_HOST=... OLLAMA_HOST=... [OCR_ENABLED=...]` | `e2e_isolate` | `bootstrap.sh` force-persists `KB_HOST` + derives `KB_HOST_PORT` from it; force-persists each non-empty tunable into `.env` (idempotent — no tunable means no change, so the live operator is unaffected) |
 | 5. provision the clone | `e2e_provision` (clean-prod: start + wait healthy + admin-signup + api-keys + ephemeral user + projects-bootstrap + rag-config) OR `e2e_provision_at_scale` (destructive: clean-all + re-bootstrap + restore-creds + [ollama pull OCR model] + preflight + image rebuild + start + ... + kb-bootstrap KB=gdrive + gdrive-sync + make ci) | `e2e_provision` for the shared/single iso tests; `e2e_provision_at_scale` for `test_09` (`at_scale=True`) |
 | 6. teardown (outcome-branched) | `e2e_down` / `e2e_stop_docker` | test passed → `e2e_down` stops docker + removes the clone; test failed → `e2e_stop_docker` stops docker + KEEPS the clone for inspection; flush kept clones with `make clean-test NAME=<suffix> [STAMP=]` / `make clean-tests` |
@@ -734,21 +735,25 @@ the way a live `make bootstrap KB_HOST=... OLLAMA_HOST=...` would (with
 Teardown is **outcome-branched** (the `iso_env` / `iso_env_named` fixtures in
 `tests/conftest.py`): a test that **passes** → `e2e_down` (stop docker + remove
 the clone, freeing the shared Ollama GPU); a test that **fails** → `e2e_stop_docker`
-(stop docker + KEEP the clone at `.test-<suffix>/<stamp>/` for inspection). A kept
+(stop docker + KEEP the clone at `.test-env/<stamp>-<suffix>/` for inspection). A kept
 clone does not auto-flush (a commit-in-clone-first workflow may hold unmerged
 commits). The host **port is auto-picked** per run, so a failed run's port is freed
 by its `e2e_stop_docker` (docker stopped) — no serial-port contention. Removal of
 kept clones is manual hygiene:
 
 - `make clean-test NAME=<suffix> [STAMP=<stamp>]` — tear down ONE run's docker +
-  remove its clone (latest stamp under `.test-<suffix>/` if `STAMP` is unset).
+  remove its clone (newest stamp under `.test-env/` for that name if `STAMP` is
+  unset; selected by the stamp PREFIX, not dir mtime — a dir's mtime changes when
+  a child is added, so mtime could pick the wrong run).
   `NAME=gdrive` for `test_09`, `NAME=kbcheck` for `test_12`, `NAME=test08` for
   `test_08`, `NAME=iso-shared` for the shared-iso session stack.
-- `make clean-tests [NAME=<name>]` — flush EVERY `.test-*/<stamp>/` clone +
-  legacy un-stamped clones + stranded stamped e2e docker. Before removing each
-  clone it prints that clone's `HEAD` + any commits not on `main` (a warning, not
-  a hard refuse — `clean-tests` is the explicit "I'm done with these" flush). Run
-  it periodically; stamped clones (incl. `./data` + `./root`) accumulate per
+- `make clean-tests [NAME=<name>]` — flush EVERY `.test-env/<stamp>-<name>/` clone
+  + stranded stamped e2e docker (a project whose clone still exists is NOT
+  stranded, so a live run of a different name is spared — `NAME=` further
+  restricts to that name). Before removing each clone it prints that clone's
+  `HEAD` + any commits not on `main` (a warning, not a hard refuse —
+  `clean-tests` is the explicit "I'm done with these" flush). Run it
+  periodically; stamped clones (incl. `./data` + `./root`) accumulate per
   run.
 
 The teardown sweeps use the compose **project label** (exact match), never a

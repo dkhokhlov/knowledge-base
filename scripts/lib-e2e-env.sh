@@ -4,7 +4,7 @@
 # that does NOT touch the live `kb-*` containers.
 #
 # What "isolated" means here: clone the repo to a throwaway, gitignored
-# .test-<NAME>/<stamp>/ tree and run a SEPARATE compose project
+# .test-env/<stamp>-<NAME>/ tree and run a SEPARATE compose project
 # (`kb-<NAME>-<stamp>`) with container names `kb-<NAME>-<stamp>-*` (a generated
 # override merged via COMPOSE_FILE), so the live `kb-*` stack on this host keeps
 # running untouched. The <stamp> (date +%Y%m%d-%H%M%S) makes every run unique --
@@ -21,14 +21,14 @@
 # live stack (which does NOT set COMPOSE_FILE) keeps the `kb-*` names.
 #
 # Proliferation: a run leaves docker STOPPED (GPU freed) but the clone KEPT at
-# .test-<NAME>/<stamp>/ -- a commit-in-clone-first workflow may hold unmerged
+# .test-env/<stamp>-<NAME>/ -- a commit-in-clone-first workflow may hold unmerged
 # commits, so clones are NOT auto-removed. The host PORT auto-picks a free port
 # (3011..3099, skip 3000 + 3010) when the caller passes none; an explicit port override
 # is the caller's collision risk, and a failed run still holding it must be
 # cleaned before a re-run on that port (make start failing on the bind is the
 # clear signal). `make clean-test STAMP=<stamp>`
 # removes ONE run; `make clean-tests` is the manual hygiene flush (every stamp +
-# legacy un-stamped clones + orphan docker). The clone lives on disk (NOT /tmp
+# orphan docker). The clone lives on disk (NOT /tmp
 # shmem -- the ./data + ./gdrive corpus are too large for tmpfs); gitignored
 # (`/.test-*/`).
 #
@@ -49,7 +49,7 @@
 #   e2e_stop_docker <NAME> <STAMP> # stop+remove docker, KEEP the clone (success path)
 #   e2e_down <NAME> [STAMP]        # stop docker + remove the clone (quick tests' EXIT
 #                                 # trap, make clean-test; latest stamp if no STAMP)
-#   e2e_clean_tests [NAME]         # flush ALL stamps + legacy + orphans (make clean-tests)
+#   e2e_clean_tests [NAME]         # flush ALL stamps + orphans (make clean-tests)
 #
 # Globals set by e2e_isolate (for the caller): E2E_NAME, E2E_PORT, E2E_CLONE,
 # E2E_KB_HOST, E2E_STAMP, plus exported COMPOSE_PROJECT_NAME, COMPOSE_FILE,
@@ -121,7 +121,7 @@ sys.exit("FAIL  no free host port in %d..%d (3000 skipped)" % (lo, hi))
 PY
 }
 
-# Clone the repo to .test-<NAME>/<stamp>/, set up the isolation env (stamped
+# Clone the repo to .test-env/<stamp>-<NAME>/, set up the isolation env (stamped
 # compose project, generated container-rename override, OWUI_CONTAINER,
 # KB_HOST), unset the operator's shell profile leaks (BASH_ENV/KB_HOST), and run
 # `make bootstrap` (seed .env/.env.local
@@ -131,20 +131,26 @@ PY
 # (_e2e_free_port, skip 3000 + 3010) when the caller passes none; an explicit port
 # (TEST08_PORT / KBCHECK_PORT / E2E_PORT) overrides and owns its collision risk.
 e2e_isolate() {
-  local name="$1" port="${2:-}" ocr="${3:-}"
+  local name="${1:-e2e}" port="${2:-}" ocr="${3:-}"
   [ -n "$port" ] || port="$(_e2e_free_port)" || return 1
   local kb_host="http://localhost:$port"
-  local parent="$E2E_SRC/.test-$name"
-  # Datetime-stamped clone + project: each run gets a unique .test-<name>/<stamp>/
-  # clone and a kb-<name>-<stamp> compose project, so re-runs never clobber a
-  # prior (possibly failed, commit-bearing) clone and never collide on container
-  # names. The host PORT auto-picks a free port when none is passed (above); an
-  # explicit override is the caller's collision risk. A failed run still holding
-  # its port must be cleaned (make clean-test STAMP=<stamp>). Retry on a
-  # same-second collision (two runs started in the same second).
+  local parent="$E2E_SRC/.test-env"
+  mkdir -p "$parent"
+  # Datetime-stamped clone + project: each run gets a unique
+  # .test-env/<stamp>-<name>/ clone and a kb-<name>-<stamp> compose project, so
+  # re-runs never clobber a prior (possibly failed, commit-bearing) clone and
+  # never collide on container names. The host PORT auto-picks a free port when
+  # none is passed (above); an explicit override is the caller's collision risk.
+  # A failed run still holding its port must be cleaned (make clean-test
+  # STAMP=<stamp>). The leaf is reserved atomically with mkdir (fails if a
+  # same-second same-name run already took it -> retry with a fresh stamp),
+  # closing the check/create TOCTOU. The reserved leaf stays EMPTY across the
+  # dirty-tree check below; a dirty-tree failure rmdirs it.
   local stamp clone
-  stamp="$(date +%Y%m%d-%H%M%S)"; clone="$parent/$stamp"
-  while [ -e "$clone" ]; do stamp="$(date +%Y%m%d-%H%M%S)"; clone="$parent/$stamp"; done
+  stamp="$(date +%Y%m%d-%H%M%S)"; clone="$parent/$stamp-$name"
+  until mkdir "$clone" 2>/dev/null; do
+    stamp="$(date +%Y%m%d-%H%M%S)"; clone="$parent/$stamp-$name"
+  done
 
   # The clone is `git clone` of this repo, which materializes COMMITTED state
   # only -- uncommitted working-tree changes (modified OR untracked-not-ignored
@@ -159,6 +165,7 @@ e2e_isolate() {
     echo "       The e2e would test stale (HEAD) code, not your working tree. Commit or stash first." >&2
     echo "       Dirty files (modified + untracked, ignored excluded):" >&2
     printf '       %s\n' "$dirty" | head -20 >&2
+    rmdir "$clone" 2>/dev/null || true   # drop the empty reserved leaf
     return 1
   fi
 
@@ -195,11 +202,13 @@ e2e_isolate() {
 
   # Clone from the LOCAL repo (origin may be behind; this repo's HEAD is
   # current). --no-local forces the transport (no hardlinks) so it works across
-  # filesystems. The stamped clone lives under .test-<name>/<stamp>/; create the
-  # parent first (the e2e may be the first run for this <name>).
+  # filesystems. Clone into the reserved empty leaf (git clones into an empty
+  # existing dir); drop the reservation if cloning fails.
   echo "==> clone $E2E_SRC -> $clone"
-  mkdir -p "$parent"
-  git clone --no-local "$E2E_SRC" "$clone" || return 1
+  if ! git clone --no-local "$E2E_SRC" "$clone"; then
+    rmdir "$clone" 2>/dev/null || true
+    return 1
+  fi
   cd "$clone" || return 1
 
   # Generate the container-rename override from compose.yml's services, so a new
@@ -408,16 +417,16 @@ e2e_ephemeral_user() {
 }
 
 # --- teardown model (proliferation) ----------------------------------------
-# A run leaves a datetime-stamped clone at .test-<name>/<stamp>/ with docker
+# A run leaves a datetime-stamped clone at .test-env/<stamp>-<name>/ with docker
 # STOPPED (GPU freed) but the clone KEPT -- a commit-in-clone-first workflow may
 # hold unmerged commits, so clones are NOT auto-removed on success. The host PORT
 # is serial: a failed run still holding E2E_PORT must be cleaned before a re-run
 # on the same port. Removal is manual hygiene:
 #   make clean-test NAME=<name> [STAMP=<stamp>]  -- ONE run (latest stamp if no
 #                                                   STAMP); stops docker + removes clone.
-#   make clean-tests [NAME=<name>]               -- flush EVERY .test-*/<stamp>/
-#                                                   clone + legacy un-stamped
-#                                                   .test-<name>/ + orphan docker.
+#   make clean-tests [NAME=<name>]               -- flush EVERY
+#                                                   .test-env/<stamp>-<name>/ clone
+#                                                   + orphan docker.
 # compose.yml uses only ./data bind mounts (no named volumes), so `down
 # --remove-orphans` suffices (no --volumes needed). Sweeps use the compose
 # PROJECT LABEL (exact match), never a container-name prefix: live services like
@@ -426,33 +435,46 @@ e2e_ephemeral_user() {
 # (`knowledgebase`), never kb-*, so label sweeps are safe.
 
 # Resolve the stamp for e2e_down: explicit arg > the in-process E2E_STAMP set by
-# e2e_isolate > the newest stamp dir under .test-<name>/ > "" (legacy: the clone
-# is .test-<name>/ itself, project kb-<name>).
+# e2e_isolate > the newest .test-env/<stamp>-<name>/ leaf for this name (by STAMP
+# PREFIX, not mtime -- a dir's mtime changes when a direct child is added, so an
+# older clone that later gained a child would win on mtime and the wrong run
+# would be torn down) > "" (no clone found). Returns the 15-char stamp
+# (empty == not found).
 _e2e_resolve_stamp() {
   local name="$1" stamp="${2:-}" parent newest=""
   [ -n "$stamp" ] && { printf '%s' "$stamp"; return 0; }
   [ -n "${E2E_STAMP:-}" ] && { printf '%s' "$E2E_STAMP"; return 0; }
-  parent="$E2E_SRC/.test-$name"
+  parent="$E2E_SRC/.test-env"
   if [ -d "$parent" ]; then
-    # Newest stamp dir by mtime; stamp dirs match YYYYMMDD-HHMMSS.
-    newest="$(find "$parent" -maxdepth 1 -mindepth 1 -type d \
-      -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]' \
-      -printf '%T@ %f\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+    # Leaves are <stamp>-<name> (stamp = YYYYMMDD-HHMMSS, 15 chars). Filter by
+    # the name suffix (chars 16+), then pick the highest stamp prefix (chars
+    # 0-14) -- chronological, since the stamp sorts lexicographically under C.
+    newest="$(
+      while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        local b="$(basename "$d")"
+        [ "${b:16}" = "$name" ] || continue
+        printf '%s\n' "${b:0:15}"
+      done < <(find "$parent" -maxdepth 1 -mindepth 1 -type d \
+        -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-*' 2>/dev/null) \
+      | LC_ALL=C sort -r | head -1)"
   fi
-  printf '%s' "$newest"   # empty == legacy un-stamped clone
+  printf '%s' "$newest"   # empty == no clone found
 }
 
 # Stop + remove the kb-<name>-<stamp> docker project (compose down + label sweep),
 # KEEP the clone dir. Safe anytime (no-op if no containers). The success path: GPU
-# freed, clone kept for inspection / commit landing. Empty stamp == legacy
-# un-stamped run (clone .test-<name>/ directly, project kb-<name>).
+# freed, clone kept for inspection / commit landing. Stamp is mandatory (fail
+# loud on empty -- no caller passes an un-stamped project anymore).
 e2e_stop_docker() {
-  local name="$1" stamp="$2" proj clone
-  if [ -n "$stamp" ]; then
-    proj="kb-$name-$stamp"; clone="$E2E_SRC/.test-$name/$stamp"
-  else
-    proj="kb-$name"; clone="$E2E_SRC/.test-$name"
-  fi
+  local name="$1" stamp="$2" clone_path="${3:-}" proj clone
+  [ -n "$stamp" ] || { echo "FAIL  e2e_stop_docker: empty stamp for name=$name" >&2; return 1; }
+  proj="kb-$name-$stamp"
+  # An explicit clone_path (passed by the sweeps, which know the exact dir) is
+  # used as-is; otherwise derive the new-layout path. `compose down` runs from
+  # the clone dir so the compose NETWORK is removed (the label sweep below
+  # removes containers only, not the network).
+  clone="${clone_path:-$E2E_SRC/.test-env/$stamp-$name}"
   local orphans had
   had="$(docker ps -aq --filter label=com.docker.compose.project="$proj" 2>/dev/null | wc -l)"
   if [ -d "$clone" ]; then
@@ -488,22 +510,20 @@ _e2e_rm_clone() {
 
 # Stop docker (e2e_stop_docker) + root-remove the clone. Used by the quick tests'
 # EXIT traps (their clones hold no commits) and `make clean-test`. Without a
-# stamp, resolves E2E_STAMP or the latest stamp under .test-<name>/; an empty
-# resolution targets the legacy un-stamped .test-<name>/ clone.
+# stamp, resolves E2E_STAMP or the newest .test-env/<stamp>-<name>/ leaf for this
+# name; an empty resolution prints "no clone found" and returns (nothing to tear
+# down).
 e2e_down() {
   local name="$1" stamp clone
   stamp="$(_e2e_resolve_stamp "$name" "${2:-}")"
   cd "$E2E_SRC" || true
-  e2e_stop_docker "$name" "$stamp"
-  if [ -n "$stamp" ]; then
-    clone="$E2E_SRC/.test-$name/$stamp"
-    _e2e_rm_clone "$clone"
-    # If the parent .test-<name>/ is now empty (all stamp subdirs gone), rmdir it.
-    rmdir "$E2E_SRC/.test-$name" 2>/dev/null || true
-  else
-    clone="$E2E_SRC/.test-$name"
-    _e2e_rm_clone "$clone"
+  if [ -z "$stamp" ]; then
+    echo "==> no .test-env/<stamp>-${name}/ clone found for name=${name}."
+    return 0
   fi
+  clone="$E2E_SRC/.test-env/$stamp-$name"
+  e2e_stop_docker "$name" "$stamp" "$clone"
+  _e2e_rm_clone "$clone"
   return 0
 }
 
@@ -524,58 +544,63 @@ _e2e_warn_commits() {
   fi
 }
 
-# Flush ALL stamped clones + legacy un-stamped clones + orphan docker (manual
-# hygiene; `make clean-tests`). For each clone, print HEAD + unmerged commits
-# BEFORE removing (a warning, not a hard refuse -- clean-tests is the explicit
-# "I'm done with these" flush). NAME=<name> flushes only .test-<name>/; else every
-# .test-*/. The orphan sweep targets only STAMPED projects (kb-*-[stamp]) -- the
-# live project `knowledgebase` never matches, so the live stack is never touched.
+# Flush ALL stamped clones + orphan docker (manual hygiene; `make clean-tests`).
+# For each clone, print HEAD + unmerged commits BEFORE removing (a warning, not a
+# hard refuse -- clean-tests is the explicit "I'm done with these" flush).
+# NAME=<name> flushes only that name's clones; else every clone under .test-env/.
+# The orphan sweep targets only STAMPED projects (kb-*-[stamp]) whose clone dir
+# is GONE (truly stranded) -- the live project `knowledgebase` never matches, and
+# a project whose clone still exists is left to its run.
 e2e_clean_tests() {
-  local name="${1:-}" parent n d s proj orphans
+  local name="${1:-}" d s b n proj
   cd "$E2E_SRC" || return 1
-  local parents=()
-  if [ -n "$name" ]; then
-    [ -d "$E2E_SRC/.test-$name" ] && parents=("$E2E_SRC/.test-$name")
-  else
-    while IFS= read -r parent; do parents+=("$parent"); done \
-      < <(find "$E2E_SRC" -maxdepth 1 -mindepth 1 -type d -name '.test-*' 2>/dev/null | sort)
+
+  # `env` is the shared parent (.test-env/), not a clone name; refuse it so
+  # `make clean-tests NAME=env` does not treat the shared parent as a clone.
+  if [ "$name" = "env" ]; then
+    echo "FAIL  'env' is the shared .test-env/ parent, not a clone name." >&2
+    return 1
   fi
-  [ "${#parents[@]}" -eq 0 ] && { echo "==> no .test-*/ clones to flush."; }
-  for parent in "${parents[@]}"; do
-    n="${parent##*.test-}"
-    # Each stamp subdir (YYYYMMDD-HHMMSS) = one run.
+
+  # .test-env/<stamp>-<name>/ leaves (stamp = YYYYMMDD-HHMMSS, 15 chars; name =
+  # chars 16+). Pass the exact path so e2e_stop_docker runs `compose down` from
+  # the clone dir (network removal), not just the label sweep.
+  local env_parent="$E2E_SRC/.test-env"
+  if [ -d "$env_parent" ]; then
     while IFS= read -r d; do
       [ -n "$d" ] || continue
-      s="$(basename "$d")"
-      echo "==> flush $parent/$s"
+      b="$(basename "$d")"
+      s="${b:0:15}"; n="${b:16}"
+      if [ -n "$name" ] && [ "$n" != "$name" ]; then continue; fi
+      echo "==> flush $d"
       _e2e_warn_commits "$d"
-      e2e_stop_docker "$n" "$s"
+      e2e_stop_docker "$n" "$s" "$d"
       _e2e_rm_clone "$d"
-    done < <(find "$parent" -maxdepth 1 -mindepth 1 -type d \
-      -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]' 2>/dev/null | sort)
-    # Legacy: .test-<name>/ with content directly in it (pre-stamping run). If the
-    # parent is now empty, rmdir; else treat the whole dir as a legacy clone
-    # (project kb-<name>, override at .test-<name>/compose.<name>.override.yml).
-    if [ -d "$parent" ] && [ -n "$(find "$parent" -mindepth 1 -maxdepth 1 2>/dev/null | head -1)" ]; then
-      echo "==> flush legacy $parent (un-stamped)"
-      _e2e_warn_commits "$parent"
-      e2e_stop_docker "$n" ""
-      _e2e_rm_clone "$parent"
-    else
-      rmdir "$parent" 2>/dev/null || true
-    fi
-  done
-  # Orphan sweep: stranded STAMPED e2e projects whose clone dir is already gone
-  # (interrupted runs). Inspect only compose-labeled containers; match the STAMP
-  # pattern on the project label. The live project `knowledgebase` has no stamp,
-  # so it is never matched.
+    done < <(find "$env_parent" -maxdepth 1 -mindepth 1 -type d \
+      -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-*' 2>/dev/null | sort)
+  fi
+
+  # Orphan sweep: stranded STAMPED projects whose clone dir is GONE (interrupted
+  # runs). Inspect only compose-labeled containers; match the STAMP pattern on
+  # the project label. The live project `knowledgebase` has no stamp, so it is
+  # never matched. When NAME= is given, restrict to that name's projects (a live
+  # run of a DIFFERENT name is not touched). Skip a project whose clone still
+  # exists -- it is not stranded (its clone was flushed above, or it is a live
+  # run). proj = kb-<name>-<stamp>; the trailing 15 chars are the stamp, the rest
+  # after `kb-` and before `-<stamp>` is the name.
   local orphan_ids=""
   while IFS= read -r cid; do
     [ -n "$cid" ] || continue
     proj="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$cid" 2>/dev/null || true)"
     case "$proj" in
-      kb-*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) orphan_ids="$orphan_ids $cid";;
+      kb-*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) : ;;
+      *) continue ;;
     esac
+    s="${proj: -15}"
+    n="${proj#kb-}"; n="${n%-$s}"
+    if [ -n "$name" ] && [ "$n" != "$name" ]; then continue; fi
+    if [ -d "$E2E_SRC/.test-env/$s-$n" ]; then continue; fi
+    orphan_ids="$orphan_ids $cid"
   done < <(docker ps -aq --filter label=com.docker.compose.project 2>/dev/null)
   if [ -n "${orphan_ids# }" ]; then
     docker rm -f $orphan_ids >/dev/null 2>&1 || true

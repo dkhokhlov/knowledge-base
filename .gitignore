@@ -68,8 +68,16 @@ __pycache__/
 # throwaway copies of the repo run under a separate compose project (kb-e2e,
 # kb-kbcheck, ...) so the live stack keeps running. On a successful run the
 # wrapper removes them; `make clean-test` (or e2e_down) tears down the isolated
-# stack + removes them after a failed run. Generic: any .test-*/ clone.
+# stack + removes them after a failed run. All clones live under ONE parent:
+# .test-env/<stamp>-<name>/ (stamp-first so `ls .test-env/` shows every run in
+# time order across test types). `/.test-*/` matches the parent + any straggler.
 /.test-*/
+
+# make kb-finalize / gdrive-sync-finalize host-side serialize lock (flock on fd
+# 9; the file is NOT auto-removed on exit, so a crashed/stale holder lingers).
+# Gitignored so a stale lock does not dirty the tree (e2e_isolate rejects a
+# dirty source tree). Remove manually only if no finalize is running.
+/.kb-finalize.lock
 
 # make backup DR snapshots: dated tarballs of ./data + .env + .env.local
 # (full stack state). Operator copies these off-host for disaster recovery.

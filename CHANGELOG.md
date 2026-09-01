@@ -73,10 +73,32 @@ project adheres to [Semantic Versioning](https://semver.org/).
   retrieval is gateway-mediated (`POST /retrieve`), not the former direct-OWUI
   Chroma path. Updated `README.md`, `docs/agents.md`, `docs/operations.md`, and the
   four `skills/*/SKILL.md` copies.
+- **Collapsed the iso-test clone layout to a single `.test-env/` parent.** Every
+  e2e run now lands at `.test-env/<stamp>-<name>/` (stamp-first, so `ls .test-env/`
+  shows every run across every test type in time order), replacing the per-type
+  two-level `.test-<name>/<stamp>/` layout that cluttered the repo root with many
+  `.test-*` parents and did not sort chronologically across types. The docker
+  project name (`kb-<name>-<stamp>`), container names, and network are unchanged
+  (layout-only). `e2e_stop_docker` now takes an explicit clone-path arg so the
+  sweeps run `compose down` from the exact dir (network removal). No backward-
+  compat fallback for the old layout — old `.test-<name>/` clones are flushed by a
+  one-time manual `rm -rf .test-*` (the new `make clean-tests` no longer sweeps
+  them). Functional change confined to `scripts/lib-e2e-env.sh`.
 
 ### Fixed
 
-- Nothing yet.
+- **Three pre-existing iso-test teardown safety bugs** (closed while rewriting the
+  layout in `scripts/lib-e2e-env.sh`): (1) the orphan docker sweep ignored `NAME=`
+  + clone presence, so `make clean-tests NAME=kbcheck` could force-remove a live
+  `iso-shared` stack — it now restricts to `NAME`'s projects and skips a project
+  whose clone still exists (truly stranded only); (2) `_e2e_resolve_stamp` picked
+  the newest clone by mutable dir mtime, so `clean-test NAME=x` could delete the
+  wrong (commit-bearing) run — it now selects by the stamp PREFIX (`LC_ALL=C sort
+  -r`), not mtime; (3) same-second same-name allocation was a check/create TOCTOU
+  — the leaf is now reserved atomically with `mkdir` (fails if taken → retry with
+  a fresh stamp). `e2e_stop_docker` now fails loud on an empty stamp (no un-
+  stamped fallback). `/.kb-finalize.lock` gitignored so a stale finalize lock does
+  not trip `e2e_isolate`'s dirty-tree guard.
 
 ## [v2.0.0] — 2026-08-29
 
