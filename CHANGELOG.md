@@ -6,6 +6,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [v2.1.0] — 2026-09-01
+
 ### Added
 
 - **Unified `.kb-ignore` deny-list (per-directory, gitignore-style).** Replaces
