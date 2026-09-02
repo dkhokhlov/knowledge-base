@@ -6,9 +6,8 @@
 #   - all three modes (hybrid/lexical/vector) -> 200 + the full response validated
 #     against a synthetic fixture KB (schema + the fixture chunk at rank 0). The
 #     fixture is one small .txt with a rare synthetic token, so every mode that
-#     returns anything must return that chunk. Content validation is gated on
-#     VECTOR_DB=pgvector (lexical is not pure FTS on Chroma); 200 is checked on
-#     every backend.
+#     returns anything must return that chunk. pgvector is the only backend
+#     (Chroma removed), so all three modes are content-validated on every run.
 #
 # Self-contained: the temp KB is created with the admin key, granted '*' read so
 # the agent (user) key can retrieve, and deleted on EXIT (its files too). The
@@ -147,19 +146,10 @@ fi
 # validate the FULL response -- not just a 200, not just ">=1 hit": the schema
 # (mode / kb_id / k / score_order / hits) AND that the fixture chunk is returned
 # at rank 0. score_order: hybrid + lexical rank by RRF score (desc); vector by
-# cosine distance (asc). Gated on VECTOR_DB=pgvector (lexical is not pure FTS
-# on Chroma, so content validation would false-fail there; the 200 path is
-# checked on every backend).
+# cosine distance (asc). pgvector is the only backend (Chroma removed), so all
+# three modes are content-validated on every run.
 section "POST /retrieve all three modes -> 200 + response validated"
-if [ "${VECTOR_DB:-}" != "pgvector" ]; then
-  for mode in hybrid lexical vector; do
-    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$G/retrieve" "${RD[@]}" -H "$CT" \
-      -d "{\"kb_id\":\"${KB_ID}\",\"query\":\"${FIXTURE_TOKEN}\",\"k\":10,\"mode\":\"${mode}\"}")
-    [ "$code" = 200 ] && pass "mode=$mode -> 200 (content SKIP: VECTOR_DB!=pgvector)" \
-      || fail "mode=$mode -> $code (want 200)"
-  done
-else
-  for mode in hybrid lexical vector; do
+for mode in hybrid lexical vector; do
     case "$mode" in hybrid|lexical) want_order=desc ;; vector) want_order=asc ;; esac
     bf="$(mktemp)"
     code=$(curl -s -o "$bf" -w '%{http_code}' -X POST "$G/retrieve" "${RD[@]}" -H "$CT" \
@@ -208,6 +198,5 @@ else:
       *)   fail "mode=$mode -> ${verdict}" ;;
     esac
   done
-fi
 
 finish

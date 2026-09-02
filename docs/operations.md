@@ -241,8 +241,10 @@ runs that `REINDEX` (ivfflat vector + GIN FTS) once the drain is terminal;
 for `pending+processing=0` and finalizes in one command. `REINDEX` is instance-wide
 on the shared `document_chunk` table, so `make kb-finalize` first requires EVERY KB
 under `./root/` terminal + acquires a host lock (it serializes concurrent finalizes);
-`make kb-sync-finalize KB=<name>` is the generic (non-gdrive) variant. pgvector-only — Chroma/HNSW are incremental, so
-it is a no-op there. Named "finalize" (not "reindex") because the fresh vectors
+`make kb-sync-finalize KB=<name>` is the generic (non-gdrive) variant. pgvector
+is the only supported backend: `kb-finalize` fails loud on any other `VECTOR_DB`
+(pgvector's ivfflat index needs `REINDEX` after a bulk drain; HNSW-style indexes
+are incremental and do not). Named "finalize" (not "reindex") because the fresh vectors
 were never queryable (a first publish, not a re-do) and to avoid collision with
 the gateway `reindex_all` (`POST /index?reindex_all=1` re-PROCESSES files — a
 different operation).
@@ -503,21 +505,13 @@ NOT reject same-content-different-path files as `400 Duplicate content` — they
 index as separate members. A per-file error in the `/index` response is a real
 upload/extract failure (read it), not an expected duplicate.
 
-### Open-file limit (former Chroma backend)
+### Open-file limit (historical)
 
-> **Current backend is pgvector** (`VECTOR_DB=pgvector`): OWUI stores vectors in
-> Postgres via the `pgvector` extension — no per-collection SQLite files, so the
-> fd exhaustion below does **not** occur. Kept as a historical note for stacks
-> still on (or reverted to) Chroma; the `ulimits.nofile` setting remains in
-> `compose.yml` as a harmless baseline.
-
-OWUI's former RAG vector store was [Chroma][chroma] 1.5.x (rust backend), which opens a
-SQLite db per collection. Bulk ingest (the first gdrive `/index`) creates 100s
-of collections and exhausts the default 1024 fd soft limit → `SQLITE_CANTOPEN
-"unable to open database file"` on every insert (KB `file_count` stays 0,
-uploads time out, OWUI goes `unhealthy`). `compose.yml` sets
-`ulimits.nofile.soft=65536` (hard 524288) on the `openwebui` service to fix
-this — do not remove it.
+The backend is pgvector (`VECTOR_DB=pgvector`): OWUI stores vectors in Postgres
+via the `pgvector` extension, so there are no per-collection SQLite files and
+no fd-exhaustion risk. `compose.yml` keeps `ulimits.nofile.soft=65536`
+(hard 524288) on the `openwebui` service as a harmless baseline — do not remove
+it.
 
 ### State
 
@@ -633,7 +627,6 @@ dependency is down.
 | Need to reach Open WebUI directly (it is behind Caddy; no direct host port) | OWUI is internal-only on `owui_net` | `docker exec kb-openwebui curl -s localhost:8080/...`, or a temporary `docker compose run --rm -p 3001:8080 openwebui` (avoid `:3000` — that is Caddy) |
 | RAG chat is slow; `ollama ps` shows a CPU/GPU split | `OPENWEBUI_MODEL` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; `GRAPHITI_MODEL` (extraction) and `OPENWEBUI_MODEL` (chat) are independent — two different 14B tags cannot both be resident at once on this GPU |
 | `make health` says `degraded` but the UI works | OWUI `/health` returned non-2xx | inspect the `openwebui` logs; the gateway reports degraded whenever the identity dependency is not healthy |
-| **(Chroma backend only)** a KB `file_count` stays 0; uploads time out; OWUI `unhealthy`; `docker logs kb-openwebui` shows `chromadb ... unable to open database file` | `openwebui` service `ulimits.nofile` lowered or removed → [Chroma][chroma] 1.5.x (rust backend) exhausts the fd limit creating one SQLite db per RAG collection under bulk ingest (does not occur under pgvector) | restore `ulimits.nofile.soft=65536` (hard 524288) on `openwebui` in `compose.yml`; `docker compose up -d --no-deps --force-recreate openwebui`; re-run `make gdrive-sync` (or `make kb-index KB=gdrive`) |
 | `make kb-status KB=gdrive` shows `completed` below `source_count` with `pending+processing=0` | a file failed to upload or extract; `/status` `failed_files` + the per-file `errors` from the last `POST /index` hold the WHY | re-run `make kb-index KB=gdrive` (or `make gdrive-sync`) to re-trigger failed; `docker logs kb-openwebui` / `docker logs kb-markitdown-ocr` for the upstream cause |
 | `POST /index` returns 422 "source walk yielded 0 files" | the `./root/<name>` mount is empty/unreadable, or `KB_SOURCE_ROOT`/`dir`/`KB_MAX_SIZE`/`DEFAULT_ALLOW` exclude everything | check `make gdrive-sync` populated `./root/gdrive`; check `HOST_UID` matches the `./root` owner uid; `?force=1` proceeds with an empty manifest (drives full `cleanup` — use only to drain the KB) |
 
@@ -664,9 +657,9 @@ dependency is down.
 | `kb-bootstrap` | create a KB named `<name>`, grant public read (`user:*`) (run after `make api-keys`; idempotent; no sidecar). `KB=<name>` (default `gdrive`); with `--resolve`, paginated name→id lookup (unique-or-fail: 0 or >1 matches error). Replaces the old `gdrive-index-bootstrap` (which wrote `GDRIVE_KB_ID` to `.env.local`) |
 | `kb-public-read` | grant public read (`user:*`) on EVERY knowledge base + enable `sharing.public_knowledge` so all authenticated users read all KBs (admin). One-time backfill for an already-running stack; re-run as a safety net for KBs created outside the flows (e.g. via the OWUI UI). Idempotent |
 | `kb-status` | GET `/status` (api-gateway) for `KB=<name>` (default `gdrive`), pretty JSON (indent=2): `indexed_files` (completed only; `len == indexed_count`), `pending_files`, `failed_files` (last list), then `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`. Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
-| `kb-finalize` | finalize a drain: `REINDEX INDEX idx_document_chunk_vector` (pgvector ivfflat) + `idx_document_chunk_text_search` (GIN FTS) so freshly-embedded vectors become queryable. Polls EVERY `./root/` subdir to a global terminal state first (`pending+processing=0` for all KBs — REINDEX is instance-wide on the shared `document_chunk` table), guarded by a `flock` lock; fails loud if any KB is non-terminal. Run AFTER the drain is terminal (or use `kb-sync-finalize` / `gdrive-sync-finalize` to wait). Logs each REINDEX duration. pgvector-only — Chroma/HNSW are incremental, so it exits 0 (no-op) there. Named "finalize" not "reindex": the fresh vectors were never queryable (ivfflat folds post-build rows in only on `REINDEX`; OWUI hybrid = vector-fetch→BM25, no FTS fallback → vector=0 → hybrid=0), and to avoid collision with the gateway `reindex_all` (which re-PROCESSES files) |
-| `gdrive-sync-finalize` | one-command full pipeline for the `gdrive` KB: dispatch the gdrive async drain (`make gdrive-sync` = rclone + `POST /index?dir=gdrive`), then wait for it to terminate (poll GET `/status` to `pending+processing=0`, timeout `GDRIVE_TEST_WAIT` default 2400s), then finalize (`REINDEX` ivfflat + GIN FTS) — the "block until the gdrive KB is searchable" command. Fails loud if the drain does not terminate (do not `REINDEX` while inserts are in flight — that races the live index). `gdrive-sync` is `.PHONY` so the drain re-dispatches each invocation; `make gdrive-sync` fails fast if a drain is already in flight (`pending+processing>0`; exempt `RETRY_PENDING=1`) — `make kb-index` + raw `curl POST /index` are not guarded. pgvector-only; no-op on Chroma/HNSW |
-| `kb-sync-finalize` | generic variant of `gdrive-sync-finalize` for any `./root/` subdir: `KB=<name>` (default `gdrive`). Dispatch `make kb-sync KB=<name>` (POST `/index?dir=<name>`), wait to terminal, then finalize (`kb-finalize`). Same global-terminal + flock guard, same pgvector-only caveat. Use `gdrive-sync-finalize` for the rclone-equipped gdrive pipeline; use this for operator-supplied trees |
+| `kb-finalize` | finalize a drain: `REINDEX INDEX idx_document_chunk_vector` (pgvector ivfflat) + `idx_document_chunk_text_search` (GIN FTS) so freshly-embedded vectors become queryable. Polls EVERY `./root/` subdir to a global terminal state first (`pending+processing=0` for all KBs — REINDEX is instance-wide on the shared `document_chunk` table), guarded by a `flock` lock; fails loud if any KB is non-terminal. Run AFTER the drain is terminal (or use `kb-sync-finalize` / `gdrive-sync-finalize` to wait). Logs each REINDEX duration. pgvector is the only supported backend; it fails loud on any other `VECTOR_DB` (HNSW-style indexes are incremental, but ivfflat needs `REINDEX`). Named "finalize" not "reindex": the fresh vectors were never queryable (ivfflat folds post-build rows in only on `REINDEX`; OWUI hybrid = vector-fetch→BM25, no FTS fallback → vector=0 → hybrid=0), and to avoid collision with the gateway `reindex_all` (which re-PROCESSES files) |
+| `gdrive-sync-finalize` | one-command full pipeline for the `gdrive` KB: dispatch the gdrive async drain (`make gdrive-sync` = rclone + `POST /index?dir=gdrive`), then wait for it to terminate (poll GET `/status` to `pending+processing=0`, timeout `GDRIVE_TEST_WAIT` default 2400s), then finalize (`REINDEX` ivfflat + GIN FTS) — the "block until the gdrive KB is searchable" command. Fails loud if the drain does not terminate (do not `REINDEX` while inserts are in flight — that races the live index). `gdrive-sync` is `.PHONY` so the drain re-dispatches each invocation; `make gdrive-sync` fails fast if a drain is already in flight (`pending+processing>0`; exempt `RETRY_PENDING=1`) — `make kb-index` + raw `curl POST /index` are not guarded. pgvector-only (fails loud on any other `VECTOR_DB`) |
+| `kb-sync-finalize` | generic variant of `gdrive-sync-finalize` for any `./root/` subdir: `KB=<name>` (default `gdrive`). Dispatch `make kb-sync KB=<name>` (POST `/index?dir=<name>`), wait to terminal, then finalize (`kb-finalize`). Same global-terminal + flock guard, same pgvector-only (fails loud on any other `VECTOR_DB`) caveat. Use `gdrive-sync-finalize` for the rclone-equipped gdrive pipeline; use this for operator-supplied trees |
 | `kb-migrate-root` | ONE-TIME migration from the old `./gdrive` layout to the generic `./root/` source root: guards the gdrive drain is terminal (tries the new `dir=gdrive` shape, falls back to the old `source=gdrive`+`GDRIVE_KB_ID` shape; refuses if `/status` unreachable — `make stop` first), cross-filesystem move guard, `mv gdrive root/gdrive`, translates `gdrive-exclude.conf` into the `.kb-ignore` chain (`[*]` → `./root/.kb-ignore` globals; `[X]` → `./root/gdrive/X/.kb-ignore`), removes `GDRIVE_KB_ID` from `.env.local`, `make start`. See "Migrating to ./root" above |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
@@ -948,4 +941,3 @@ Notes:
 [mcp]: https://modelcontextprotocol.io/
 [huggingface]: https://huggingface.co/
 [nomic-embed-text]: https://huggingface.co/nomic-ai/nomic-embed-text
-[chroma]: https://www.trychroma.com/

@@ -42,9 +42,9 @@ services:
 
   postgres:
     # pgvector-enabled Postgres: the Open WebUI vector store (VECTOR_DB=pgvector).
-    # Replaces the embedded Chroma store so retrieval can use server-side BM25
-    # full-text search (to_tsvector('simple', ...) + a GIN index) next to the
-    # vector index. Open WebUI creates the extension, the document_chunk table,
+    # pgvector gives retrieval server-side BM25 full-text search
+    # (to_tsvector('simple', ...) + a GIN index) next to the vector index.
+    # Open WebUI creates the extension, the document_chunk table,
     # the vector index, and the FTS index at client init, so no init SQL is
     # needed here. This holds VECTORS ONLY; webui.db (SQLite) stays the app DB.
     image: pgvector/pgvector:${PGVECTOR_IMAGE_TAG:?PGVECTOR_IMAGE_TAG required in .env}

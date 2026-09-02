@@ -193,8 +193,6 @@ fin_out=$(make kb-finalize KB="$NAME" 2>&1) || true
 printf '%s\n' "$fin_out" | grep -E '==>|DONE|FAIL|SKIP|WARN' | tail -6
 if printf '%s\n' "$fin_out" | grep -q 'DONE  kb-finalize'; then
   pass "kb-finalize: REINDEX complete (ivfflat + GIN FTS; global-terminal guard + lock passed)"
-elif printf '%s\n' "$fin_out" | grep -q 'SKIP  VECTOR_DB='; then
-  pass "kb-finalize: SKIP (non-pgvector stack; REINDEX is a no-op on incremental indexes)"
 else
   fail "kb-finalize did not complete:"; printf '%s\n' "$fin_out" | tail -8 >&2
   finish; exit 1

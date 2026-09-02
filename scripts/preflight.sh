@@ -55,7 +55,7 @@ if [ -n "$_OCR_ENABLED_OVR" ]; then export OCR_ENABLED="$_OCR_ENABLED_OVR"; fi
 #      rejects inserts).
 # RAG_TOP_K_RERANKER must be >= KB_RETRIEVE_K_MAX or a large-k /retrieve request
 # is truncated by the reranker candidate cap.
-[ -n "${VECTOR_DB:-}" ] || fail "VECTOR_DB not set in .env (declare it in .env.template)"
+[ "${VECTOR_DB:-}" = "pgvector" ] || fail "VECTOR_DB must be pgvector in .env (got '${VECTOR_DB:-<unset>}'; Chroma was removed, pgvector is the only backend)"
 : "${PGVECTOR_USER:?PGVECTOR_USER required in .env}"
 : "${PGVECTOR_PASSWORD:?PGVECTOR_PASSWORD required in .env}"
 : "${PGVECTOR_DB:?PGVECTOR_DB required in .env}"

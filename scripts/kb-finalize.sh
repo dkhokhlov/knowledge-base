@@ -22,9 +22,11 @@
 #     compact it after the bulk load + remove FTS-index state as a variable.
 #   - Each REINDEX duration is logged (capacity-planning data).
 #
-# pgvector-only: ivfflat is the index that needs this. HNSW (pgvector) and
-# Chroma (hnswlib) are incremental and do not. Guarded on VECTOR_DB=pgvector;
-# on anything else it exits 0 with a message (a no-op, not an error).
+# pgvector-only: ivfflat is the index that needs this. HNSW (pgvector) is
+# incremental and does not. VECTOR_DB=pgvector is the only supported backend;
+# on any other value (or unset) the guard below fails loud — a silent no-op
+# would leave the drained vectors unqueryable (the exact 0-hits bug this tool
+# fixes).
 #
 # Two entry points (see Makefile):
 #   make kb-finalize            REINDEX only (assumes the drain is terminal).
@@ -69,21 +71,16 @@ for a in "$@"; do
   esac
 done
 
-# pgvector guard: ivfflat REINDEX is pgvector-specific. Chroma (hnswlib) and HNSW
-# are incremental -> a no-op here is correct, not an error. Distinguish unset (a
-# misconfiguration -> FAIL loud: a silent SKIP on a pgvector stack leaves the
-# drained vectors unqueryable, the exact 0-hits bug this tool fixes) from an
-# explicit non-pgvector value (a deliberate chroma/HNSW stack -> SKIP). VECTOR_DB
-# may be shell-sourced (not in .env on some stacks) -> source the env you use for
-# `make start`, or check the running stack: docker exec kb-openwebui printenv VECTOR_DB.
-if [ -z "${VECTOR_DB:-}" ]; then
-  echo "FAIL  VECTOR_DB not set (in .env or shell). kb-finalize needs VECTOR_DB=pgvector." >&2
+# pgvector guard: ivfflat REINDEX is pgvector-specific. VECTOR_DB=pgvector is the
+# only supported backend (Chroma removed); any other value is a misconfiguration
+# -> FAIL loud (a silent SKIP would leave the drained vectors unqueryable, the
+# exact 0-hits bug this tool fixes). VECTOR_DB may be shell-sourced (not in .env
+# on some stacks) -> source the env you use for `make start`, or check the
+# running stack: docker exec kb-openwebui printenv VECTOR_DB.
+if [ "${VECTOR_DB:-}" != "pgvector" ]; then
+  echo "FAIL  VECTOR_DB=${VECTOR_DB:-<unset>}: kb-finalize needs VECTOR_DB=pgvector (the only supported backend)." >&2
   echo "       source the env you use for 'make start', or check the running stack: docker exec ${OWUI_CONTAINER:-kb-openwebui} printenv VECTOR_DB" >&2
   exit 1
-fi
-if [ "$VECTOR_DB" != "pgvector" ]; then
-  printf 'SKIP  VECTOR_DB=%s: index is incremental (no REINDEX needed); kb-finalize is a pgvector-ivfflat step.\n' "$VECTOR_DB"
-  exit 0
 fi
 
 : "${PGVECTOR_USER:?FAIL  PGVECTOR_USER not set in .env (run: make bootstrap)}"

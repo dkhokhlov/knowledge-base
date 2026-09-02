@@ -314,7 +314,8 @@ def upload_file(admin_key, kb_id, file_hash, directory_id, filename, data_bytes,
     """POST /api/v1/files/ multipart: field 'file' (filename, raw bytes) + field
     'metadata' (JSON {knowledge_id, file_hash, directory_id, [mtime], [gdrive]}).
     `mtime` (optional, ISO-8601 UTC source mtime) is stored into File.meta.data so
-    the OWUI chunk-metadata patch can propagate it into Chroma. `gdrive_meta`
+    the OWUI chunk-metadata patch can propagate it into the pgvector
+    document_chunk. `gdrive_meta`
     (optional, the parsed `<file>.meta.json` sidecar from scripts/gdrive-meta.py)
     is stored under File.meta.data.gdrive as the file-level Drive record
     (description, labels, grounded, approval, comments). OWUI persists the

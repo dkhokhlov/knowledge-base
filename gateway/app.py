@@ -1107,8 +1107,8 @@ def _flatten_hits(d):
     identified by metadata file_id + start_index. Flatten to 8-key hit dicts:
     {distance, file, file_id, page, start_index, source, mtime, text}. Absent
     metadata -> None / "" (the wrapper joins gdrive per file_id client-side, as
-    today; the gateway does not add gdrive here). Same shape the skill wrapper's
-    flatten_chroma produced, so existing consumers do not break."""
+    today; the gateway does not add gdrive here). The 8-key shape is the stable
+    contract existing consumers depend on."""
     docs = d.get("documents", [[]])
     dists = d.get("distances", [[]])
     metas = d.get("metadatas", [[]])
