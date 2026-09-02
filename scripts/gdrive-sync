@@ -621,7 +621,7 @@ while IFS=$'\t' read -r drive_id drive_name; do
     # table imprecision, same as the old --exclude-from path).
     remote_sorted=$(LC_ALL=C sort -u <<<"$remote_listing")
     allowed_sorted=$(LC_ALL=C sort -u <"$tmp_filesfrom")
-    denied_listing=$(comm -23 <(printf '%s\n' "$remote_sorted") <(printf '%s\n' "$allowed_sorted"))
+    denied_listing=$(LC_ALL=C comm -23 <(printf '%s\n' "$remote_sorted") <(printf '%s\n' "$allowed_sorted"))
     drive_excl_count=0
     while IFS= read -r rel; do
         [[ -z "$rel" ]] && continue
@@ -646,7 +646,7 @@ while IFS=$'\t' read -r drive_id drive_name; do
             -not -name '.*' \
             -printf '%P\n' | LC_ALL=C sort -u)
         if [[ -n "$local_listing" ]]; then
-            local_only=$(comm -23 \
+            local_only=$(LC_ALL=C comm -23 \
                 <(printf '%s\n' "$local_listing") \
                 <(printf '%s\n' "$remote_sorted"))
             if [[ -n "$local_only" ]]; then
