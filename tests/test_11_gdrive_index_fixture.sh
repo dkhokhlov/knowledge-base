@@ -274,4 +274,72 @@ else
   exit 1
 fi
 
+# --- patch 10 BM25 arm (ParadeDB pg_search ||| + pdb.score) ------------------
+# Direct psql probes of the patch-10 FTS arm, scoped to the temp fixture KB
+# collection (collection_name = KB_ID). The ||| operator tokenizes its RHS
+# (multi-term OR, colon/dash-safe); pdb.score is real BM25. These prove the
+# arm works on indexed content (the kb-bm25-check gate covers the same probes
+# live; this is the deterministic iso verification).
+section "BM25 arm (pg_search ||| + pdb.score)"
+PG_CTN="${POSTGRES_CONTAINER:?POSTGRES_CONTAINER not set (iso fixture must provide it)}"
+bm25_count() {  # print "<count|ERR> <rc>" for a ||| count scoped to KB_ID
+  local cnt rc
+  # NOTE: the SQL goes via stdin heredoc, not -c. psql does NOT interpolate
+  # :'var' in a -c argument (documented: no variable substitution in -c); it
+  # DOES on stdin. A bare -c "SELECT ... :'q'" sends the literal : to the
+  # server -> syntax error. -i keeps stdin open for the heredoc.
+  cnt=$(docker exec -i "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" \
+    -v ON_ERROR_STOP=1 -tA -v kb_id="$KB_ID" -v q="$1" 2>/dev/null <<'SQL'
+SELECT count(*) FROM document_chunk WHERE collection_name = :'kb_id' AND text ||| :'q'
+SQL
+)
+  rc=$?
+  printf '%s %s' "${cnt:-ERR}" "$rc"
+}
+# extension + index exist
+ext=$(docker exec "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" -tA -c \
+  "SELECT count(*) FROM pg_extension WHERE extname='pg_search'" 2>/dev/null)
+if [ "${ext:-0}" = "1" ]; then pass "pg_search extension installed"; else
+  fail "pg_search extension missing (count=${ext:-0}) — run make kb-bm25-init"; finish; exit 1; fi
+idx=$(docker exec "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" -tA -c \
+  "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND indexname='idx_document_chunk_bm25'" 2>/dev/null)
+if [ "${idx:-0}" = "1" ]; then pass "idx_document_chunk_bm25 present"; else
+  fail "idx_document_chunk_bm25 missing — run make kb-bm25-init"; finish; exit 1; fi
+# multi-term ||| returns >0 (the marker is in every fixture file -> tokenized OR matches)
+read -r mt_cnt mt_rc < <(bm25_count "$MARKER")
+if [ "${mt_rc:-1}" = "0" ] && [ "${mt_cnt:-0}" -gt 0 ] 2>/dev/null; then
+  pass "||| multi-term '${MARKER}' -> ${mt_cnt} hit(s)"
+else
+  fail "||| multi-term '${MARKER}' -> ${mt_cnt} (rc=${mt_rc}) — expected >0 on a completed fixture KB"
+  finish; exit 1
+fi
+# pdb.score on the ranking path (the production ORDER BY); max score must be > 0
+score=$(docker exec -i "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" -tA \
+  -v kb_id="$KB_ID" -v q="$MARKER" 2>/dev/null <<'SQL'
+SELECT max(s) FROM (SELECT pdb.score(id) AS s FROM document_chunk WHERE collection_name = :'kb_id' AND text ||| :'q' ORDER BY pdb.score(id) DESC LIMIT 5) t
+SQL
+)
+if [ -n "${score:-}" ] && [ "${score:-0}" != "0" ] 2>/dev/null; then
+  pass "pdb.score ranking path -> max score ${score}"
+else
+  fail "pdb.score ranking path returned 0/empty ('${score:-}') — the BM25 index is not scoring"
+  finish; exit 1
+fi
+# colon/dash-safe: a query with a colon must NOT error (the C1 silent-zero class for |||)
+read -r col_cnt col_rc < <(bm25_count "error: ${MARKER}")
+if [ "${col_rc:-1}" = "0" ]; then
+  pass "||| colon-safe 'error: ${MARKER}' -> ${col_cnt} hit(s) (no error)"
+else
+  fail "||| colon-safe query errored (rc=${col_rc}) — the C1 silent-zero class"
+  finish; exit 1
+fi
+# zero-token: ??? -> 0 rows, no error
+read -r z_cnt z_rc < <(bm25_count '???')
+if [ "${z_rc:-1}" = "0" ] && [ "${z_cnt:-0}" = "0" ] 2>/dev/null; then
+  pass "||| zero-token '???' -> 0 hit(s) (no error)"
+else
+  fail "||| zero-token '???' -> ${z_cnt} (rc=${z_rc}) — expected 0 rows, no error"
+  finish; exit 1
+fi
+
 finish

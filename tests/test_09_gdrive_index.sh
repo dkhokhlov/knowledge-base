@@ -236,23 +236,23 @@ else
   exit 1
 fi
 
-# --- REINDEX after the bulk drain (refresh ivfflat vector + GIN FTS) ----------
-# The gdrive drain bulk-inserted rows AFTER these indexes were built.
+# --- REINDEX after the bulk drain (refresh ivfflat vector) -------------------
+# The gdrive drain bulk-inserted rows AFTER the ivfflat index was built.
 #   - ivfflat (idx_document_chunk_vector): builds its inverted lists at CREATE
 #     INDEX time and folds post-build rows in only on REINDEX, so the freshly
 #     drained vectors are invisible to vector search until now. OWUI hybrid is
 #     vector-fetch -> BM25 rerank (no independent FTS fallback), so vector=0 ->
 #     hybrid=0. This was the real cause of a prior 0-hits: /status showed
 #     completed (vectors written) but the index was not refreshed.
-#   - GIN FTS (idx_document_chunk_text_search, to_tsvector('simple', text)): GIN
-#     is incremental (queryable without REINDEX) but is REINDEXed too to compact
-#     it after the bulk load + remove FTS-index state as a variable.
-# This mirrors the manual REINDEX done on the live stack (Phase-1). Run after
-# /status is terminal (all vectors written), before the semantic search. Log
-# each duration (capacity-planning data for the at-scale corpus). POSTGRES_-
-# CONTAINER is iso-fixture-provided; :? (not :- kb-postgres) so a missing var
-# fails loud instead of touching the LIVE stack.
-section "REINDEX after bulk drain (ivfflat vector + GIN FTS)"
+# The GIN FTS index (idx_document_chunk_text_search) was DROPPED by patch 10
+# (the old plainto_tsquery arm it served is gone; the BM25 arm uses
+# idx_document_chunk_bm25, which is incremental -- no REINDEX needed after a
+# drain). ivfflat is the only index that needs this. Mirrors the manual REINDEX
+# done on the live stack (Phase-1). Run after /status is terminal (all vectors
+# written), before the semantic search. Log the duration (capacity-planning data
+# for the at-scale corpus). POSTGRES_CONTAINER is iso-fixture-provided; :? (not
+# :- kb-postgres) so a missing var fails loud instead of touching the LIVE stack.
+section "REINDEX after bulk drain (ivfflat vector)"
 PG_CTN="${POSTGRES_CONTAINER:?POSTGRES_CONTAINER not set (iso fixture must provide it)}"
 reindex_one() {  # echo "<seconds> <rc>" for REINDEX INDEX $1
   local idx="$1" t0 t1 rc
@@ -269,13 +269,18 @@ if [ "${vec_rc:-1}" -ne 0 ]; then
   finish
   exit 1
 fi
-read -r fts_s fts_rc < <(reindex_one idx_document_chunk_text_search)
-if [ "${fts_rc:-1}" -ne 0 ]; then
-  fail "REINDEX idx_document_chunk_text_search failed (rc=${fts_rc}, postgres=${PG_CTN})"
-  finish
-  exit 1
-fi
-pass "REINDEX done: ivfflat vector ${vec_s}s + GIN FTS ${fts_s}s (drained vectors now queryable)"
+pass "REINDEX done: ivfflat vector ${vec_s}s (drained vectors now queryable)"
+
+# --- patch 10 BM25 arm: extension + index exist (deterministic) --------------
+section "BM25 arm (pg_search extension + index)"
+ext=$(docker exec "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" -tA -c \
+  "SELECT count(*) FROM pg_extension WHERE extname='pg_search'" 2>/dev/null)
+if [ "${ext:-0}" = "1" ]; then pass "pg_search extension installed"; else
+  fail "pg_search extension missing (count=${ext:-0}) — run make kb-bm25-init"; finish; exit 1; fi
+idx=$(docker exec "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" -tA -c \
+  "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND indexname='idx_document_chunk_bm25'" 2>/dev/null)
+if [ "${idx:-0}" = "1" ]; then pass "idx_document_chunk_bm25 present"; else
+  fail "idx_document_chunk_bm25 missing — run make kb-bm25-init"; finish; exit 1; fi
 
 # --- deterministic semantic search (vectors written + searchable) ------------
 # The REINDEX above made the drained vectors queryable (the real 0-hits fix).
@@ -358,6 +363,137 @@ print(len(docs))
     fail "search q=\"$q_phrase\" (file ${src_fid}) -> 0 hits (completed file has vectors but its content phrase retrieved none — check embedding/RAG config)"
     finish
     exit 1
+  fi
+fi
+
+# --- patch 10 BM25 arm: ||| + pdb.score probes + sort-order-per-mode ---------
+# These need a corpus-guaranteed query (the mined q_phrase). SKIPped above when
+# no phrase was mined -- gate the whole block on q_phrase so it SKIPs the same
+# way (extension+index existence already asserted above; this is the ranking +
+# sort-order proof). M9: q_phrase is corpus-mined at runtime, NOT a real Drive
+# filename/id -- no PII. The sort-order comparison grounds the Step 4 SKILL
+# guidance: lexical = pure BM25/IDF (rare tokens rank high), hybrid = RRF.
+if [ -n "$q_phrase" ]; then
+  section "BM25 arm (pg_search ||| + pdb.score + sort-order-per-mode)"
+  # A single rare token (first substantive word of q_phrase) for the direct-psql
+  # probes -- guaranteed in the corpus (mined from it).
+  q_token=$(printf '%s' "$q_phrase" | python3 -c '
+import sys, re
+stop = {"the","a","an","in","on","of","and","to","is","are","for","with","or","as",
+        "at","by","be","this","that","it","was","were","from","its","their","which",
+        "not","but","has","have","had","will","can","may","we","you","they","he","she"}
+ws = re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", sys.stdin.read())
+for w in ws:
+    if w.lower() not in stop and len(w) >= 4:
+        print(w); break
+' 2>/dev/null)
+  bm25_count() {  # print "<count|ERR> <rc>" for a ||| count scoped to GDRIVE_KB_ID
+    local cnt rc
+    # SQL via stdin heredoc (NOT -c): psql does not interpolate :'var' in a -c
+    # argument; it does on stdin. -i keeps stdin open for the heredoc.
+    cnt=$(docker exec -i "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" \
+      -v ON_ERROR_STOP=1 -tA -v kb_id="$GDRIVE_KB_ID" -v q="$1" 2>/dev/null <<'SQL'
+SELECT count(*) FROM document_chunk WHERE collection_name = :'kb_id' AND text ||| :'q'
+SQL
+)
+    rc=$?
+    printf '%s %s' "${cnt:-ERR}" "$rc"
+  }
+  # (c) ||| multi-term returns >0 (the mined phrase tokens are in the corpus)
+  read -r mt_cnt mt_rc < <(bm25_count "$q_phrase")
+  if [ "${mt_rc:-1}" = "0" ] && [ "${mt_cnt:-0}" -gt 0 ] 2>/dev/null; then
+    pass "||| multi-term (corpus phrase) -> ${mt_cnt} hit(s)"
+  else
+    fail "||| multi-term (corpus phrase) -> ${mt_cnt} (rc=${mt_rc}) -- expected >0 (phrase is corpus-mined)"
+    finish; exit 1
+  fi
+  # (c cont) pdb.score on the ranking path (the production ORDER BY); max > 0
+  score=$(docker exec -i "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" -tA \
+    -v kb_id="$GDRIVE_KB_ID" -v q="$q_phrase" 2>/dev/null <<'SQL'
+SELECT max(s) FROM (SELECT pdb.score(id) AS s FROM document_chunk WHERE collection_name = :'kb_id' AND text ||| :'q' ORDER BY pdb.score(id) DESC LIMIT 5) t
+SQL
+)
+  if [ -n "${score:-}" ] && [ "${score:-0}" != "0" ] 2>/dev/null; then
+    pass "pdb.score ranking path -> max score ${score}"
+  else
+    fail "pdb.score ranking path returned 0/empty ('${score:-}') -- the BM25 index is not scoring"
+    finish; exit 1
+  fi
+  # (d) colon-safe: a query with a colon must NOT error (the C1 silent-zero class)
+  read -r col_cnt col_rc < <(bm25_count "error: ${q_token}")
+  if [ "${col_rc:-1}" = "0" ]; then
+    pass "||| colon-safe 'error: <token>' -> ${col_cnt} hit(s) (no error)"
+  else
+    fail "||| colon-safe query errored (rc=${col_rc}) -- the C1 silent-zero class"
+    finish; exit 1
+  fi
+  # (d cont) zero-token: ??? -> 0 rows, no error
+  read -r z_cnt z_rc < <(bm25_count '???')
+  if [ "${z_rc:-1}" = "0" ] && [ "${z_cnt:-0}" = "0" ] 2>/dev/null; then
+    pass "||| zero-token '???' -> 0 hit(s) (no error)"
+  else
+    fail "||| zero-token '???' -> ${z_cnt} (rc=${z_rc}) -- expected 0 rows, no error"
+    finish; exit 1
+  fi
+  # (e/f/g) sort-order-per-mode via gateway /retrieve (same query, 3 modes) ----
+  # lexical (bm25_weight=1.0, vector arm skipped) = pure BM25 (pdb.score DESC,
+  # IDF-driven); hybrid (0.5) = RRF fusion (BM25 score value discarded, ordinal
+  # rank only); vector = cosine. Compare the ordered hit-text lists. Grounds the
+  # SKILL guidance: lexical = BM25/IDF precision, hybrid = RRF conceptual recall.
+  retrieve_order() {  # print the ordered hit texts (first 120 chars each), newline-joined
+    local mode="$1" q="$2" bf
+    bf="$(mktemp)"
+    curl -s -o "$bf" -w '' -X POST "$O/retrieve" "${RD[@]}" -H 'Content-Type: application/json' \
+      -d "{\"kb_id\":\"${GDRIVE_KB_ID}\",\"query\":$(python3 -c 'import sys,json;print(json.dumps(sys.argv[1]))' "$q"),\"k\":10,\"mode\":\"${mode}\"}" 2>/dev/null
+    python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); sys.exit(0)
+out = []
+for h in (d.get("hits") or []):
+    t = ((h or {}).get("text") or "").replace("\n", " ")[:120]
+    out.append(t)
+print("\n".join(out))
+' < "$bf" 2>/dev/null
+    rm -f "$bf"
+  }
+  lex=$(retrieve_order lexical "$q_phrase")
+  hyb=$(retrieve_order hybrid  "$q_phrase")
+  vec=$(retrieve_order vector  "$q_phrase")
+  # (e) lexical rank-0 contains >=2 of the 5 rare phrase words (BM25/IDF drives
+  # the rare-token chunk to #1). Robust to truncation + which chunk is the source.
+  lex0_ok=$(printf '%s\t%s' "$lex" "$q_phrase" | python3 -c '
+import sys
+line = sys.stdin.read()
+lex_text, phrase = line.split("\t", 1)
+rank0 = (lex_text.split("\n") or [""])[0].lower()
+ws = [w.lower() for w in phrase.split() if len(w) >= 4]
+n = sum(1 for w in ws if w and w in rank0)
+print("OK" if n >= 2 else "FAIL")
+' 2>/dev/null || echo FAIL)
+  if [ "$lex0_ok" = "OK" ]; then
+    pass "lexical rank-0 contains >=2 rare phrase words (BM25/IDF precision)"
+  else
+    fail "lexical rank-0 missing the rare phrase words (BM25 not driving the order)"
+    printf '  lexical rank-0: %.120s\n' "$lex"
+    finish; exit 1
+  fi
+  # (f) lexical order != vector order (BM25 vs cosine -- different algorithms)
+  if [ -n "$lex" ] && [ "$lex" != "$vec" ]; then
+    pass "lexical order != vector order (pure BM25 vs cosine)"
+  else
+    fail "lexical order == vector order (expected divergence: BM25 vs cosine)"
+    finish; exit 1
+  fi
+  # (g) lexical order != hybrid order (pure BM25 vs RRF -- the score value is
+  # discarded by RRF, only ordinal rank feeds fusion)
+  if [ -n "$lex" ] && [ "$lex" != "$hyb" ]; then
+    pass "lexical order != hybrid order (pure BM25 vs RRF)"
+  else
+    fail "lexical order == hybrid order (expected divergence: BM25 vs RRF)"
+    finish; exit 1
   fi
 fi
 

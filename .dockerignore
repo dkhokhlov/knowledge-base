@@ -1,16 +1,16 @@
 # Repo-root .dockerignore. Applies ONLY to builds whose context is the repo
 # root (`.`) -- currently just api-gateway (compose.yml: context: .). The
-# open-webui + markitdown builds use their own context dirs (open-webui/,
-# markitdown/) + their own (absent) .dockerignore, so this file does not affect
-# them.
+# open-webui + markitdown builds use their own context dirs (docker/open-webui/,
+# docker/markitdown/) + their own (absent) .dockerignore, so this file does not
+# affect them.
 #
 # Exclude everything, then allow only the api-gateway build inputs: the gateway
 # sources + the shared matcher scripts/kb_ignore.py. Keeps the context tiny
-# (gateway/ ~350K + one file) instead of sending root/ data/ .backups/ (~10G).
+# (docker/gateway/ ~350K + one file) instead of sending root/ data/ .backups/ (~10G).
 *
-!gateway/
-!gateway/**
+!docker/gateway/
+!docker/gateway/**
 !scripts/kb_ignore.py
-# Re-exclude bytecode caches (last match wins over the !gateway/** allow).
+# Re-exclude bytecode caches (last match wins over the !docker/gateway/** allow).
 **/__pycache__/
 **/__pycache__

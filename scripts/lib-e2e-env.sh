@@ -301,23 +301,28 @@ e2e_provision() {
   echo "stack healthy ($h/health)"
   make admin-signup || return 1
   make api-keys || return 1
-  # Match `make provision` steps 6-7 so the iso env is prod-exact (the ONLY diffs
+  # Match `make provision` steps 6-8 so the iso env is prod-exact (the ONLY diffs
   # from prod are KB_HOST + the ephemeral KB_API_KEY): projects-bootstrap enables
   # workspace.knowledge + sharing.public_knowledge (test_05 user-key KB create
   # 401s without it), rag-config sets the strict-grounding RAG template + syncs
-  # rag.ollama.base_url. Both hit the OWUI admin API via Caddy at KB_HOST (not
-  # the api-gateway), so the stack-healthy wait above covers them. kb-bootstrap is
+  # rag.ollama.base_url, kb-bm25-init creates the ParadeDB pg_search extension +
+  # BM25 index the patch-10 FTS arm queries (without it the ||| arm errors ->
+  # langchain per-query full-collection fallback; document_chunk exists by the
+  # /health wait). Both hit the OWUI admin API via Caddy at KB_HOST (not the
+  # api-gateway), so the stack-healthy wait above covers them. kb-bootstrap is
   # deliberately excluded here: the at-scale path runs it (needs the gdrive KB
   # before gdrive-sync); the deterministic path uses synthetic fixtures only.
   make projects-bootstrap || return 1
   make rag-config || return 1
+  make kb-bm25-init || return 1
   e2e_ephemeral_user || return 1
 }
 
 # AT-SCALE provision of the isolated stack: the comprehensive path
-# (re-bootstrap + [OCR model pull] + preflight + image rebuild + start + wait
-# healthy + admin-signup + api-keys + ephemeral user + projects-bootstrap +
-# rag-config + kb-bootstrap KB=gdrive + gdrive-sync + make ci). This is the
+# (re-bootstrap + [OCR model pull] + preflight + image rebuild (api-gateway +
+# postgres + openwebui + [markitdown-ocr]) + start + wait healthy + admin-signup
+# + api-keys + ephemeral user + projects-bootstrap + rag-config + kb-bm25-init +
+# kb-bootstrap KB=gdrive + gdrive-sync + make ci). This is the
 # at-scale variant of e2e_provision: it rebuilds the locally-built images and
 # syncs the REAL gdrive corpus (rclone). test_09_gdrive_index (the comprehensive
 # at-scale e2e) uses it via the iso_env_named(..., at_scale=True) fixture.
@@ -361,8 +366,12 @@ e2e_provision_at_scale() {
   # Rebuild locally-built images whose code changed since the last run (`up -d`
   # without --build reuses the existing image). api-gateway is stdlib-only
   # (fast). markitdown-ocr is rebuilt (gated on OCR_ENABLED) so the at-scale run
-  # uses current OCR code.
+  # uses current OCR code. postgres (kb-postgres: pg_search baked in; tag encodes
+  # PG_SEARCH_VERSION) + openwebui (patch-10 BM25 FTS arm; tag encodes the
+  # patch-suffix) are rebuilt so the at-scale run uses current code, not a stale
+  # image from a prior run.
   docker compose build api-gateway || return 1
+  docker compose build postgres openwebui || return 1
   if [ "${OCR_ENABLED:-true}" = "true" ]; then
     docker compose build markitdown-ocr || return 1
   fi
@@ -379,6 +388,7 @@ e2e_provision_at_scale() {
   e2e_ephemeral_user || return 1
   make projects-bootstrap || return 1
   make rag-config || return 1
+  make kb-bm25-init || return 1
   make kb-bootstrap KB=gdrive || return 1
   make gdrive-sync || return 1
   echo "==> make ci (provision the clone .venv for the in-clone suite)"

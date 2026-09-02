@@ -1,6 +1,6 @@
-# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete + offset-aware chunking + resilient terminal status + per-request hybrid mode + top-k preservation + skip-cosine-reranker
+# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete + offset-aware chunking + resilient terminal status + per-request hybrid mode + top-k preservation + skip-cosine-reranker + ParadeDB BM25 FTS arm
 
-This directory builds a thin-overlay custom Open WebUI image that applies nine
+This directory builds a thin-overlay custom Open WebUI image that applies ten
 build-time patches to the backend. Patches 1–2 target the **2b churn**: the
 gdrive-indexer (oikb) re-uploading files every sync cycle. Patch 3 propagates
 the source file mtime into chunk metadata so a retrieve hit can report it.
@@ -15,7 +15,10 @@ Patches 7–9 fix retrieval ranking: patch 7 honors a per-request `hybrid` +
 `hybrid_bm25_weight` over the global (so `mode=vector`/`lexical` work), patch 8
 stops the reranker candidate cap truncating below the requested `k`, and patch
 9 stops the cosine-reranker fallback re-burying exact FTS/BM25 matches when no
-real reranker is configured.
+real reranker is configured. Patch 10 replaces the `plainto_tsquery` AND-every-
+token FTS arm (multi-term → 0 hits; `ts_rank_cd` = no IDF/length-norm) with
+ParadeDB `pg_search` real BM25 (`text ||| :query` tokenized OR + `pdb.score`),
+fixing the hybrid collapse-to-vector on multi-term technical queries.
 
 - **Patch 1 — path-aware dedup hash** (`retrieval.py`): OWUI rejected same-content
   files at different paths as `DUPLICATE_CONTENT`; oikb re-uploaded them every cycle.
@@ -141,9 +144,9 @@ nine apply scripts against its source (see Rebase procedure).
 1. Pick the new base digest:
    `docker image inspect ghcr.io/open-webui/open-webui:<tag> --format '{{index .RepoDigests 0}}'`
 2. Extract the patched files (`routers/retrieval.py`, `routers/files.py`,
-   `retrieval/utils.py`, `models/files.py`):
-   `docker create --name x <new-ref> && docker cp x:/app/backend/open_webui/routers/retrieval.py /tmp/r.py && docker cp x:/app/backend/open_webui/routers/files.py /tmp/f.py && docker cp x:/app/backend/open_webui/retrieval/utils.py /tmp/u.py && docker cp x:/app/backend/open_webui/models/files.py /tmp/mf.py && docker rm x`
-3. Test all nine apply scripts against the extracted files (in build order):
+   `retrieval/utils.py`, `retrieval/vector/dbs/pgvector.py`, `models/files.py`):
+   `docker create --name x <new-ref> && docker cp x:/app/backend/open_webui/routers/retrieval.py /tmp/r.py && docker cp x:/app/backend/open_webui/routers/files.py /tmp/f.py && docker cp x:/app/backend/open_webui/retrieval/utils.py /tmp/u.py && docker cp x:/app/backend/open_webui/retrieval/vector/dbs/pgvector.py /tmp/pg.py && docker cp x:/app/backend/open_webui/models/files.py /tmp/mf.py && docker rm x`
+3. Test all ten apply scripts against the extracted files (in build order):
    `OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_path_hash.py`
    `OWUI_FILES_PY=/tmp/f.py python3 open-webui/apply_upload_idempotency.py`
    `OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_mtime_to_chunks.py`
@@ -153,7 +156,8 @@ nine apply scripts against its source (see Rebase procedure).
    `OWUI_UTILS_PY=/tmp/u.py OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_query_mode.py`
    `OWUI_UTILS_PY=/tmp/u.py OWUI_RETRIEVAL_PY=/tmp/r.py python3 open-webui/apply_query_top_k.py`
    `OWUI_UTILS_PY=/tmp/u.py python3 open-webui/apply_skip_cosine_reranker.py`
-   - If all print `OK ...` and `python3 -m py_compile /tmp/r.py /tmp/f.py /tmp/u.py /tmp/mf.py`
+   `OWUI_PGVECTOR_PY=/tmp/pg.py python3 open-webui/apply_bm25_search.py`
+   - If all print `OK ...` and `python3 -m py_compile /tmp/r.py /tmp/f.py /tmp/u.py /tmp/pg.py /tmp/mf.py`
      passes → the anchors still match; bump `OPENWEBUI_BASE_DIGEST` in
      `Dockerfile`, rebuild.
    - If any fails (`expected exactly 1 occurrence ...`) → that anchor
@@ -1121,3 +1125,171 @@ Routing logic only; no chunk/embedding change. Takes effect on rebuild + restart
 With `RAG_RERANKING_ENGINE=""` (the default), retrieval now returns the
 RRF-fused (hybrid/lexical) or cosine-distance (vector) order the upstream search
 produced — no extra embedding pass, no re-burying of exact matches.
+
+---
+
+# Patch 10 — ParadeDB BM25 FTS arm (`retrieval/vector/dbs/pgvector.py`)
+
+## Problem (patch 10)
+
+The FTS arm of `hybrid_search` built its query with
+`plainto_tsquery('simple', :query)` — PostgreSQL **ANDs every token**, so a
+multi-term query (`rotating_thread DMA_WRR_VEC CAP_ENGAGE`) returns **0 rows**.
+With the FTS arm empty, hybrid collapses to the vector arm alone (RRF
+`0.5/(rank+60)`, pure-vector order) — the exact technical multi-term queries the
+`/kb` skill steers agents toward return nothing lexical. It scored with
+`ts_rank_cd` (cover-density rank) — **no IDF, no length normalization**; not real
+BM25, so common terms swamped rare identifiers even when the AND did not zero
+the result.
+
+## Fix (patch 10)
+
+Replace `plainto_tsquery` + `ts_rank_cd` + `@@` with ParadeDB `pg_search`:
+
+```sql
+SELECT document_chunk.id AS id, document_chunk.text AS text,
+       document_chunk.vmetadata AS vmetadata,
+       pdb.score(document_chunk.id) AS rank
+FROM document_chunk
+WHERE document_chunk.collection_name = :collection_name
+  AND document_chunk.text ||| :query
+ORDER BY pdb.score(document_chunk.id) DESC
+LIMIT :limit
+```
+
+- `text ||| :query` is the **match-any OR** operator. It **tokenizes its RHS**
+  (no Tantivy-DSL parsing), so a bare multi-term query ORs every token (the
+  recall fix) and a natural-language query cannot misparse as query syntax
+  (`error: DMA_WRR_VEC` ORs `error`/`dma`/`wrr`/`vec` → rows, no silent zero).
+  Colon/dash/quote-safe — the C1 differential (below).
+- `pdb.score(id)` is **real BM25** (IDF + length norm). The value is used for
+  `ORDER BY` + psql probes only; **RRF fusion discards it** (`merge_hybrid_
+  search_results` reads only ordinal rank), so hybrid order = RRF, not BM25 raw.
+- **One static SQL serves both arms.** Hybrid (`bm25_weight=0.5`, global) and
+  lexical (`bm25_weight=1.0`, the gateway `mode=lexical`) reach the same block;
+  the mode difference is the downstream ORDER, not this SQL. At `bm25_weight=1.0`
+  (`vector_weight = 1.0 - 1.0 = 0`), the vector arm is skipped
+  (`if vector_weight > 0 and vectors:`), so lexical = pure BM25 order
+  (single-arm RRF preserves it). Hybrid (`0.5`) = RRF fusion of BM25 + vector.
+- `LIMIT :limit` unchanged (no bump — a larger LIMIT defeats ParadeDB TopN
+  pushdown). The outer guard `if bm25_weight > 0 and query and query.strip():`,
+  `fts_results`, `self.session.rollback()`, `merge_hybrid_search_results`, and
+  the trailing `except Exception → return None` are all preserved.
+
+## Why no Lucene DSL in patch 10 (C1)
+
+`paradedb.parse_with_field('text', :query, lenient => true)` was the lexical-arm
+DSL candidate. Verified empirically against the pinned `pg_search` 0.25.6:
+`lenient` means "drop what doesn't parse, no error" — a `term:` prefix is
+consumed as an unknown field name and the clause (incl. the next token) is
+discarded; a leading `-` becomes must-not. So `DMA_WRR_VEC: CAP_ENGAGE` and
+`-capsule scheduler` return **0 hits, no error** — re-creating the silent-zero
+on the exact technical queries (`:`, leading `-`) common in the corpus.
+(`lenient => false` raises; the only two states are loud error or silent zero.)
+→ DSL deferred to **patch 11** as an explicit opt-in mode where the agent is
+responsible for quoting/escaping. Patch 10's `|||` is the safe recall default.
+
+## The BM25 index (operator script, NOT OWUI init)
+
+A `USING bm25` index is required for `|||` / `pdb.score` — without it every
+query errors (`document_chunk does not contain a USING bm25 index`) → caught by
+`hybrid_search`'s `except → return None` → silent langchain
+`BM25Retriever.from_texts` fallback (a per-request full-collection load + in-
+process BM25 under the 60s timeout). So the index is a **release gate**, not a
+nicety.
+
+`scripts/kb-bm25-init.sh` (idempotent, container-targeted via
+`${POSTGRES_CONTAINER:-kb-postgres}`) creates:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;      -- pg_search depends on vector
+CREATE EXTENSION IF NOT EXISTS pg_search;
+CREATE INDEX IF NOT EXISTS idx_document_chunk_bm25
+  ON document_chunk USING bm25 (id, (text::pdb.simple), (collection_name::pdb.literal))
+  WITH (key_field='id');
+DROP INDEX IF EXISTS idx_document_chunk_text_search;  -- dead GIN FTS index (Site 2)
+```
+
+- `(text::pdb.simple)` — the tokenizer; splits `DMA_WRR_VEC` → `dma`/`wrr`/`vec`.
+- `(collection_name::pdb.literal)` — exact-match fast field → per-collection `=`
+  pushes into the BM25 scan (verified `TopKScanExecState` / `TopK Limit`).
+- `key_field='id'` — required for `pdb.score(id)`.
+- `vmetadata` is **NOT indexed** → no metadata leak via a `field:` DSL clause.
+- ONE index serves `|||` (and the future patch-11 DSL). The index is
+  **incremental** — no REINDEX / finalize needed after a bulk drain (unlike
+  ivfflat, which still needs its REINDEX — `kb-finalize.sh` keeps that).
+- It is created by the operator script, **not** at OWUI init: `__init__` runs
+  `Base.metadata.create_all` + `_ensure_vector_index` in one transaction with
+  `except: rollback; raise`, so an extension/index failure there would take the
+  whole vector client down. Wired into `make provision` + both e2e provision
+  paths (`scripts/lib-e2e-env.sh`) — an index-less provision silently degrades
+  retrieval.
+- `pdb.*` (v2, non-deprecated) confirmed in 0.25.6: `pdb.parse`,
+  `pdb.parse_with_field`, `pdb.score` (alongside legacy `paradedb.*`).
+
+## What patch 10 changes (2 sites in `pgvector.py`)
+
+`apply_bm25_search.py` does two targeted replacements, each asserting the anchor
+occurs exactly once (fail loud on drift):
+
+- **Site 1** — the `plainto_tsquery` / `ts_rank_cd` / `@@` FTS block → the `|||`
+  + `pdb.score` block above.
+- **Site 2** — removes the `self._ensure_text_search_index()` call from
+  `__init__`. That method created the GIN index
+  `idx_document_chunk_text_search` — the ONLY user was the old
+  `to_tsvector @@ plainto_tsquery` query (Site 1). With Site 1 gone it is dead,
+  but OWUI init re-ran `CREATE INDEX IF NOT EXISTS` on every start (GIN is slow
+  to update during a 9703-chunk drain) + it was REINDEXed by `kb-finalize`.
+  Site 2 stops its creation; `kb-bm25-init` `DROP INDEX IF EXISTS` is the one-
+  time live cleanup. The method body is left in place (unused dead code — do not
+  delete unless asked). No extension/index creation is added to OWUI init.
+
+## Dead GIN index removal (M3)
+
+The GIN FTS index `idx_document_chunk_text_search` is dropped across the stack:
+Site 2 removes its creation; `kb-bm25-init` `DROP INDEX IF EXISTS` (one-time
+live cleanup, idempotent); `kb-finalize.sh` + `tests/test_09_gdrive_index.sh` +
+`docs/operations.md` drop the GIN REINDEX. The ivfflat
+`idx_document_chunk_vector` REINDEX **stays** in all three (still required after
+a bulk drain — vector=0 → hybrid=0 without it). Rollback self-heals: the
+reverted stock image re-creates + uses the GIN index.
+
+## Release gate (patch 10)
+
+`scripts/kb_check.py` `--bm25-gate` (wired to `make kb-bm25-check`) runs five
+probes via the vector store — `pg_extension extname='pg_search'` = 1;
+`idx_document_chunk_bm25` exists; the **ranking-path** query
+(`SELECT id, pdb.score(id) ... WHERE collection_name=:c AND text ||| :q ORDER BY
+pdb.score(id) DESC LIMIT 5`) executes without error; a **colon-safe** query
+(`text ||| 'error: x'`) executes without error; a **zero-token** query
+(`text ||| '???'`) → 0, no error. This is the only detector for the silent-
+zero / silent-langchain-fallback class (`hybrid_search` swallows paradedb
+errors → HTTP 200 + 0). A red gate = do not ship.
+
+## No KB reset on cutover (patch 10)
+
+The `USING bm25` index is built over the **existing** `document_chunk` rows —
+no re-embed, no chunk change, no re-index. `pdb.simple` tokenizes the stored
+`text` column as-is. The index builds in seconds (~9703 chunks) and is
+queryable immediately. Existing vectors + chunks are untouched; only the FTS
+arm's query + scoring change. Run `make kb-bm25-init` after the image restart;
+the gate confirms it.
+
+## Rollback (patch 10)
+
+`scripts/kb-bm25-rollback.sh`: `DROP INDEX IF EXISTS idx_document_chunk_bm25;
+DROP EXTENSION IF EXISTS pg_search;` (DROP INDEX **before** DROP EXTENSION —
+the extension refuses to drop while the index depends on it, verified). Does
+NOT drop `vector`. Refuses to run if `pg_search` is already absent (image
+already reverted). Then revert the OWUI + kb-postgres images; the stock image
+re-creates + uses the GIN index (Site 2's removal is gone with the revert).
+
+## AGPL — kb-postgres image is local-only
+
+pg_search is **AGPL-3.0**. The `kb-postgres` image (`docker/postgres/`) bundles
+the pg_search `.deb` (version + sha256 pinned in `.env.template`:
+`PG_SEARCH_VERSION`, `PG_SEARCH_DEB_SHA256`) fetched at build time — the `.deb`
+is **never committed** to this (MIT, public) repo, and the image is **never
+pushed** to a registry (`compose.yml` postgres `pull_policy: never`; `make pull`
+skips it). It stays local. The OWUI overlay image is unaffected (it only emits
+the `|||` SQL; the extension + index live in kb-postgres).

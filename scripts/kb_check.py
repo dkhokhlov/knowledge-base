@@ -809,6 +809,101 @@ def repair(stores, classes):
     return manifest
 
 
+# --- BM25 release gate (patch 10) ------------------------------------------
+# The OWUI hybrid_search FTS arm swallows every paradedb error in a trailing
+# `except -> return None`, which falls back to the legacy langchain
+# BM25Retriever (a per-request full-collection load + in-process BM25 build
+# under the 60s retrieve timeout). A missing pg_search preload, a dropped
+# extension, or a missing idx_document_chunk_bm25 index otherwise silently
+# degrades every query with no error anywhere. This gate is the only detector.
+# Run as a release gate: `make kb-bm25-check` (or `kb_check.py --bm25-gate`).
+# A red probe = do not ship. Probes:
+#   1. pg_search extension present.
+#   2. idx_document_chunk_bm25 index present.
+#   3. ranking path: a collection-scoped `text ||| :q` + pdb.score + ORDER BY
+#      executes without error (a missing index makes pdb.score error too).
+#   4. colon/dash-safe: `text ||| 'error: x'` executes without error (the C1
+#      silent-zero class for the ||| operator -- it must NOT error on colons).
+#   5. zero-token: `text ||| '???'` -> 0 rows, no error.
+# Probes 3-5 bind the query as a parameter (production binds through psycopg2,
+# not SQL literals). A 0-row execution is green -- the gate detects a
+# broken/missing index, which errors regardless of row count; recall is verified
+# by test_09/test_11, not here.
+
+_BM25_PROBE_Q = "kb_check_probe_token"  # synthetic; not expected in the corpus
+
+
+def bm25_gate(stores):
+    """Run the patch-10 BM25 release-gate probes. Returns a list of
+    (name, ok, detail); ok=False on any broken/missing component."""
+    results = []
+
+    def probe(name, fn):
+        try:
+            results.append((name, True, fn()))
+        except Exception as e:  # gate must capture every failure, never raise
+            results.append((name, False, "%s: %s" % (type(e).__name__, e)))
+
+    # 1. pg_search extension present.
+    def _ext():
+        n = stores._q("SELECT count(*) FROM pg_extension "
+                      "WHERE extname='pg_search'").fetchone()[0]
+        if n != 1:
+            raise RuntimeError(
+                "pg_search extension not installed (count=%d); "
+                "run make kb-bm25-init" % n)
+        return "installed"
+    probe("pg_search extension", _ext)
+
+    # 2. idx_document_chunk_bm25 index present.
+    def _idx():
+        n = stores._q(
+            "SELECT count(*) FROM pg_indexes WHERE schemaname='public' "
+            "AND indexname='idx_document_chunk_bm25'").fetchone()[0]
+        if n != 1:
+            raise RuntimeError(
+                "idx_document_chunk_bm25 missing; run make kb-bm25-init")
+        return "present"
+    probe("idx_document_chunk_bm25", _idx)
+
+    # A collection name to scope the ranking-path query (any; 0 rows is green).
+    colls = list(stores.chroma_collections())
+    coll = colls[0] if colls else "__kb_check_no_such_collection__"
+
+    # 3. ranking path: ||| + pdb.score + ORDER BY (the production FTS path).
+    def _rank():
+        cur = stores._q(
+            "SELECT id, pdb.score(id) AS s FROM document_chunk "
+            "WHERE collection_name=%s AND text ||| %s "
+            "ORDER BY pdb.score(id) DESC LIMIT 5",
+            (coll, _BM25_PROBE_Q))
+        return "%d rows" % len(cur.fetchall())
+    probe("ranking path (||| + pdb.score + ORDER BY)", _rank)
+
+    # 4. colon/dash-safe: a query with a colon must NOT error (C1 class).
+    def _colon():
+        cur = stores._q(
+            "SELECT count(*) FROM document_chunk "
+            "WHERE collection_name=%s AND text ||| %s",
+            (coll, "error: kb_check_probe"))
+        return "%d rows" % cur.fetchone()[0]
+    probe("colon/dash-safe (||| 'error: x')", _colon)
+
+    # 5. zero-token: ??? -> 0 rows, no error.
+    def _zero():
+        cur = stores._q(
+            "SELECT count(*) FROM document_chunk "
+            "WHERE collection_name=%s AND text ||| %s",
+            (coll, "???"))
+        n = cur.fetchone()[0]
+        if n != 0:
+            raise RuntimeError("expected 0 rows for '???', got %d" % n)
+        return "0 rows"
+    probe("zero-token (||| '???')", _zero)
+
+    return results
+
+
 # --- main -----------------------------------------------------------------
 
 def main(argv=None):
@@ -832,6 +927,14 @@ def main(argv=None):
                          "files -> completed (OWUI must be stopped; may combine with --purge)")
     ap.add_argument("--no-backup", action="store_true",
                     help="skip the export (backup is ON by default when --purge)")
+    ap.add_argument("--bm25-gate", action="store_true",
+                    help="run ONLY the patch-10 BM25 release-gate probes "
+                         "(pg_search extension + idx_document_chunk_bm25 index + "
+                         "the ||| / pdb.score ranking path + colon-safe + "
+                         "zero-token); skip the class audit. Exit 0 if all green, "
+                         "1 if any red. A red probe = do not ship (a broken/missing "
+                         "index silently degrades every query to the langchain "
+                         "full-collection fallback).")
     args = ap.parse_args(argv)
     args.ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     args.backup = not args.no_backup
@@ -843,6 +946,17 @@ def main(argv=None):
     except RuntimeError as e:
         log.error("%s", e)
         return 2
+
+    if args.bm25_gate:
+        log.info("BM25 release gate (patch 10)...")
+        results = bm25_gate(stores)
+        green = all(ok for _, ok, _ in results)
+        for name, ok, detail in results:
+            print("%s  %-40s %s" % ("OK  " if ok else "FAIL", name, detail))
+        if not green:
+            log.error("BM25 gate RED -- do not ship "
+                      "(run make kb-bm25-init, then re-run).")
+        return 0 if green else 1
 
     log.info("auditing (scope=%s)...", args.kb or "ALL")
     classes = classify(stores, args.kb)

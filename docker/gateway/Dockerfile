@@ -13,7 +13,7 @@ WORKDIR /app
 # matcher `scripts/kb_ignore.py` (the gateway imports it; kb.py clones it inline;
 # gdrive-sync calls its CLI). The repo-root .dockerignore excludes everything
 # else -> the context stays tiny (gateway/ + scripts/kb_ignore.py).
-COPY gateway/app.py gateway/neo4j.py gateway/owui.py gateway/graphiti.py gateway/authorize.py scripts/kb_ignore.py ./
+COPY docker/gateway/app.py docker/gateway/neo4j.py docker/gateway/owui.py docker/gateway/graphiti.py docker/gateway/authorize.py scripts/kb_ignore.py ./
 
 USER kbg
 EXPOSE 8010

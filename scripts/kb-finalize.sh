@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Operator tool: finalize a gdrive drain — rebuild the pgvector ivfflat vector
-# index + the GIN FTS index so the freshly embedded vectors become queryable.
+# index so the freshly embedded vectors become queryable.
 #
 # Named "finalize" (not "reindex") for two reasons:
 #   1. On a fresh drain the vectors were NEVER queryable yet. ivfflat builds its
@@ -17,10 +17,14 @@
 #   - REINDEX INDEX idx_document_chunk_vector (ivfflat): the load-bearing step.
 #     OWUI hybrid = vector-fetch -> BM25 rerank (no independent FTS fallback),
 #     so vector=0 -> hybrid=0; the un-refreshed index returns 0 hits.
-#   - REINDEX INDEX idx_document_chunk_text_search (GIN on to_tsvector('simple',
-#     text)): GIN is incremental (queryable without REINDEX) but is REINDEXed to
-#     compact it after the bulk load + remove FTS-index state as a variable.
 #   - Each REINDEX duration is logged (capacity-planning data).
+#
+# BM25 (patch 10): the FTS arm now uses ParadeDB pg_search
+# (idx_document_chunk_bm25, a USING bm25 index), NOT the old GIN
+# idx_document_chunk_text_search. The BM25 index is incremental -- queryable
+# immediately after a bulk drain, no REINDEX needed (make kb-bm25-init creates
+# it). The GIN FTS index is gone (patch 10 Site 2 removed its creation;
+# kb-bm25-init DROPs it). Only ivfflat needs this finalize step.
 #
 # pgvector-only: ivfflat is the index that needs this. HNSW (pgvector) is
 # incremental and does not. VECTOR_DB=pgvector is the only supported backend;
@@ -164,8 +168,8 @@ except Exception:
 fi
 
 # --- global terminal guard + lock (B11) ---------------------------------------
-# REINDEX is INSTANCE-WIDE: idx_document_chunk_vector / idx_document_chunk_text_search
-# are fixed names on the single shared document_chunk table, so REINDEX takes an
+# REINDEX is INSTANCE-WIDE: idx_document_chunk_vector is a fixed name on the
+# single shared document_chunk table, so REINDEX takes an
 # ACCESS EXCLUSIVE lock on the whole table, not one KB. The per-KB --wait above
 # proves only the TARGET KB is terminal; another KB under ./root/ can still be
 # inserting vectors (its extract->embed->link in flight), and the index lock would
@@ -217,8 +221,8 @@ if [ "$all_terminal" != "1" ]; then
 fi
 echo "==> all KBs under ./root/ terminal -- safe to REINDEX"
 
-# --- REINDEX ivfflat vector + GIN FTS (the finalize step) ---------------------
-# Fixed index names (the schema owns them). A future HNSW migration renames
+# --- REINDEX ivfflat vector (the finalize step) -------------------------------
+# Fixed index name (the schema owns it). A future HNSW migration renames
 # idx_document_chunk_vector -> psql errors loud here, which is the correct
 # signal to update this script (do not build speculative HNSW detection now).
 reindex_one() {  # echo "<seconds> <rc>" for REINDEX INDEX $1
@@ -234,16 +238,11 @@ reindex_one() {  # echo "<seconds> <rc>" for REINDEX INDEX $1
   echo "$(( t1 - t0 )) $rc"
 }
 
-echo "==> REINDEX idx_document_chunk_vector (ivfflat) + idx_document_chunk_text_search (GIN FTS) on ${PG_CTN}"
+echo "==> REINDEX idx_document_chunk_vector (ivfflat) on ${PG_CTN}"
 read -r vec_s vec_rc < <(reindex_one idx_document_chunk_vector) || true
 if [ "${vec_rc:-1}" -ne 0 ]; then
   echo "FAIL  REINDEX idx_document_chunk_vector failed (rc=${vec_rc:-<none>}, postgres=${PG_CTN})" >&2
   echo '       (index missing? a future HNSW migration renames it -> update this script)' >&2
   exit 1
 fi
-read -r fts_s fts_rc < <(reindex_one idx_document_chunk_text_search) || true
-if [ "${fts_rc:-1}" -ne 0 ]; then
-  echo "FAIL  REINDEX idx_document_chunk_text_search failed (rc=${fts_rc:-<none>}, postgres=${PG_CTN})" >&2
-  exit 1
-fi
-echo "DONE  kb-finalize: ivfflat vector ${vec_s}s + GIN FTS ${fts_s}s (drained vectors now queryable)"
+echo "DONE  kb-finalize: ivfflat vector ${vec_s}s (drained vectors now queryable)"

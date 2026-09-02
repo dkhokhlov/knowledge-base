@@ -57,9 +57,16 @@ distance (lower=better, `asc`). No LLM call. Wrapper:
 `retrieve <kb-name-or-id> "<query>" [--k N] [--mode hybrid|lexical|vector]`
 (`--k` default 5; use 10–20 for broader recall — the agent synthesizes from raw
 chunks, so more chunks serve it better. `--mode` default
-`hybrid`; `lexical` = pure FTS/BM25 (server-side, indexed — the mode for exact
-register/signal/keyword queries); `vector` = pure vector. `--no-hybrid` is a
-deprecated alias for `--mode vector`). The wrapper resolves the name to a KB id
+`hybrid` (RRF fusion of BM25 + vector, `bm25_weight=0.5` — the BM25 score value
+is discarded; only ordinal rank feeds RRF, dampened by the 60 constant; balanced
+lexical+vector recall, use for conceptual/multi-topic queries); `lexical` (pure
+BM25, `bm25_weight=1.0` — the vector arm is skipped, order = `pdb.score` DESC,
+IDF-driven so rare identifiers/keywords/register names rank high; use for exact-
+token precision; multi-term queries OR the tokens via ParadeDB `|||` (tokenized,
+colon/dash/quote-safe), no longer ANDing every term to 0); `vector` (pure
+cosine). No Lucene DSL (phrase / `+AND` / `-NOT` / `field:` / regex) yet — a
+future opt-in mode. `--no-hybrid` is a deprecated alias for `--mode vector`).
+The wrapper resolves the name to a KB id
 via `GET /api/v1/knowledge/` (exact name or exact id; a valid UUID that is not a
 real id FAILS — no silent fallthrough, so a wrong hand-copied id cannot query the
 wrong KB) and prints the resolved `kb_id` + `kb_name` alongside the hits.

@@ -34,7 +34,7 @@ import unittest
 import random
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, "..", "open-webui"))
+sys.path.insert(0, os.path.join(HERE, "..", "docker", "open-webui"))
 import apply_offset_aware_chunking as patch  # noqa: E402
 
 FUNCS_SRC = patch.NEW_FUNCS

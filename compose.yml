@@ -41,13 +41,23 @@ services:
       start_period: 30s
 
   postgres:
-    # pgvector-enabled Postgres: the Open WebUI vector store (VECTOR_DB=pgvector).
-    # pgvector gives retrieval server-side BM25 full-text search
-    # (to_tsvector('simple', ...) + a GIN index) next to the vector index.
-    # Open WebUI creates the extension, the document_chunk table,
-    # the vector index, and the FTS index at client init, so no init SQL is
-    # needed here. This holds VECTORS ONLY; webui.db (SQLite) stays the app DB.
-    image: pgvector/pgvector:${PGVECTOR_IMAGE_TAG:?PGVECTOR_IMAGE_TAG required in .env}
+    # pgvector Postgres (the Open WebUI vector store, VECTOR_DB=pgvector) +
+    # the ParadeDB pg_search extension for real BM25 lexical search. Built
+    # locally from docker/postgres/ (pg_search is AGPL -> local-only, never
+    # pushed to ghcr; pull_policy: never). pgvector gives the vector index;
+    # pg_search gives the BM25 lexical arm (the extension + the
+    # idx_document_chunk_bm25 index are created by `make kb-bm25-init`, NOT at
+    # OWUI init -- see scripts/kb-bm25-init.sh). The image tag encodes
+    # PG_SEARCH_VERSION so a bump trips the tag + forces a rebuild. This holds
+    # VECTORS ONLY; webui.db (SQLite) stays the app DB.
+    image: kb-postgres:${PGVECTOR_IMAGE_TAG:?PGVECTOR_IMAGE_TAG required in .env}-pgsearch${PG_SEARCH_VERSION:?PG_SEARCH_VERSION required in .env}
+    build:
+      context: docker/postgres
+      args:
+        PGVECTOR_IMAGE_TAG: ${PGVECTOR_IMAGE_TAG:?PGVECTOR_IMAGE_TAG required in .env}
+        PG_SEARCH_VERSION: ${PG_SEARCH_VERSION:?PG_SEARCH_VERSION required in .env}
+        PG_SEARCH_DEB_SHA256: ${PG_SEARCH_DEB_SHA256:?PG_SEARCH_DEB_SHA256 required in .env}
+    pull_policy: never
     container_name: kb-postgres
     restart: unless-stopped
     networks: [owui_net]
@@ -190,7 +200,7 @@ services:
     # port: agents reach it through Caddy on ${KB_HOST_PORT}.
     build:
       context: .
-      dockerfile: gateway/Dockerfile
+      dockerfile: docker/gateway/Dockerfile
     container_name: kb-api-gateway
     restart: unless-stopped
     # Run as the host owner uid so the read-only ./root bind mount
@@ -262,13 +272,13 @@ services:
   openwebui:
     # Custom overlay image: the official Open WebUI image + build-time patches
     # (KB-sync re-upload churn, retrieval ranking, reranker gating). Built
-    # locally from open-webui/; see open-webui/PATCH.md for the full patch list.
-    # The GHCR ref is a local tag (not pushed), so pull_policy: never — `make
-    # pull` skips this service; `docker compose build openwebui` (or `make start`
-    # on first run) builds it.
+    # locally from docker/open-webui/; see docker/open-webui/PATCH.md for the
+    # full patch list. The GHCR ref is a local tag (not pushed), so pull_policy:
+    # never — `make pull` skips this service; `docker compose build openwebui`
+    # (or `make start` on first run) builds it.
     image: ghcr.io/dkhokhlov/open-webui:${OPENWEBUI_IMAGE_TAG:?OPENWEBUI_IMAGE_TAG required in .env}
     build:
-      context: open-webui
+      context: docker/open-webui
     pull_policy: never
     container_name: kb-openwebui
     restart: unless-stopped
@@ -367,10 +377,10 @@ services:
     # external-extraction contract) and returns per-page/per-slide/per-sheet
     # documents. OWUI routes EVERY ingest to it when
     # CONTENT_EXTRACTION_ENGINE=external + URL + a non-empty API key are set in
-    # the OWUI DB (`make ocr-config`). See markitdown/oursvc.py + the plan.
+    # the OWUI DB (`make ocr-config`). See docker/markitdown/oursvc.py + the plan.
     image: ghcr.io/dkhokhlov/markitdown-ocr:${MARKITDOWN_OCR_IMAGE_TAG:?MARKITDOWN_OCR_IMAGE_TAG required in .env}
     build:
-      context: ./markitdown
+      context: ./docker/markitdown
     pull_policy: never
     container_name: kb-markitdown-ocr
     # Profile-gated (no-fallback). Included when COMPOSE_PROFILES=ocr in .env

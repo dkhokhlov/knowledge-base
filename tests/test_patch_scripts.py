@@ -30,11 +30,12 @@ import types
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OW = os.path.join(HERE, "..", "open-webui")
+OW = os.path.join(HERE, "..", "docker", "open-webui")
 sys.path.insert(0, os.path.abspath(OW))
 import apply_query_mode as p7  # noqa: E402
 import apply_query_top_k as p8  # noqa: E402
 import apply_skip_cosine_reranker as p9  # noqa: E402
+import apply_bm25_search as p10  # noqa: E402
 
 
 # --- fixtures: built from the apply scripts' own anchor constants ------------
@@ -80,6 +81,32 @@ RETRIEVAL_FIXTURE = (
     "    return await something_else(\n"
     + p8.SITE2_OLD + "\n"
     "    )\n"
+)
+
+
+# The pgvector fixture embeds P10 site 1 (the hybrid_search FTS arm) once and
+# P10 site 2 (the init _ensure_text_search_index call) once, in valid Python.
+# Both anchors appear exactly once. The surrounding methods hold the indent the
+# anchors expect (12-space body via an `if True:` wrapper); py_compile validates
+# the patched result.
+PGVECTOR_FIXTURE = (
+    "from sqlalchemy import text\n"
+    "class FakeStore:\n"
+    "    def hybrid_search(self, collection_name, query, limit, bm25_weight):\n"
+    "        if True:\n"
+    + p10.SITE1_OLD +
+    "        return None\n"
+    "    def _ensure_vector_index(self, index_method, index_options):\n"
+    "        pass\n"
+    "    def _ensure_text_search_index(self):\n"
+    "        pass\n"
+    "    def _vector_index_configuration(self):\n"
+    "        return 'ivfflat', {}\n"
+    "    def init_db(self):\n"
+    "        if True:\n"
+    "            index_method, index_options = self._vector_index_configuration()\n"
+    + p10.SITE2_OLD +
+    "        return None\n"
 )
 
 
@@ -307,6 +334,51 @@ class TestP9SkipCosineReranker(unittest.TestCase):
         one = ns["_run"]([Document("only")], stub)
         self.assertEqual(len(one), 1)
         self.assertEqual(one[0].metadata["score"], 1.0)
+
+
+class TestP10Bm25Search(unittest.TestCase):
+    SCRIPT = "apply_bm25_search.py"
+
+    def setUp(self):
+        self._d = tempfile.mkdtemp(prefix="kb-patch-")
+        self.pgvector = _write(self._d, "pgvector.py", PGVECTOR_FIXTURE)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._d, ignore_errors=True)
+
+    def test_applies_against_running_image_anchors(self):
+        rc, out, err = _run_script(self.SCRIPT,
+                                   {"OWUI_PGVECTOR_PY": self.pgvector})
+        self.assertEqual(rc, 0, "exit %d stderr=%s" % (rc, err))
+        p = open(self.pgvector).read()
+        # old SQL + the dead GIN index-creation call gone
+        self.assertNotIn(p10.SITE1_OLD, p)
+        self.assertNotIn(p10.SITE2_OLD, p)
+        self.assertNotIn("plainto_tsquery", p)
+        self.assertNotIn("ts_rank_cd", p)
+        self.assertNotIn("self._ensure_text_search_index()", p)
+        # new SQL present: ||| tokenized OR + pdb.score (real BM25)
+        self.assertIn(p10.SITE1_NEW, p)
+        self.assertIn(p10.SITE2_NEW, p)
+        self.assertIn("text ||| :query", p)
+        self.assertIn("pdb.score(document_chunk.id)", p)
+        self.assertIn("LIMIT :limit", p)
+        # no DSL branch (the revert): no parse_with_field, no bm25_weight gate
+        self.assertNotIn("parse_with_field", p)
+        self.assertNotIn("bm25_weight >= 1.0", p)
+        # the patched file is valid Python (the build injects exactly this)
+        __import__("py_compile").compile(self.pgvector, doraise=True)
+
+    def test_fails_loud_on_drifted_anchor(self):
+        # Drift: the plainto_tsquery anchor changes -> site1 count 0 -> exit 1.
+        drifted = PGVECTOR_FIXTURE.replace(
+            "SELECT plainto_tsquery('simple', :query) AS query",
+            "SELECT phraseto_tsquery('simple', :query) AS query")
+        p = _write(self._d, "pgvector_drift.py", drifted)
+        rc, out, err = _run_script(self.SCRIPT, {"OWUI_PGVECTOR_PY": p})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("site1", err)
 
 
 if __name__ == "__main__":

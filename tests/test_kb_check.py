@@ -940,5 +940,105 @@ class TestPgVectorClassify(unittest.TestCase):
         self.assertEqual(c["_totals"]["chroma_collections"], 4)
 
 
+# --- BM25 release gate (patch 10) -----------------------------------------
+
+class _FakeCur:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _GateStores:
+    """Minimal stub for bm25_gate: scripts _q results for each probe."""
+
+    def __init__(self, ext=1, idx=1, rank_rows=(), colon_rows=0,
+                 zero_rows=0, rank_exc=None, colls=None):
+        self._ext = ext
+        self._idx = idx
+        self._rank = rank_rows
+        self._colon = colon_rows
+        self._zero = zero_rows
+        self._rank_exc = rank_exc
+        self._colls = colls if colls is not None else {"c1": None}
+
+    def chroma_collections(self):
+        return dict(self._colls)
+
+    def _q(self, sql, params=None):
+        if params is None:
+            if "pg_extension" in sql:
+                return _FakeCur([(self._ext,)])
+            if "pg_indexes" in sql:
+                return _FakeCur([(self._idx,)])
+        # bound-param probes: params = (collection_name, query)
+        if "pdb.score" in sql:  # ranking path
+            if self._rank_exc:
+                raise self._rank_exc
+            return _FakeCur(self._rank)
+        q = params[1] if params else ""
+        if q == "???":
+            return _FakeCur([(self._zero,)])
+        return _FakeCur([(self._colon,)])  # colon/dash-safe
+
+
+class TestBm25Gate(unittest.TestCase):
+    """The gate is the only detector for a silent paradedb failure (hybrid_search
+    swallows the error -> langchain full-collection fallback). Prove the
+    green/red logic over a stubbed _q; the live probes run via test_09/test_11."""
+
+    def setUp(self):
+        self._orig = kc.make_stores
+        # Bypass make_stores' env checks; return the gate stub directly.
+        self._stub = None
+        kc.make_stores = lambda *a, **k: self._stub
+
+    def tearDown(self):
+        kc.make_stores = self._orig
+
+    def _run(self, **kw):
+        self._stub = _GateStores(**kw)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = kc.main(["--bm25-gate"])
+        return rc, buf.getvalue()
+
+    def test_green(self):
+        rc, out = self._run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("OK  "), 5)
+        self.assertNotIn("FAIL", out)
+
+    def test_red_missing_extension(self):
+        rc, out = self._run(ext=0)
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL", out)
+        self.assertIn("pg_search extension", out)
+
+    def test_red_missing_index(self):
+        rc, out = self._run(idx=0)
+        self.assertEqual(rc, 1)
+        self.assertIn("idx_document_chunk_bm25", out)
+
+    def test_red_ranking_path_error(self):
+        rc, out = self._run(rank_exc=RuntimeError("no USING bm25 index"))
+        self.assertEqual(rc, 1)
+        self.assertIn("ranking path", out)
+
+    def test_red_zero_token_nonzero(self):
+        rc, out = self._run(zero_rows=5)
+        self.assertEqual(rc, 1)
+        self.assertIn("zero-token", out)
+
+    def test_empty_corpus_is_green(self):
+        # No collections: the ranking path still executes (0 rows) -> green.
+        rc, out = self._run(colls={})
+        self.assertEqual(rc, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

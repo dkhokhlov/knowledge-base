@@ -16,7 +16,7 @@ import time
 import unittest
 from unittest import mock
 
-GATEWAY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway")
+GATEWAY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docker", "gateway")
 SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, os.path.abspath(GATEWAY))
 # app.py imports kb_ignore (scripts/kb_ignore.py) -- put scripts/ on sys.path so

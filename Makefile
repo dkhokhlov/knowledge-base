@@ -26,18 +26,18 @@ PYTEST   ?= .venv/bin/python -m pytest
         ocr-config \
         gdrive-sync gdrive-meta \
         kb-index kb-bootstrap kb-status kb-sync kb-sync-finalize kb-migrate-root \
-        kb-public-read kb-check kb-finalize \
+        kb-public-read kb-check kb-finalize kb-bm25-init kb-bm25-rollback kb-bm25-check \
         projects-bootstrap \
         shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-test clean-tests clean-backup backup
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + admin-signup + api-keys (auto OCR) + projects-bootstrap + rag-config + gdrive KB. Leaves the stack running. Each top-level subdir of ./root/ is one KB (named after the subdir); ./root/gdrive/ is the gdrive KB.
+provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + admin-signup + api-keys (auto OCR) + projects-bootstrap + rag-config + kb-bm25-init (ParadeDB pg_search BM25 index) + gdrive KB. Leaves the stack running. Each top-level subdir of ./root/ is one KB (named after the subdir); ./root/gdrive/ is the gdrive KB.
 	@set -e; \
-	  echo "==> 1/8 bootstrap (creates .env/.env.local + secrets + ./data dirs)"; make bootstrap; \
-	  echo "==> 2/8 pull-models (BLOCKING: pulls base LLM + ctx variant + embedder + deepseek-ocr from Ollama)"; make pull-models; \
-	  echo "==> 3/8 start (preflight + docker compose up -d; ocr sidecar via COMPOSE_PROFILES=ocr in .env)"; make start; \
+	  echo "==> 1/9 bootstrap (creates .env/.env.local + secrets + ./data dirs)"; make bootstrap; \
+	  echo "==> 2/9 pull-models (BLOCKING: pulls base LLM + ctx variant + embedder + deepseek-ocr from Ollama)"; make pull-models; \
+	  echo "==> 3/9 start (preflight + docker compose up -d; ocr sidecar via COMPOSE_PROFILES=ocr in .env)"; make start; \
 	  echo "==> waiting for stack /health (OWUI has a 40s start period)..."; \
 	  _KB_DOMAIN_OVR=$${KB_DOMAIN:-}; _OCR_ENABLED_OVR=$${OCR_ENABLED:-}; \
 	  set -a; . ./.env; set +a; \
@@ -47,11 +47,12 @@ provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + adm
 	  i=0; until curl -sf "$$H/health" >/dev/null 2>&1; do i=$$((i+1)); [ $$i -lt 60 ] \
 	    || { echo "stack did not become healthy in 120s ($$H/health)" >&2; exit 1; }; sleep 2; done; \
 	  echo "  stack healthy ($$H/health)"; \
-	  echo "==> 4/8 admin-signup (creates the admin@<KB_DOMAIN> account)"; make admin-signup; \
-	  echo "==> 5/8 api-keys (admin key; auto-configures OWUI -> markitdown-ocr when OCR_ENABLED=true)"; make api-keys; \
-	  echo "==> 6/8 projects-bootstrap (one-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs)"; make projects-bootstrap; \
-	  echo "==> 7/8 rag-config (strict-grounding RAG template + rag.ollama.base_url sync)"; make rag-config; \
-	  echo "==> 8/8 kb-bootstrap KB=gdrive (creates the gdrive KB + grants public read; name-based, no GDRIVE_KB_ID)"; make kb-bootstrap KB=gdrive; \
+	  echo "==> 4/9 admin-signup (creates the admin@<KB_DOMAIN> account)"; make admin-signup; \
+	  echo "==> 5/9 api-keys (admin key; auto-configures OWUI -> markitdown-ocr when OCR_ENABLED=true)"; make api-keys; \
+	  echo "==> 6/9 projects-bootstrap (one-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs)"; make projects-bootstrap; \
+	  echo "==> 7/9 rag-config (strict-grounding RAG template + rag.ollama.base_url sync)"; make rag-config; \
+	  echo "==> 8/9 kb-bm25-init (ParadeDB pg_search extension + BM25 index on document_chunk; drops the dead GIN FTS index; needs the kb-postgres image)"; make kb-bm25-init; \
+	  echo "==> 9/9 kb-bootstrap KB=gdrive (creates the gdrive KB + grants public read; name-based, no GDRIVE_KB_ID)"; make kb-bootstrap KB=gdrive; \
 	  echo; echo "==> provision complete — stack is running."; \
 	  echo "    Populate the gdrive KB (one-time):           make gdrive-sync"; \
 	  echo "    Add a new KB: drop a folder at ./root/<name>/ then: make kb-bootstrap KB=<name> && make kb-sync KB=<name>"; \
@@ -236,6 +237,16 @@ kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit 
 	      $${PURGE:+--purge} $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
 	  fi
 
+kb-bm25-check: ## Release gate for patch 10: probe the ParadeDB pg_search extension + the idx_document_chunk_bm25 index + the ||| / pdb.score ranking path + colon-safe + zero-token. Exit 0 green / 1 red. A red probe = do not ship (a broken/missing index silently degrades every query to the langchain full-collection fallback). Run after `make kb-bm25-init`. Uses psycopg2 in the OWUI image (pgvector env); no OWUI SQLite/REST needed.
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
+	  OWUI="$${OWUI_CONTAINER:-kb-openwebui}"; \
+	  if [ "$${VECTOR_DB:-}" != "pgvector" ]; then \
+	    echo "FAIL  VECTOR_DB=$${VECTOR_DB:-<unset>}: kb-bm25-check needs VECTOR_DB=pgvector." >&2; exit 1; \
+	  fi; \
+	  PG_ENV="-e PGVECTOR_USER -e PGVECTOR_PASSWORD -e PGVECTOR_DB -e PGVECTOR_DB_URL"; \
+	  docker exec -i -e VECTOR_DB $$PG_ENV $$OWUI python3 - < scripts/kb_check.py --bm25-gate
+
 kb-status: ## Show one KB's index status via api-gateway GET /status (completed/pending/processing/failed), pretty JSON. KB=<name> selects the KB (default gdrive). Set SCOPE_PATH=<relpath> to scope source_count to a subpath (relative to the KB root; file counts are KB-wide; accurate when the KB's whole scope is that path). The KB is resolved BY NAME; no GDRIVE_KB_ID.
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
@@ -260,6 +271,14 @@ gdrive-sync-finalize: gdrive-sync ## gdrive one-command pipeline: dispatch the g
 kb-sync-finalize: kb-sync ## Generic one-command pipeline: dispatch the KB async drain (make kb-sync KB=<name> = POST /index), then wait for it to terminate (poll GET /status to pending+processing=0, timeout GDRIVE_TEST_WAIT default 2400s), then finalize (REINDEX ivfflat + GIN FTS). KB=<name> selects the KB (default gdrive; for gdrive prefer gdrive-sync-finalize which also runs the rclone stage). REINDEX is instance-wide, so kb-finalize first requires EVERY KB under ./root/ terminal + acquires a host lock. pgvector only (fails loud on any other VECTOR_DB).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@./scripts/kb-finalize.sh --wait
+
+kb-bm25-init: ## Create the ParadeDB pg_search extension + the BM25 index on document_chunk (the FTS arm patch 10 queries) and drop the dead GIN FTS index. Idempotent. Needs the kb-postgres image (shared_preload_libraries=pg_search baked in); fails loud on the stock pgvector image. Container-targeted via POSTGRES_CONTAINER (iso) or kb-postgres (live). Run after `make start` (document_chunk must exist); no gdrive drain in flight (CREATE INDEX is a brief ACCESS EXCLUSIVE lock).
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@./scripts/kb-bm25-init.sh
+
+kb-bm25-rollback: ## Roll back patch 10: DROP the BM25 index + the pg_search extension (DROP INDEX before DROP EXTENSION — pg_search refuses to drop while the index depends on it). Refuses to run if pg_search is already absent. Run BEFORE reverting the kb-postgres + openwebui images to their stock/pre-patch-10 builds (dropping the index while the patch-10 OWUI image runs makes the FTS arm error -> langchain per-query full-collection fallback).
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@./scripts/kb-bm25-rollback.sh
 
 kb-sync: ## Reconcile one (or every) ./root/<name>/ tree into its OWUI KB via api-gateway POST /index (admin). KB=<name> reconciles one KB; no KB= reconciles EVERY top-level non-dot subdir of ./root/ in one loop (.tests dot-dir skipped). Set INDEX_ALL=1 for a full re-index, RETRY_PENDING=1 to also retry stalled pending files. Each KB is resolved BY NAME (paginated, unique-or-fail); a missing KB fails fast with a "run make kb-bootstrap" hint. Per-KB client-side in-flight guard (refuses to dispatch if pending+processing>0; exempt RETRY_PENDING=1).
 	@./scripts/kb-sync.sh $${KB:+--kb "$$KB"} $${INDEX_ALL:+--index-all} $${RETRY_PENDING:+--retry-pending}

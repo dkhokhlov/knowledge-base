@@ -6,7 +6,61 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+
+- **ParadeDB BM25 FTS arm (OWUI patch 10).** Replaces the
+  `plainto_tsquery('simple', :query)` FTS arm — which ANDed every token (multi-
+  term → 0 hits) and scored with `ts_rank_cd` (no IDF, no length norm) — with
+  ParadeDB `pg_search` real BM25. The FTS query is now `text ||| :query` (the
+  match-any OR operator; tokenizes its RHS, so multi-term ORs every token and a
+  natural-language query cannot misparse as query syntax — colon/dash/quote-
+  safe); scoring is `pdb.score(id)` (real BM25: IDF + length norm). One static
+  SQL serves both arms; RRF fusion discards the score value (ordinal rank only).
+  Fixes the hybrid collapse-to-vector on multi-term technical queries. See
+  `docker/open-webui/PATCH.md` patch 10.
+- **`kb-postgres` custom image (pg_search, AGPL-3.0, local-only).** A
+  `docker/postgres/` overlay on the pgvector PG16 base that installs the
+  `pg_search` `.deb` (version + sha256 pinned in `.env.template`) and bakes
+  `shared_preload_libraries=pg_search` into a wrapper entrypoint. The image is
+  **never pushed** to a registry (`pull_policy: never`); the `.deb` is fetched
+  at build, never committed to this (MIT) repo. `compose.yml` postgres tag
+  encodes `PG_SEARCH_VERSION` (`kb-postgres:pg16-pgsearch0.25.6`) so a version
+  bump trips the tag and forces a rebuild.
+- **`make kb-bm25-init` / `kb-bm25-rollback` / `kb-bm25-check`.** `kb-bm25-init`
+  (idempotent, container-targeted via `${POSTGRES_CONTAINER:-kb-postgres}`)
+  creates the `pg_search` extension + the `USING bm25` index
+  (`idx_document_chunk_bm25`: `text::pdb.simple` tokenizer,
+  `collection_name::pdb.literal` fast field, `key_field='id'`), and drops the
+  dead GIN FTS index. Wired into `make provision` + both e2e provision paths.
+  `kb-bm25-rollback` drops the index then the extension (order load-bearing).
+  `kb-bm25-check` runs the `scripts/kb_check.py --bm25-gate` release gate
+  (extension + index + ranking-path + colon-safe + zero-token probes).
+
+### Changed
+
+- **FTS arm behavior: AND → OR.** A bare multi-term lexical/hybrid query now
+  ORs the tokens (was: AND → 0 hits). This is the user-visible recall fix. The
+  `mode=lexical` order is now pure BM25 (`pdb.score` DESC, IDF-driven — rare
+  identifiers/keywords rank high); `mode=hybrid` is RRF fusion of BM25 + vector
+  (the BM25 score value discarded, ordinal rank only). `skills/claude/SKILL.md`
+  documents the distinction.
+- **Dead GIN FTS index removed.** Patch 10 Site 2 removes the
+  `_ensure_text_search_index()` call from OWUI init (the GIN index's only user
+  was the old `plainto_tsquery` query). `kb-bm25-init` `DROP INDEX IF EXISTS`
+  is the one-time live cleanup. `kb-finalize.sh`, `tests/test_09_gdrive_index.sh`,
+  and `docs/operations.md` drop the GIN REINDEX. The ivfflat
+  `idx_document_chunk_vector` REINDEX stays (still required after a bulk drain).
+
+### Notes
+
+- **No Lucene DSL yet.** Phrase / `+AND` / `-NOT` / `field:` / regex is a future
+  opt-in mode (patch 11). `paradedb.parse_with_field(..., lenient => true)`
+  silent-zeros on `:` / leading `-` common in the corpus (the C1 blocker), so
+  the default stays `|||` (safe OR); the DSL will be an explicit opt-in where
+  the agent is responsible for quoting/escaping.
+- **No KB reset on cutover.** The `USING bm25` index builds over existing
+  `document_chunk` rows — no re-embed, no chunk change. Queryable immediately
+  after `make kb-bm25-init`.
 
 ## [v2.1.0] — 2026-09-01
 
