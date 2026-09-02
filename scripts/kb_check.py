@@ -411,7 +411,7 @@ def classify(stores, kb=None):
     all_junction_file_ids = set(j.file_id for j in all_junction)
     live_kb_ids = set(kb_ids)
 
-    # scope: KB-tagged classes use kb_files/kb_junction; classes 3/11/12 stay global
+    # scope: KB-tagged classes use kb_files/kb_junction; classes 3/12 stay global
     if kb:
         kb_files = {fid: fr for fid, fr in all_files.items()
                     if fr.knowledge_id == kb}
@@ -698,7 +698,7 @@ def purge(stores, classes, opts, export_dir):
     """Execute the purge for the active tier. Safe (no --maint): classes 1, 3.
     Maintenance (--maint): classes 5b, 7, 8. Returns a manifest."""
     manifest = {"ts": opts.ts, "tier": TIER_MAINT if opts.maint else TIER_SAFE,
-                "purged_collections": [], "dangling_dirs": [], "kb_vectors": []}
+                "purged_collections": [], "kb_vectors": []}
     if opts.maint:
         _purge_maint(stores, classes, manifest)
     else:
@@ -816,7 +816,7 @@ def main(argv=None):
         description="KB cross-DB health check (OWUI SQLite + pgvector vector "
                     "store): audit + purge.")
     ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
-                    help="OWUI data dir (webui.db + vector_db/); default " + DEFAULT_DATA_DIR)
+                    help="OWUI data dir (webui.db); default " + DEFAULT_DATA_DIR)
     ap.add_argument("--owui-base", default=DEFAULT_OWUI_BASE,
                     help="OWUI REST base for ghost DELETE; default " + DEFAULT_OWUI_BASE)
     ap.add_argument("--kb", help="scope the KB-tagged classes to one knowledge_id")
@@ -873,9 +873,8 @@ def main(argv=None):
         if export_dir:
             with open(os.path.join(export_dir, "manifest.json"), "w", encoding="utf-8") as f:
                 json.dump(purge_manifest, f, indent=2, ensure_ascii=False)
-        log.info("purge done. purged_collections=%d dangling_dirs=%d kb_vectors=%d",
+        log.info("purge done. purged_collections=%d kb_vectors=%d",
                  len(purge_manifest["purged_collections"]),
-                 len(purge_manifest["dangling_dirs"]),
                  len(purge_manifest["kb_vectors"]))
 
     repair_manifest = None
@@ -898,7 +897,6 @@ def main(argv=None):
         if purge_manifest is not None:
             print("\nPurge manifest:")
             print("  purged collections: %d" % len(purge_manifest["purged_collections"]))
-            print("  dangling dirs rm'd: %d" % len(purge_manifest["dangling_dirs"]))
             print("  kb vector deletes:  %d" % len(purge_manifest["kb_vectors"]))
             if export_dir:
                 print("  export: %s/manifest.json" % export_dir)
