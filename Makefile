@@ -205,7 +205,7 @@ kb-public-read: ## Grant public read (user:*) on EVERY knowledge base + enable s
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
 	@./scripts/kb-public-read.sh
 
-kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit both stores, report 12 inconsistency classes, advise purge. PURGE=1 to purge safe classes (1 ghosts, 3 orphan file-{id}, 11 dangling dirs; BACKUP=1 default exports first). PURGE=1 MAINT=1 stops OWUI to also purge maint classes (5b leaked KB vectors, 7 orphan junction, 8 dead-KB junction). REPAIR=1 stops OWUI to repair class-9 stuck-processing-while-linked files (linked + content + vectors, but status stuck at processing) -> completed; combine with PURGE/MAINT to do both. KB=<id> scopes the KB-tagged classes; JSON=1 machine-readable; SHOW_NAMES=1 prints filenames (default ids-only).
+kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit both stores, report 11 inconsistency classes, advise purge. PURGE=1 to purge safe classes (1 ghosts, 3 orphan file-{id}; BACKUP=1 default exports first). PURGE=1 MAINT=1 stops OWUI to also purge maint classes (5b leaked KB vectors, 7 orphan junction, 8 dead-KB junction). REPAIR=1 stops OWUI to repair class-9 stuck-processing-while-linked files (linked + content + vectors, but status stuck at processing) -> completed; combine with PURGE/MAINT to do both. KB=<id> scopes the KB-tagged classes; JSON=1 machine-readable; SHOW_NAMES=1 prints filenames (default ids-only).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  OWUI="$${OWUI_CONTAINER:-kb-openwebui}"; \

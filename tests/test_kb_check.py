@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Unit tests for scripts/kb_check.py (KB cross-DB health check).
 
-The classify/report/purge logic is pure over a `Stores` interface; `chromadb` is
-lazy-imported so the tool imports cleanly on the host. These tests feed an
+The classify/report/purge logic is pure over a `Stores` interface; `psycopg2`
+is lazy-imported so the tool imports cleanly on the host. These tests feed an
 in-memory `FakeStores` (no real DBs, no network, no gdrive — see
-[[tests-use-fixtures-not-gdrive]]) and assert: every one of the 12 classes is
+[[tests-use-fixtures-not-gdrive]]) and assert: every one of the 11 classes is
 detected with the correct counts; `knowledge-bases` is never flagged (blocker 1);
 class 5 requires a `file_id` metadata key; class 7 is subtracted before class 6
 (blocker 7); dead-KB junction rows are flagged (class 8); `--kb` scopes the
@@ -33,11 +33,11 @@ import kb_check as kc  # noqa: E402
 class FakeStores(kc.Stores):
     """In-memory Stores. `data_dir` is a real temp dir so export_collection can
     write the JSONL + manifest there. Mutations record into lists (no real
-    Chroma/SQLite/OWUI is touched)."""
+    Postgres/SQLite/OWUI is touched)."""
 
     def __init__(self, data_dir, files, junction, kb_ids, dir_ids, colls,
-                 coll_meta, coll_docs, vsegs, seg_for_coll, disk, dir_sizes,
-                 content=None, updated_at=None, admin_key="ADM"):
+                 coll_meta, coll_docs, content=None, updated_at=None,
+                 admin_key="ADM"):
         super().__init__(data_dir, "http://owui", admin_key)
         self._files = files
         self._junction = junction
@@ -46,17 +46,12 @@ class FakeStores(kc.Stores):
         self._colls = colls                # {name: uuid}
         self._coll_meta = coll_meta        # {name: [metadata dicts]}
         self._coll_docs = coll_docs         # {name: (ids, docs, mets)}
-        self._vsegs = vsegs
-        self._seg_for_coll = seg_for_coll   # {coll_uuid: seg_id}
-        self._disk = disk
-        self._dir_sizes = dir_sizes
         # repair-gate data (lazy reads in the real Stores; in-memory here)
         self._content = content or {}       # {file_id: content str}
         self._updated_at = updated_at or {}  # {file_id: epoch seconds}
         # mutation record
         self.owui_deletes = []
         self.deleted_collections = []
-        self.rm_dirs = []
         self.deleted_kb_vectors = []
         self.deleted_junction_files = []
         self.deleted_junction_kbs = []
@@ -78,12 +73,6 @@ class FakeStores(kc.Stores):
     def chroma_collections(self):
         return dict(self._colls)
 
-    def vector_segment_ids(self):
-        return set(self._vsegs)
-
-    def segment_dir_for_collection(self, coll_uuid):
-        return self._seg_for_coll.get(coll_uuid)
-
     def collection_count(self, name):
         return len(self._coll_meta.get(name, []))
 
@@ -94,12 +83,6 @@ class FakeStores(kc.Stores):
         ids, docs, mets = self._coll_docs.get(name, ([], [], []))
         return list(ids), list(docs), list(mets)
 
-    def disk_dirs(self):
-        return set(self._disk)
-
-    def dir_size(self, name):
-        return self._dir_sizes.get(name, 0)
-
     # mutations (record, do not touch real stores)
     def owui_delete_file(self, file_id):
         self.owui_deletes.append(file_id)
@@ -107,10 +90,6 @@ class FakeStores(kc.Stores):
 
     def delete_collection(self, name):
         self.deleted_collections.append(name)
-        return True
-
-    def rm_segment_dir(self, dir_name):
-        self.rm_dirs.append(dir_name)
         return True
 
     def delete_kb_vectors_by_file(self, kb_name, file_id):
@@ -205,18 +184,8 @@ def _build_fixture():
         "file-ORPHAN2": (["c3"], ["doc3"], [{"file_id": "o2a"}]),
         "file-g1": (["g1c"], ["ghostdoc"], [{"file_id": "g1"}]),
     }
-    vsegs = {"sf1", "sf3", "sf6", "sg1", "sp1", "sfd1", "sda", "sdb",
-             "so1", "so2", "skb1", "skbd", "skbb"}
-    seg_for_coll = {
-        "cf1": "sf1", "cf3": "sf3", "cf6": "sf6", "cg1": "sg1", "cp1": "sp1",
-        "cfd1": "sfd1", "cda": "sda", "cdb": "sdb", "co1": "so1", "co2": "so2",
-        "ckb1": "skb1", "ckbd": "skbd", "ckbb": "skbb",
-    }
-    disk = vsegs | {"dangling1", "dangling2"}   # class 11 (2 dangling)
-    dir_sizes = {"dangling1": 1000, "dangling2": 2000, "so1": 500, "so2": 500, "sg1": 300}
     return dict(files=files, junction=junction, kb_ids=kb_ids, dir_ids=dir_ids,
-                colls=colls, coll_meta=coll_meta, coll_docs=coll_docs, vsegs=vsegs,
-                seg_for_coll=seg_for_coll, disk=disk, dir_sizes=dir_sizes)
+                colls=colls, coll_meta=coll_meta, coll_docs=coll_docs)
 
 
 def _make_stores(fix, tmp, admin_key="ADM"):
@@ -254,8 +223,6 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(c["dead_kb_junction_rows"].count, 1)    # kb-dead
         self.assertEqual(c["non_completed_leftovers"].count, 1) # p1
         self.assertEqual(c["idempotency_duplicates"].count, 2)   # dup1a+dup1b
-        self.assertEqual(c["dangling_segment_dirs"].count, 2)
-        self.assertEqual(c["dangling_segment_dirs"].detail["total_bytes"], 3000)
         self.assertEqual(c["file_rows_no_knowledge_id"].count, 1)  # n1
 
     def test_knowledge_bases_never_flagged(self):
@@ -298,7 +265,7 @@ class TestClassify(unittest.TestCase):
             self.assertNotEqual(kb_id, "kb-dead")
 
     def test_kb_scoping(self):
-        """--kb scopes the KB-tagged classes; classes 3, 11, 12 stay global."""
+        """--kb scopes the KB-tagged classes; classes 3, 12 stay global."""
         c, _ = self._classes(kb="kb-dead")
         self.assertEqual(c["ghost_rows"].count, 0)        # fd1 is linked
         self.assertEqual(c["dead_kb_junction_rows"].count, 1)
@@ -306,7 +273,6 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(c["orphan_junction_rows"].count, 0)
         # global classes unchanged
         self.assertEqual(c["orphan_file_collections"].count, 2)
-        self.assertEqual(c["dangling_segment_dirs"].count, 2)
         self.assertEqual(c["file_rows_no_knowledge_id"].count, 1)
 
     def test_totals(self):
@@ -315,8 +281,6 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(c["_totals"]["knowledge_kbs"], 1)
         self.assertEqual(c["_totals"]["junction_rows"], 9)
         self.assertEqual(c["_totals"]["chroma_collections"], 13)
-        self.assertEqual(c["_totals"]["vector_segment_dirs"], 15)
-        self.assertEqual(c["_totals"]["vector_segments"], 13)
         self.assertEqual(c["_totals"]["scope"], "ALL")
 
 
@@ -333,28 +297,21 @@ class TestPurgeSafe(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_safe_purge_drops_ghosts_orphans_and_dirs(self):
+    def test_safe_purge_drops_ghosts_and_orphans(self):
         export_dir = kc._export_dir(self.stores.data_dir, self.opts.ts)
         manifest = kc.purge(self.stores, self.classes, self.opts, export_dir)
-        # ghost -> OWUI DELETE + residual file-g1 drop + rm its segment dir
+        # ghost -> OWUI DELETE + residual file-g1 collection drop
         self.assertEqual(self.stores.owui_deletes, ["g1"])
         self.assertIn("file-g1", self.stores.deleted_collections)
-        self.assertIn("sg1", self.stores.rm_dirs)
-        # class 3 orphans dropped (+ rm their segment dirs)
+        # class 3 orphans dropped
         for name in ("file-ORPHAN1", "file-ORPHAN2"):
             self.assertIn(name, self.stores.deleted_collections)
-        self.assertIn("so1", self.stores.rm_dirs)
-        self.assertIn("so2", self.stores.rm_dirs)
-        # class 11 dangling dirs removed
-        self.assertIn("dangling1", self.stores.rm_dirs)
-        self.assertIn("dangling2", self.stores.rm_dirs)
         # maint classes NOT touched in safe tier
         self.assertEqual(self.stores.deleted_kb_vectors, [])
         self.assertEqual(self.stores.deleted_junction_files, [])
         self.assertEqual(self.stores.deleted_junction_kbs, [])
         # manifest + export written (backup on)
         self.assertEqual(len(manifest["purged_collections"]), 3)  # g1 + 2 orphans
-        self.assertEqual(len(manifest["dangling_dirs"]), 2)
         self.assertTrue(os.path.isdir(export_dir))
         for entry in manifest["purged_collections"]:
             self.assertTrue(os.path.isfile(
@@ -368,8 +325,6 @@ class TestPurgeSafe(unittest.TestCase):
         self.assertIn("file-ORPHAN1", self.stores.deleted_collections)
         # no export files written
         self.assertEqual(len(manifest["purged_collections"]), 0)
-        # segment dirs still reclaimed (seg id resolved without export)
-        self.assertIn("sg1", self.stores.rm_dirs)
 
     def test_advisory_classes_not_purged(self):
         export_dir = kc._export_dir(self.stores.data_dir, self.opts.ts)
@@ -399,7 +354,7 @@ class TestPurgeMaint(unittest.TestCase):
 
     def test_maint_purges_5b_7_8_only(self):
         manifest = kc.purge(self.stores, self.classes, self.opts, None)
-        # 5b: leaked KB vectors via direct Chroma delete (kb-1, LEAK1)
+        # 5b: leaked KB vectors via direct delete (kb-1, LEAK1)
         self.assertEqual(self.stores.deleted_kb_vectors, [("kb-1", "LEAK1")])
         # 7: orphan junction rows (fX)
         self.assertEqual(self.stores.deleted_junction_files, ["fX"])
@@ -408,7 +363,6 @@ class TestPurgeMaint(unittest.TestCase):
         # safe-tier classes NOT touched in maint mode
         self.assertEqual(self.stores.owui_deletes, [])
         self.assertEqual(self.stores.deleted_collections, [])
-        self.assertEqual(self.stores.rm_dirs, [])
         self.assertEqual(len(manifest["kb_vectors"]), 1)
 
 
@@ -474,22 +428,27 @@ class TestMain(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.fix = _build_fixture()
         self._orig_stores = kc.Stores
-        self._orig_env = os.environ.get("OPENWEBUI_ADMIN_API_KEY")
-        self._orig_vdb = os.environ.get("VECTOR_DB")
+        # main() -> make_stores() checks VECTOR_DB=pgvector + the 4 PG env vars
+        # BEFORE the kc.Stores lambda patch intercepts the Stores() call, so set
+        # them here (the lambda ignores make_stores' args and builds FakeStores).
+        self._snap = {k: os.environ.get(k) for k in
+                      ("OPENWEBUI_ADMIN_API_KEY", "VECTOR_DB", "PGVECTOR_USER",
+                       "PGVECTOR_PASSWORD", "PGVECTOR_DB", "PGVECTOR_DB_URL")}
         os.environ["OPENWEBUI_ADMIN_API_KEY"] = "ADM"
-        os.environ["VECTOR_DB"] = "chroma"
+        os.environ["VECTOR_DB"] = "pgvector"
+        os.environ["PGVECTOR_USER"] = "u"
+        os.environ["PGVECTOR_PASSWORD"] = "p"
+        os.environ["PGVECTOR_DB"] = "d"
+        os.environ["PGVECTOR_DB_URL"] = "postgresql://u:p@postgres:5432/d"
         kc.Stores = lambda *a, **k: _make_stores(self.fix, self.tmp, admin_key="ADM")
 
     def tearDown(self):
         kc.Stores = self._orig_stores
-        if self._orig_env is None:
-            os.environ.pop("OPENWEBUI_ADMIN_API_KEY", None)
-        else:
-            os.environ["OPENWEBUI_ADMIN_API_KEY"] = self._orig_env
-        if self._orig_vdb is None:
-            os.environ.pop("VECTOR_DB", None)
-        else:
-            os.environ["VECTOR_DB"] = self._orig_vdb
+        for k, v in self._snap.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -537,14 +496,23 @@ class TestRepair(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        self._orig_vdb = os.environ.get("VECTOR_DB")
-        os.environ["VECTOR_DB"] = "chroma"
+        # test_main_repair -> main() -> make_stores() needs VECTOR_DB=pgvector +
+        # the 4 PG env vars to reach the kc.Stores lambda patch.
+        self._snap = {k: os.environ.get(k) for k in
+                      ("VECTOR_DB", "PGVECTOR_USER", "PGVECTOR_PASSWORD",
+                       "PGVECTOR_DB", "PGVECTOR_DB_URL")}
+        os.environ["VECTOR_DB"] = "pgvector"
+        os.environ["PGVECTOR_USER"] = "u"
+        os.environ["PGVECTOR_PASSWORD"] = "p"
+        os.environ["PGVECTOR_DB"] = "d"
+        os.environ["PGVECTOR_DB_URL"] = "postgresql://u:p@postgres:5432/d"
 
     def tearDown(self):
-        if self._orig_vdb is None:
-            os.environ.pop("VECTOR_DB", None)
-        else:
-            os.environ["VECTOR_DB"] = self._orig_vdb
+        for k, v in self._snap.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -780,9 +748,9 @@ class FakePgConn:
         self.commits += 1
 
 
-class FakePgStores(kc.PgVectorStores):
-    """PgVectorStores with the SQLite reads overridden by fixtures + a fake
-    Postgres connection (no real psycopg2, no real DB, no network)."""
+class FakePgStores(kc.Stores):
+    """Stores (pgvector-only) with the SQLite reads overridden by fixtures + a
+    fake Postgres connection (no real psycopg2, no real DB, no network)."""
 
     def __init__(self, data_dir, files, junction, kb_ids, dir_ids, chunks):
         super().__init__(data_dir, "http://owui", "ADM", "dsn")
@@ -862,25 +830,25 @@ class TestBackendSelection(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             kc.make_stores("/tmp", "http://owui", "ADM")
 
-    def test_chroma_returns_stores(self):
+    def test_chroma_unsupported_raises(self):
+        # Chroma was removed; VECTOR_DB=chroma now fails loud (no silent store).
         os.environ["VECTOR_DB"] = "chroma"
-        s = kc.make_stores("/tmp", "http://owui", "ADM")
-        self.assertIsInstance(s, kc.Stores)
-        self.assertNotIsInstance(s, kc.PgVectorStores)
+        with self.assertRaises(RuntimeError):
+            kc.make_stores("/tmp", "http://owui", "ADM")
 
     def test_pgvector_missing_pg_env_raises(self):
         os.environ["VECTOR_DB"] = "pgvector"
         with self.assertRaises(RuntimeError):
             kc.make_stores("/tmp", "http://owui", "ADM")
 
-    def test_pgvector_returns_pgvectorstores(self):
+    def test_pgvector_returns_stores(self):
         os.environ["VECTOR_DB"] = "pgvector"
         os.environ["PGVECTOR_USER"] = "u"
         os.environ["PGVECTOR_PASSWORD"] = "p"
         os.environ["PGVECTOR_DB"] = "d"
         os.environ["PGVECTOR_DB_URL"] = "postgresql://u:p@postgres:5432/d"
         s = kc.make_stores("/tmp", "http://owui", "ADM")
-        self.assertIsInstance(s, kc.PgVectorStores)
+        self.assertIsInstance(s, kc.Stores)
 
 
 class TestPgVectorStore(unittest.TestCase):
@@ -917,12 +885,6 @@ class TestPgVectorStore(unittest.TestCase):
         self.assertEqual(texts, ["t4"])
         self.assertEqual(mets, [{"file_id": "f1"}])
 
-    def test_class11_na_empty_disk_and_segments(self):
-        self.assertEqual(self.stores.disk_dirs(), set())
-        self.assertEqual(self.stores.vector_segment_ids(), set())
-        self.assertIsNone(self.stores.segment_dir_for_collection("anything"))
-        self.assertEqual(self.stores.dir_size("x"), 0)
-
     def test_delete_collection_removes_chunks(self):
         self.assertTrue(self.stores.delete_collection("file-ORPHAN"))
         self.assertNotIn("file-ORPHAN", self.stores._pg._chunks)
@@ -942,13 +904,10 @@ class TestPgVectorStore(unittest.TestCase):
         # nothing removed
         self.assertEqual(len(self.stores._pg._chunks["kb-1"]), 3)
 
-    def test_rm_segment_dir_noop(self):
-        self.assertTrue(self.stores.rm_segment_dir("anything"))
-
 
 class TestPgVectorClassify(unittest.TestCase):
     """classify() over a pgvector store: classes 3/4/5/6 via SQL over
-    document_chunk; class 11 N/A (empty)."""
+    document_chunk."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -977,11 +936,7 @@ class TestPgVectorClassify(unittest.TestCase):
         # class 6: completed + linked + 0 vectors in KB collection
         self.assertEqual(c["missing_kb_vectors"].count, 1)
         self.assertIn("f2", c["missing_kb_vectors"].ids)
-        # class 11: N/A for pgvector (no on-disk segment dirs)
-        self.assertEqual(c["dangling_segment_dirs"].count, 0)
-        # totals: vector_segment_dirs + vector_segments = 0
-        self.assertEqual(c["_totals"]["vector_segment_dirs"], 0)
-        self.assertEqual(c["_totals"]["vector_segments"], 0)
+        # totals: chroma_collections counts distinct collection_name rows
         self.assertEqual(c["_totals"]["chroma_collections"], 4)
 
 
