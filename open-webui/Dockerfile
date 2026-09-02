@@ -28,6 +28,17 @@
 ARG OPENWEBUI_BASE_DIGEST=sha256:6a773e5c3a246b65cbe74ce942b294292c0e5f81c138f703d111bc162f7d7c3d
 FROM ghcr.io/open-webui/open-webui:main@${OPENWEBUI_BASE_DIGEST}
 
+# Ops debug tool: the sqlite3 CLI lets an operator inspect webui.db (the OWUI
+# SQLite app DB: file / knowledge / knowledge_file tables) without a host-side
+# Python one-liner:
+#   docker exec kb-openwebui sqlite3 /app/backend/data/webui.db "SELECT ..."
+# Installed for webui.db only (Chroma is removed; vector_db/ is gone). Not an
+# OWUI behavioral patch, so the patch-suffix image tag below does not track it.
+# Placed before the patch COPY/RUN so this layer caches independently of patch
+# changes.
+RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY apply_path_hash.py /tmp/apply_path_hash.py
 COPY apply_upload_idempotency.py /tmp/apply_upload_idempotency.py
 COPY apply_mtime_to_chunks.py /tmp/apply_mtime_to_chunks.py
