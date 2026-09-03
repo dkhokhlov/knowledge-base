@@ -219,4 +219,160 @@ fc2=$(curl -s "$H/api/v1/knowledge/$KB_ID/files" "${ADM[@]}" 2>/dev/null \
 [ "${fc2:-0}" -eq 1 ] && pass "fixture KB linked files=1 (beta intact; alpha purged)" \
   || { fail "fixture KB linked files=$fc2 (expected 1; purge affected beta)"; finish; exit 1; }
 
+# --- 7. class 11: stale root KB (source=root, no backing dir) ---------------
+# Create a source=root KB whose ./root/<name>/ dir does NOT exist -> stale. The
+# class-11 detector parses the source= kv from the description (created by hand
+# here to match what kb-bootstrap.sh writes; the gateway is NOT needed -- the
+# e2e child env has no live KB_HOST). Synthetic name + description (no PII).
+# NOTE: in the e2e CLONE, ./root/* is gitignored (only .tests/ is tracked), so
+# ROOT_DIRS=[] -> every source=root KB is stale (legitimate per the design: an
+# empty scan means no backing dirs). This named throwaway stack is the only
+# place prune runs, so pruning root KBs here is safe.
+section "make kb-check (class 11: stale root KB)"
+STALE_NAME="stale-iso-kbcheck"
+STALE_DESC="Indexed from local root/$STALE_NAME/ via api-gateway | source=root | host=testhost | path=$STALE_NAME"
+STALE_ID=$(curl -s -X POST "$H/api/v1/knowledge/create" "${ADM[@]}" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"$STALE_NAME\",\"description\":\"$STALE_DESC\"}" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
+[ -n "$STALE_ID" ] && pass "stale root KB id: $STALE_ID (name=$STALE_NAME, no backing dir)" \
+  || { fail "stale root KB create failed"; finish; exit 1; }
+
+# Helper: space-joined KB ids whose parsed description source == $1.
+kbs_by_source() {
+  curl -s "$H/api/v1/knowledge/?page=1" "${ADM[@]}" 2>/dev/null \
+  | python3 -c 'import sys,json
+src=sys.argv[1]
+def parse(d):
+    kv={}
+    for t in (d or "").split("|"):
+        t=t.strip()
+        if "=" in t:
+            k,_,v=t.partition("="); kv[k.strip()]=v.strip()
+    if "source" in kv: return kv["source"]
+    if (d or "").startswith("Indexed from local root/"): return "root"
+    if (d or "").startswith("Indexed from local "): return "root"
+    if (d or "").startswith("Claude projects memory"): return "projects-memory"
+    return "unknown"
+data=json.load(sys.stdin)
+items=data.get("items",[]) if isinstance(data,dict) else (data or [])
+print(" ".join(i.get("id","") for i in items if parse(i.get("description",""))==src))' "$1" 2>/dev/null || true
+}
+# Snapshot the projects-memory KBs BEFORE any prune (the prune must NEVER
+# touch source=projects-memory KBs; their backing is ~/.claude/projects/).
+PROJ_BEFORE="$(kbs_by_source projects-memory)"
+
+audit2=$(JSON=1 make kb-check 2>/dev/null)
+stale_samples=$(printf '%s' "$audit2" | python3 -c 'import sys,json;print(" ".join(json.load(sys.stdin)["classes"]["stale_root_kb"]["samples"]))' 2>/dev/null || true)
+if printf '%s' "$stale_samples" | grep -q "$STALE_ID"; then
+  pass "stale_root_kb flags $STALE_ID"
+else
+  fail "stale_root_kb samples='$stale_samples' (expected to include $STALE_ID)"
+  printf '%s\n' "$audit2" | tail -8 >&2
+  finish; exit 1
+fi
+# The audit advises PRUNE_KB=1 for class 11.
+printf '%s' "$audit2" | python3 -c 'import sys,json
+ad=json.load(sys.stdin).get("advised_commands",[])
+sys.exit(0 if any("PRUNE_KB=1" in c for c in ad) else 1)' \
+  || { fail "advised_commands missing PRUNE_KB=1 for class 11"; finish; exit 1; }
+pass "advised: PRUNE_KB=1 make kb-check"
+
+# --- 8. negative gates -----------------------------------------------------
+section "PRUNE_KB negative gates"
+# PRUNE_KB=0 must NOT prune: the stale KB survives an audit.
+if PRUNE_KB=0 make kb-check >/dev/null 2>&1; then :; fi
+stale_exists=$(curl -s "$H/api/v1/knowledge/$STALE_ID" "${ADM[@]}" 2>/dev/null \
+  | python3 -c 'import sys,json
+try:
+    print("yes" if json.load(sys.stdin).get("id") else "no")
+except Exception:
+    print("no")' 2>/dev/null || echo no)
+[ "$stale_exists" = "yes" ] && pass "PRUNE_KB=0 did NOT prune (stale KB survives)" \
+  || { fail "PRUNE_KB=0 pruned the stale KB (must not)"; finish; exit 1; }
+
+# PRUNE_KB=1 BACKUP=0 -> error (backup is mandatory for prune).
+if PRUNE_KB=1 BACKUP=0 make kb-check >/tmp/kbc_nobackup.out 2>&1; then rc=0; else rc=$?; fi
+if [ "${rc:-0}" -ne 0 ] && grep -q "requires a backup" /tmp/kbc_nobackup.out; then
+  pass "PRUNE_KB=1 BACKUP=0 rejected (rc=$rc)"
+else
+  fail "PRUNE_KB=1 BACKUP=0 not rejected (rc=$rc)"; tail -5 /tmp/kbc_nobackup.out >&2; finish; exit 1
+fi
+
+# PRUNE_KB=1 MAINT=1 -> Makefile incompat error (prune needs OWUI running).
+if PRUNE_KB=1 MAINT=1 make kb-check >/tmp/kbc_maint.out 2>&1; then rc=0; else rc=$?; fi
+if [ "${rc:-0}" -ne 0 ] && grep -q "incompatible with MAINT=1" /tmp/kbc_maint.out; then
+  pass "PRUNE_KB=1 MAINT=1 rejected (rc=$rc)"
+else
+  fail "PRUNE_KB=1 MAINT=1 not rejected (rc=$rc)"; tail -5 /tmp/kbc_maint.out >&2; finish; exit 1
+fi
+
+# PRUNE_KB=1 REPAIR=1 -> same incompat error.
+if PRUNE_KB=1 REPAIR=1 make kb-check >/tmp/kbc_repair.out 2>&1; then rc=0; else rc=$?; fi
+if [ "${rc:-0}" -ne 0 ] && grep -q "incompatible with MAINT=1" /tmp/kbc_repair.out; then
+  pass "PRUNE_KB=1 REPAIR=1 rejected (rc=$rc)"
+else
+  fail "PRUNE_KB=1 REPAIR=1 not rejected (rc=$rc)"; tail -5 /tmp/kbc_repair.out >&2; finish; exit 1
+fi
+
+# Stale KB still present (all negative gates are non-mutating).
+stale_exists2=$(curl -s "$H/api/v1/knowledge/$STALE_ID" "${ADM[@]}" 2>/dev/null \
+  | python3 -c 'import sys,json
+try:
+    print("yes" if json.load(sys.stdin).get("id") else "no")
+except Exception:
+    print("no")' 2>/dev/null || echo no)
+[ "$stale_exists2" = "yes" ] && pass "stale KB survives all negative gates" \
+  || { fail "stale KB vanished after a negative gate (should be non-mutating)"; finish; exit 1; }
+
+# --- 9. PRUNE_KB=1 make kb-check: backup + DELETE the stale root KB ----------
+section "PRUNE_KB=1 make kb-check (prune stale root KB + backup)"
+_prune_export_root="$E2E_CLONE/${_dr#./}/openwebui/check-exports"
+# Mark the current latest export so we can identify the prune's NEW dir after.
+_prev_latest=$(ls -1d "$_prune_export_root"/*/ 2>/dev/null | tail -1)
+if PRUNE_KB=1 make kb-check >/tmp/kbc_prune.out 2>&1; then rc=0; else rc=$?; fi
+[ "${rc:-0}" -eq 0 ] || { fail "PRUNE_KB=1 make kb-check failed (rc=$rc)"; tail -10 /tmp/kbc_prune.out >&2; finish; exit 1; }
+pass "PRUNE_KB=1 make kb-check rc=0"
+# A NEW export dir was created (the prune's strict backup, with a fresh ts).
+_new_latest=$(ls -1d "$_prune_export_root"/*/ 2>/dev/null | tail -1)
+if [ -n "$_new_latest" ] && [ "$_new_latest" != "$_prev_latest" ]; then
+  pass "new export dir: $_new_latest"
+else
+  fail "no new export dir after prune (prev=$_prev_latest new=$_new_latest)"; finish; exit 1
+fi
+# The strict backup <kb_id>.jsonl was written before the DELETE.
+_backup="$_new_latest/$STALE_ID.jsonl"
+[ -f "$_backup" ] && pass "backup written: $_backup" \
+  || { fail "no backup file $_backup"; ls -la "$_new_latest" >&2; finish; exit 1; }
+# The prune manifest records the pruned KB.
+if [ -f "$_new_latest/prune-manifest.json" ]; then
+  _pn=$(python3 -c 'import sys,json;print(len(json.load(open(sys.argv[1]))["pruned_kbs"]))' "$_new_latest/prune-manifest.json" 2>/dev/null || echo 0)
+  [ "${_pn:-0}" -ge 1 ] && pass "prune-manifest: pruned_kbs=$_pn" \
+    || { fail "prune-manifest pruned_kbs=$_pn (expected >=1)"; finish; exit 1; }
+else
+  fail "no prune-manifest.json in $_new_latest"; finish; exit 1
+fi
+
+# The stale KB is gone from OWUI (DELETE /knowledge/{id}/delete).
+stale_gone=$(curl -s "$H/api/v1/knowledge/$STALE_ID" "${ADM[@]}" 2>/dev/null \
+  | python3 -c 'import sys,json
+try:
+    print("no" if json.load(sys.stdin).get("id") else "no")
+except Exception:
+    print("no")' 2>/dev/null || echo no)
+[ "$stale_gone" = "no" ] && pass "stale root KB $STALE_ID deleted from OWUI" \
+  || { fail "stale root KB still exists after prune"; finish; exit 1; }
+
+# Guard: NO projects-memory KB was pruned (the prune touches source=root only).
+PROJ_AFTER="$(kbs_by_source projects-memory)"
+[ "$PROJ_BEFORE" = "$PROJ_AFTER" ] && pass "projects-memory KBs untouched by prune" \
+  || { fail "prune touched projects-memory KBs: before=[$PROJ_BEFORE] after=[$PROJ_AFTER]"; finish; exit 1; }
+
+# Re-audit: class 11 no longer flags STALE_ID.
+re2=$(JSON=1 make kb-check 2>/dev/null)
+re_samples=$(printf '%s' "$re2" | python3 -c 'import sys,json;print(" ".join(json.load(sys.stdin)["classes"]["stale_root_kb"]["samples"]))' 2>/dev/null || true)
+if printf '%s' "$re_samples" | grep -q "$STALE_ID"; then
+  fail "re-audit still flags $STALE_ID after prune (samples='$re_samples')"; finish; exit 1
+fi
+pass "re-audit: $STALE_ID no longer stale"
+
 finish

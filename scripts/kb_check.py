@@ -10,7 +10,7 @@ The KB stack has two stores that are NOT ACID across each other:
 
 Drift this tool detects + clears: ghost rows, orphan file-{id} collections (the
 files.py `delete()` no-op leak), orphan KB vectors, dead-KB junction rows, and
-more (11 classes). See the class table in the report.
+more (12 classes). See the class table in the report.
 
 `psycopg2` lives only in the kb-openwebui image, so this tool runs INSIDE that
 container via `docker exec -i kb-openwebui python3 - < scripts/kb_check.py`
@@ -61,6 +61,36 @@ TIER_ADVISORY = "advisory"  # report + advise only, never auto-purged
 REPAIR_STALE_SECS = 60
 
 log = logging.getLogger("kb-check")
+
+
+def _parse_kb_source(desc):
+    """Parse the KB source attribute from the `description` string.
+
+    The source attribute lives in the writable `description` as
+    `<prose lead> | <kv>` (OWUI's REST API cannot write the `meta` JSONB field).
+    kv-order-agnostic: split on `|`, read each `k=v`, ignore non-kv prose. A
+    `source=` kv is authoritative. Else prefix-detect the legacy prose lead:
+    `Indexed from local root/` (new-migration) or `Indexed from local <name>/`
+    (pre-migration, no `root/`) -> `root`; `Claude projects memory` ->
+    `projects-memory`; else `unknown`. Mirrors `_parse_kb_desc` in
+    skills/claude/scripts/kb.py (kept local here: kb.py lives in the skill, not
+    in the container this tool runs in)."""
+    d = desc or ""
+    kv = {}
+    for tok in d.split("|"):
+        tok = tok.strip()
+        if "=" in tok:
+            k, _, v = tok.partition("=")
+            kv[k.strip()] = v.strip()
+    if "source" in kv:
+        return kv["source"]
+    if d.startswith("Indexed from local root/"):
+        return "root"
+    if d.startswith("Indexed from local "):
+        return "root"
+    if d.startswith("Claude projects memory"):
+        return "projects-memory"
+    return "unknown"
 
 
 class _UtcISOFormatter(logging.Formatter):
@@ -211,6 +241,37 @@ class Stores:
             self._cache["kb_ids"] = out
         return self._cache["kb_ids"]
 
+    def knowledge_rows(self):
+        """[(kb_id, name, description)] for every row in the knowledge table.
+        The `description` carries the source-attribute kv (parsed to identify
+        root-backed KBs for the stale-root-KB check)."""
+        if "kb_rows" not in self._cache:
+            out = []
+            for r in self._webui().execute(
+                    "SELECT id, name, description FROM knowledge"):
+                out.append((r["id"], r["name"], r["description"] or ""))
+            self._cache["kb_rows"] = out
+        return self._cache["kb_rows"]
+
+    def kb_in_flight(self, kb_id):
+        """Count of a KB's file rows with status pending/processing (a drain is
+        in flight). Used by the prune path as a TOCTOU re-check immediately
+        before export+delete. Reads via a FRESH connection (not the cached
+        file_rows snapshot, and not the long-lived _webui() RO connection whose
+        snapshot is frozen at its first read) so a drain started AFTER the
+        classify snapshot IS detected."""
+        con = sqlite3.connect("file:%s?mode=ro" % self.webui_db_path, uri=True)
+        try:
+            cur = con.execute(
+                "SELECT count(*) FROM file "
+                "WHERE json_extract(meta, '$.data.knowledge_id') = ? "
+                "AND json_extract(data, '$.status') "
+                "IN ('pending', 'processing')",
+                (kb_id,))
+            return cur.fetchone()[0]
+        finally:
+            con.close()
+
     def directory_ids(self):
         """set of every knowledge_directory.id."""
         if "dir_ids" not in self._cache:
@@ -297,6 +358,61 @@ class Stores:
         cur = self._pg_conn().cursor()
         cur.execute("DELETE FROM document_chunk WHERE collection_name=%s", (name,))
         self._pg_conn().commit()
+        return True
+
+    def collection_count(self, name):
+        """Live chunk count for a collection (strict: raises on DB error, unlike
+        collection_documents which swallows them). Used by export_collection_strict
+        to verify the backup captured every row."""
+        cur = self._q(
+            "SELECT count(*) FROM document_chunk WHERE collection_name=%s", (name,))
+        return cur.fetchone()[0]
+
+    def export_collection_strict(self, name, export_dir):
+        """Strict backup of a collection's chunks before a prune DELETE. Unlike
+        export_collection (which feeds the fail-open collection_documents that
+        swallows DB errors -> empty lists), this raises on any query error and
+        asserts the exported row count == the live count, so a pgvector read
+        failure can NEVER produce an empty-looking backup followed by a delete.
+        Returns a manifest entry {name, chunk_count, path}."""
+        cur = self._q(
+            "SELECT id, text, vmetadata FROM document_chunk WHERE collection_name=%s",
+            (name,))
+        rows = list(cur)
+        safe_name = name.replace(os.sep, "_")
+        path = os.path.join(export_dir, safe_name + ".jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps({"id": r[0], "metadata": r[2],
+                                    "document": r[1]}, ensure_ascii=False) + "\n")
+        live = self.collection_count(name)
+        if len(rows) != live:
+            raise RuntimeError(
+                "strict export count mismatch for %s: wrote %d, live count %d "
+                "-- aborting (concurrent write or DB error)" % (name, len(rows), live))
+        return {"name": name, "chunk_count": len(rows), "path": path}
+
+    def owui_delete_kb(self, kb_id):
+        """OWUI REST DELETE /api/v1/knowledge/{id}/delete at the in-container OWUI
+        base. The route returns the DB-delete result as a JSON bool (HTTP 200 +
+        body `false` if the row delete fails), so a plain status check is NOT
+        enough -- require body == true. OWUI wraps its vector delete_collection
+        in try/except: pass, so a vector-cleanup failure is silently swallowed
+        by OWUI; the KB-row delete (body `true`) is what we require, and any
+        residual vectors surface as class 5b on the next kb-check. Raises on
+        non-200, body != true, or missing admin key."""
+        if not self.admin_key:
+            raise RuntimeError("OPENWEBUI_ADMIN_API_KEY unset (prune needs it)")
+        url = "%s/api/v1/knowledge/%s/delete" % (self.owui_base, kb_id)
+        req = urllib.request.Request(url, method="DELETE",
+                                     headers={"Authorization": "Bearer " + self.admin_key})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            if resp.status >= 300:
+                raise RuntimeError("OWUI DELETE KB %s -> HTTP %d" % (kb_id, resp.status))
+            body = resp.read().decode().strip()
+        if body != "true":
+            raise RuntimeError("OWUI DELETE KB %s -> body %r (row not deleted)"
+                               % (kb_id, body[:64]))
         return True
 
     # --- mutating: maintenance tier (OWUI stopped) ------------------------
@@ -397,10 +513,11 @@ def make_stores(data_dir, owui_base, admin_key):
 
 # --- classification (pure logic over Stores) ------------------------------
 
-def classify(stores, kb=None):
-    """Return {class_name: ClassResult} for all 11 classes + a '_totals' dict.
-    `kb` scopes the KB-tagged classes to one knowledge_id; classes 3, 12 are
-    KB-agnostic (always global)."""
+def classify(stores, kb=None, root_dirs=None):
+    """Return {class_name: ClassResult} for all 12 classes + a '_totals' dict.
+    `kb` scopes the KB-tagged classes to one knowledge_id; classes 3, 11, 12 are
+    KB-agnostic (always global). `root_dirs` (set of ./root/<name> top dirs, or
+    None to skip) drives class 11 (stale root KBs)."""
     all_files = stores.file_rows()
     all_junction = stores.junction_rows()
     kb_ids = stores.knowledge_ids()        # {kb_id: name} (live KBs)
@@ -550,9 +667,24 @@ def classify(stores, kb=None):
     c10_ids = [fid for fids in groups.values() if len(fids) > 1 for fid in fids]
     classes["idempotency_duplicates"] = ClassResult(c10_ids, TIER_ADVISORY)
 
-    # (class 11, dangling on-disk segment dirs, was Chroma-only: pgvector has no
-    # per-collection HNSW dirs, so it is dropped. The document_chunk table is the
-    # sole vector store.)
+    # 11. stale root KBs: a source=root KB whose ./root/<name>/ dir is gone. The
+    # source attribute lives in the KB description kv (parsed by _parse_kb_source);
+    # only source=root KBs are root-backed (source=projects-memory KBs are backed
+    # by ~/.claude/projects/, never stale here; source=unknown is fail-safe-not-
+    # stale). KB-agnostic (global; orthogonal to the KB=<id> vector-store scope).
+    # root_dirs is None -> check skipped (the Makefile always passes it; a direct
+    # kb_check.py run without --root-dirs skips gracefully). root_dirs may be an
+    # empty set (./root/ exists but has no children -> every source=root KB is
+    # stale). ids are kb_id STRINGS (report joins them as strings); the (id, name)
+    # pairs live in detail for the prune path + SHOW_NAMES rendering.
+    if root_dirs is None:
+        classes["stale_root_kb"] = ClassResult(
+            [], TIER_ADVISORY, {"skipped": True})
+    else:
+        stale = [(kid, name) for kid, name, desc in stores.knowledge_rows()
+                 if _parse_kb_source(desc) == "root" and name not in root_dirs]
+        classes["stale_root_kb"] = ClassResult(
+            [kid for kid, _ in stale], TIER_ADVISORY, {"stale_kbs": stale})
 
     # 12. file rows with no knowledge_id (awareness only). GLOBAL (KB-agnostic).
     c12_ids = [fid for fid, fr in all_files.items() if not fr.knowledge_id]
@@ -583,6 +715,7 @@ CLASS_ORDER = [
     ("dead_kb_junction_rows", "8"),
     ("non_completed_leftovers", "9"),
     ("idempotency_duplicates", "10"),
+    ("stale_root_kb", "11"),
     ("file_rows_no_knowledge_id", "12"),
 ]
 
@@ -611,7 +744,10 @@ def advised_commands(classes):
     stuck = (classes["non_completed_leftovers"].detail or {}).get("stuck_processing_linked", [])
     if stuck:
         cmds.append("REPAIR=1 make kb-check          # stop OWUI, repair stuck-processing-while-linked -> completed")
-    if not safe and not maint and not stuck:
+    stale = classes["stale_root_kb"]
+    if stale.detail and not stale.detail.get("skipped") and stale.count > 0:
+        cmds.append("PRUNE_KB=1 make kb-check        # delete stale root KBs (backup first; irreversible w/o source dir)")
+    if not safe and not maint and not stuck and not (stale.count > 0):
         cmds.append("# no purgeable/repairable classes found; nothing to do")
     return cmds
 
@@ -646,6 +782,13 @@ def report_human(classes, show_names, names):
             _stuck = c.detail.get("stuck_processing_linked", [])
             if _stuck:
                 out.append("      stuck_processing_linked=%d (repairable: REPAIR=1)" % len(_stuck))
+        if name == "stale_root_kb" and c.detail:
+            if c.detail.get("skipped"):
+                out.append("      skipped (pass --root-dirs to enable)")
+            elif c.detail.get("stale_kbs"):
+                _names = ", ".join("%s(%s)" % (n, kid)
+                                   for kid, n in c.detail["stale_kbs"][:SAMPLE_CAP])
+                out.append("      stale root KBs: %s" % _names)
     out.append("")
     out.append("Advised commands:")
     for c in advised_commands(classes):
@@ -756,6 +899,47 @@ def _purge_maint(stores, classes, manifest):
         log.info("purge dead-KB junction rows: %d (sqlite DELETE; OWUI stopped)", c8.count)
     for kb_id in set(c8.ids):
         stores.delete_junction_by_knowledge(kb_id)
+
+
+# --- prune stale root KBs (class 11; --prune-kb) --------------------------
+# Separate from purge(): a dedicated PRUNE_KB=1 flag, NOT a purge tier, so the
+# routine PURGE (orphan-vector cleanup) never deletes a whole KB. Destructive:
+# the KB + its index are gone (re-indexing needs the source dir, which is gone).
+# A timestamped backup is MANDATORY (export_collection_strict: no fail-open).
+# Per-KB in-flight guard: refuse if a drain is running for that KB (TOCTOU
+# re-check from SQLite, not the classify snapshot). OWUI must be running (REST
+# DELETE); the Makefile rejects PRUNE_KB with MAINT/REPAIR (which stop OWUI).
+
+def prune_stale_kbs(stores, classes, export_dir):
+    """Delete every class-11 stale root KB: strict backup -> in-flight re-check
+    -> OWUI REST DELETE. Returns a manifest {pruned_kbs, skipped_in_flight}."""
+    manifest = {"pruned_kbs": [], "skipped_in_flight": []}
+    stale = (classes["stale_root_kb"].detail or {}).get("stale_kbs", [])
+    if not stale:
+        log.info("prune stale root KBs: 0 (none stale)")
+        return manifest
+    log.info("prune stale root KBs: %d (backup=%s)", len(stale), export_dir)
+    for kb_id, name in stale:
+        # 1. in-flight guard (TOCTOU re-check; never reuse the classify snapshot).
+        inflight = stores.kb_in_flight(kb_id)
+        if inflight > 0:
+            log.warning("SKIP stale root KB %s (%s): %d file(s) pending/processing "
+                        "(a drain is in flight); wait: make kb-status KB=%s",
+                        name, kb_id, inflight, name)
+            manifest["skipped_in_flight"].append(
+                {"kb_id": kb_id, "name": name, "pending": inflight})
+            continue
+        # 2. mandatory strict backup (raises on DB error / count mismatch -> abort
+        # this KB; owui_delete_kb is NOT called).
+        entry = stores.export_collection_strict(kb_id, export_dir)
+        # 3. OWUI REST DELETE (requires body == true).
+        stores.owui_delete_kb(kb_id)
+        log.info("PRUNED stale root KB %s (%s) chunks=%d backup=%s",
+                 name, kb_id, entry["chunk_count"], entry["path"])
+        manifest["pruned_kbs"].append(
+            {"kb_id": kb_id, "name": name,
+             "chunk_count": entry["chunk_count"], "backup": entry["path"]})
+    return manifest
 
 
 # --- repair (class 9 stuck-processing-while-linked) -----------------------
@@ -998,6 +1182,16 @@ def main(argv=None):
                          "files -> completed (OWUI must be stopped; may combine with --purge)")
     ap.add_argument("--no-backup", action="store_true",
                     help="skip the export (backup is ON by default when --purge)")
+    ap.add_argument("--root-dirs", default=None,
+                    help="JSON array of ./root/<name> top dirs (host-computed); "
+                         "drives the class-11 stale-root-KB check. None (omit) skips "
+                         "class 11; [] means ./root/ has no children (every "
+                         "source=root KB is stale).")
+    ap.add_argument("--prune-kb", action="store_true",
+                    help="delete stale root KBs (class 11) via OWUI REST "
+                         "DELETE /knowledge/{id}/delete; always backs up first "
+                         "(strict, mandatory); needs OWUI running + admin key; "
+                         "separate from --purge (orphan-vector cleanup).")
     ap.add_argument("--bm25-gate", action="store_true",
                     help="run ONLY the BM25 release-gate probes (patch 10 + "
                          "patch 11): pg_search extension + idx_document_chunk_bm25 "
@@ -1012,8 +1206,21 @@ def main(argv=None):
     args.ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     args.backup = not args.no_backup
 
+    # --prune-kb validations: backup is mandatory; OWUI must be running (so it
+    # is incompatible with --maint/--repair, which stop OWUI). The Makefile also
+    # enforces these; defend here for direct kb_check.py runs.
+    if args.prune_kb and args.no_backup:
+        log.error("--prune-kb requires a backup (incompatible with --no-backup).")
+        return 2
+    if args.prune_kb and (args.maint or args.repair):
+        log.error("--prune-kb needs OWUI running (incompatible with --maint/--repair).")
+        return 2
+
     _configure_logging()
     admin_key = os.environ.get("OPENWEBUI_ADMIN_API_KEY") or None
+    if args.prune_kb and not admin_key:
+        log.error("--prune-kb needs OPENWEBUI_ADMIN_API_KEY (OWUI REST DELETE).")
+        return 2
     try:
         stores = make_stores(args.data_dir, args.owui_base, admin_key)
     except RuntimeError as e:
@@ -1031,8 +1238,16 @@ def main(argv=None):
                       "(run make kb-bm25-init, then re-run).")
         return 0 if green else 1
 
+    root_dirs = None
+    if args.root_dirs is not None:
+        try:
+            root_dirs = set(json.loads(args.root_dirs))
+        except (ValueError, TypeError) as e:
+            log.error("bad --root-dirs JSON: %s", e)
+            return 2
+
     log.info("auditing (scope=%s)...", args.kb or "ALL")
-    classes = classify(stores, args.kb)
+    classes = classify(stores, args.kb, root_dirs=root_dirs)
 
     # prerequisite: ghost purge (safe tier, non-maint) needs the admin key + OWUI up.
     if args.purge and not args.maint and classes["ghost_rows"].count > 0:
@@ -1042,8 +1257,12 @@ def main(argv=None):
             return 2
 
     names = {fid: fr.filename for fid, fr in stores.file_rows().items()}
+    # class-11 stale KB ids -> KB names for SHOW_NAMES rendering (ids are kb_ids,
+    # not file ids; _fmt_samples joins them as strings via this map).
+    for _kid, _kname in (classes["stale_root_kb"].detail or {}).get("stale_kbs", []):
+        names[_kid] = _kname
 
-    if not args.purge and not args.repair:
+    if not args.purge and not args.repair and not args.prune_kb:
         print(report_json(classes, args.show_names, names) if args.json
               else report_human(classes, args.show_names, names))
         return 0
@@ -1068,16 +1287,32 @@ def main(argv=None):
     if args.repair:
         repair_manifest = repair(stores, classes)
 
+    prune_manifest = None
+    prune_export_dir = None
+    if args.prune_kb:
+        # backup is mandatory for prune (validated above: --no-backup rejected).
+        prune_export_dir = _export_dir(args.data_dir, args.ts)
+        log.info("prune export dir: %s", prune_export_dir)
+        prune_manifest = prune_stale_kbs(stores, classes, prune_export_dir)
+        with open(os.path.join(prune_export_dir, "prune-manifest.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(prune_manifest, f, indent=2, ensure_ascii=False)
+        log.info("prune done. pruned_kbs=%d skipped_in_flight=%d",
+                 len(prune_manifest["pruned_kbs"]),
+                 len(prune_manifest["skipped_in_flight"]))
+
     # re-audit after any action; drop the read cache first so the post-action
     # report reflects the writes (not the pre-action snapshot).
     stores.invalidate()
-    classes2 = classify(stores, args.kb)
+    classes2 = classify(stores, args.kb, root_dirs=root_dirs)
     if args.json:
         out = json.loads(report_json(classes2, args.show_names, names))
         if purge_manifest is not None:
             out["purge_manifest"] = purge_manifest
         if repair_manifest is not None:
             out["repair_manifest"] = repair_manifest
+        if prune_manifest is not None:
+            out["prune_manifest"] = prune_manifest
         print(json.dumps(out, indent=2, ensure_ascii=False))
     else:
         print(report_human(classes2, args.show_names, names))
@@ -1094,8 +1329,20 @@ def main(argv=None):
                 print("    %s  %s" % (r["id"], r["filename"]))
             if repair_manifest["skipped"]:
                 print("  skipped:  %d" % len(repair_manifest["skipped"]))
-                for s in repair_manifest["skipped"]:
-                    print("    %s  %s" % (s["id"], s["reason"]))
+        if prune_manifest is not None:
+            print("\nPrune manifest:")
+            print("  pruned stale root KBs: %d" % len(prune_manifest["pruned_kbs"]))
+            for r in prune_manifest["pruned_kbs"]:
+                print("    %s  %s  chunks=%d  backup=%s"
+                      % (r["kb_id"], r["name"], r["chunk_count"], r["backup"]))
+            if prune_manifest["skipped_in_flight"]:
+                print("  skipped (in-flight drain): %d"
+                      % len(prune_manifest["skipped_in_flight"]))
+                for s in prune_manifest["skipped_in_flight"]:
+                    print("    %s  %s  pending=%d"
+                          % (s["kb_id"], s["name"], s["pending"]))
+            if prune_export_dir:
+                print("  export: %s/prune-manifest.json" % prune_export_dir)
     return 0
 
 

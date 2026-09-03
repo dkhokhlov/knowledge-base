@@ -1069,5 +1069,311 @@ class TestBm25Gate(unittest.TestCase):
         self.assertIn("malformed DSL", out)
 
 
+# --- class 11 (stale root KB) + --prune-kb --------------------------------
+
+class _RootStores(kc.Stores):
+    """Stub for the class-11 + prune path: overrides knowledge_rows,
+    kb_in_flight, export_collection_strict, owui_delete_kb. All other reads
+    return empty (classes 1-10, 12 stay at count 0; only class 11 fires).
+    No real DB / no REST / no gdrive (see [[tests-use-fixtures-not-gdrive]]).
+    Synthetic ids + descriptions only (no PII)."""
+
+    def __init__(self, data_dir, kb_rows, inflight=None, export_raises=False,
+                 delete_body="true", admin_key="ADM"):
+        super().__init__(data_dir, "http://owui", admin_key)
+        self._kb_rows = list(kb_rows)        # [(id, name, desc)]
+        self._inflight = dict(inflight or {})  # {kb_id: pending+processing count}
+        self._export_raises = export_raises
+        self._delete_body = delete_body
+        self.export_calls = []
+        self.delete_calls = []
+
+    def knowledge_rows(self):
+        return list(self._kb_rows)
+
+    def kb_in_flight(self, kb_id):
+        return self._inflight.get(kb_id, 0)
+
+    # empty so classes 1-10, 12 stay clean
+    def file_rows(self):
+        return {}
+
+    def junction_rows(self):
+        return []
+
+    def knowledge_ids(self):
+        return {kid: name for kid, name, _ in self._kb_rows}
+
+    def directory_ids(self):
+        return set()
+
+    def chroma_collections(self):
+        return {}
+
+    def collection_count(self, name):
+        return 0
+
+    def export_collection_strict(self, name, export_dir):
+        self.export_calls.append(name)
+        if self._export_raises:
+            raise RuntimeError("strict export DB error for %s" % name)
+        return {"name": name, "chunk_count": 0,
+                "path": os.path.join(export_dir, name + ".jsonl")}
+
+    def owui_delete_kb(self, kb_id):
+        self.delete_calls.append(kb_id)
+        if self._delete_body != "true":
+            raise RuntimeError("OWUI DELETE KB %s -> body %r"
+                               % (kb_id, self._delete_body))
+        return True
+
+    def invalidate(self):
+        pass
+
+
+def _root_kb_rows():
+    """Three KBs: a root KB whose dir is gone (stale), a root KB whose dir is
+    present (kept), and a projects-memory KB (never eligible). Synthetic."""
+    return [
+        ("kb-stale", "stale-kb",
+         "Indexed from local root/stale-kb/ via api-gateway | source=root | host=testhost | path=stale-kb"),
+        ("kb-live", "live-kb",
+         "Indexed from local root/live-kb/ via api-gateway | source=root | host=testhost | path=live-kb"),
+        ("kb-proj", "proj-kb",
+         "Claude projects memory | source=projects-memory | host=testhost | project=demo | repo=r | path=p"),
+    ]
+
+
+class TestParseKbSource(unittest.TestCase):
+    """_parse_kb_source: kv-order-agnostic; source= kv authoritative; legacy
+    prefix-detect for pre-migration root KBs (no root/ segment)."""
+
+    def test_source_kv_authoritative(self):
+        self.assertEqual(kc._parse_kb_source("x | source=root | y"), "root")
+        self.assertEqual(kc._parse_kb_source("x | source=projects-memory | y"),
+                         "projects-memory")
+
+    def test_root_new_migration_prefix(self):
+        self.assertEqual(kc._parse_kb_source(
+            "Indexed from local root/foo/ via api-gateway | host=h"), "root")
+
+    def test_root_legacy_prefix_no_root_segment(self):
+        # pre-migration form: "Indexed from local <name>/ via kb-gateway"
+        self.assertEqual(kc._parse_kb_source(
+            "Indexed from local foo/ via kb-gateway"), "root")
+
+    def test_projects_memory_prefix(self):
+        self.assertEqual(kc._parse_kb_source(
+            "Claude projects memory | host=h | project=p"), "projects-memory")
+
+    def test_unknown(self):
+        self.assertEqual(kc._parse_kb_source("some unrelated description"),
+                         "unknown")
+        self.assertEqual(kc._parse_kb_source(""), "unknown")
+        self.assertEqual(kc._parse_kb_source(None), "unknown")
+
+
+class TestClass11StaleRootKb(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _classes(self, kb_rows=None, root_dirs=None):
+        s = _RootStores(self.tmp, kb_rows or _root_kb_rows())
+        return kc.classify(s, root_dirs=root_dirs), s
+
+    def test_stale_when_dir_gone(self):
+        # root_dirs has live-kb but NOT stale-kb -> stale-kb is stale.
+        c, _ = self._classes(root_dirs={"live-kb"})
+        self.assertEqual(c["stale_root_kb"].count, 1)
+        self.assertEqual(c["stale_root_kb"].ids, ["kb-stale"])
+        self.assertEqual(c["stale_root_kb"].detail["stale_kbs"],
+                         [("kb-stale", "stale-kb")])
+
+    def test_projects_memory_never_stale(self):
+        # proj-kb is NOT in root_dirs but source=projects-memory -> never stale.
+        # With root_dirs empty, BOTH root KBs (stale-kb + live-kb) are stale;
+        # the projects-memory KB is excluded.
+        c, _ = self._classes(root_dirs=set())
+        self.assertEqual(c["stale_root_kb"].count, 2)
+        self.assertNotIn("kb-proj", c["stale_root_kb"].ids)
+
+    def test_unknown_never_stale(self):
+        rows = [("kb-u", "u-kb", "no parseable source")]
+        c, _ = self._classes(kb_rows=rows, root_dirs=set())
+        self.assertEqual(c["stale_root_kb"].count, 0)
+
+    def test_root_dirs_none_skipped(self):
+        c, _ = self._classes(root_dirs=None)
+        self.assertTrue(c["stale_root_kb"].detail.get("skipped"))
+        self.assertEqual(c["stale_root_kb"].count, 0)
+
+    def test_root_dirs_empty_all_root_stale(self):
+        # empty set -> every source=root KB is stale (both stale-kb + live-kb).
+        c, _ = self._classes(root_dirs=set())
+        self.assertEqual(c["stale_root_kb"].count, 2)
+        self.assertEqual(sorted(c["stale_root_kb"].ids),
+                         ["kb-live", "kb-stale"])
+
+    def test_ids_are_strings(self):
+        # blocker 7: ids are kb_id STRINGS (report joins them as strings).
+        c, _ = self._classes(root_dirs=set())
+        for i in c["stale_root_kb"].ids:
+            self.assertIsInstance(i, str)
+        for pair in c["stale_root_kb"].detail["stale_kbs"]:
+            self.assertIsInstance(pair, tuple)
+
+    def test_report_human_renders(self):
+        c, s = self._classes(root_dirs={"live-kb"})
+        names = {kid: name for kid, name, _ in _root_kb_rows()}
+        out = kc.report_human(c, show_names=False, names=names)
+        self.assertIn("stale_root_kb", out)
+        self.assertIn("PRUNE_KB=1", out)
+        self.assertIn("stale-kb", out)  # detail line shows the name
+        # SHOW_NAMES path also renders (names map has the kb_id -> name).
+        out2 = kc.report_human(c, show_names=True, names=names)
+        self.assertIn("stale_root_kb", out2)
+
+    def test_report_json_renders(self):
+        c, s = self._classes(root_dirs={"live-kb"})
+        names = {kid: name for kid, name, _ in _root_kb_rows()}
+        obj = json.loads(kc.report_json(c, show_names=False, names=names))
+        self.assertEqual(obj["classes"]["stale_root_kb"]["count"], 1)
+        self.assertEqual(obj["classes"]["stale_root_kb"]["samples"], ["kb-stale"])
+        self.assertTrue(any("PRUNE_KB=1" in c for c in obj["advised_commands"]))
+
+
+class TestPruneStaleKbs(unittest.TestCase):
+    """Prune ordering + safety (blockers 1, 2, 6, 8): strict backup before
+    DELETE; export error aborts (no delete); in-flight guard skips + records;
+    DELETE body false raises; a dedicated prune manifest is returned."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.export_dir = os.path.join(self.tmp, "export")
+        os.makedirs(self.export_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, stores, root_dirs):
+        classes = kc.classify(stores, root_dirs=root_dirs)
+        return kc.prune_stale_kbs(stores, classes, self.export_dir), classes
+
+    def test_backup_before_delete(self):
+        s = _RootStores(self.tmp, _root_kb_rows())
+        manifest, _ = self._run(s, root_dirs={"live-kb"})
+        self.assertEqual(len(manifest["pruned_kbs"]), 1)
+        # export called for kb-stale, then delete called for kb-stale (order).
+        self.assertEqual(s.export_calls, ["kb-stale"])
+        self.assertEqual(s.delete_calls, ["kb-stale"])
+
+    def test_export_raises_no_delete(self):
+        # blocker 2: strict export failure -> abort; owui_delete_kb NOT called.
+        s = _RootStores(self.tmp, _root_kb_rows(), export_raises=True)
+        with self.assertRaises(RuntimeError):
+            self._run(s, root_dirs={"live-kb"})
+        self.assertEqual(s.export_calls, ["kb-stale"])  # export attempted
+        self.assertEqual(s.delete_calls, [])            # delete NOT attempted
+
+    def test_inflight_skipped_not_deleted(self):
+        # blocker 8: a drain in flight for kb-stale -> skip + record, no delete.
+        s = _RootStores(self.tmp, _root_kb_rows(), inflight={"kb-stale": 3})
+        manifest, _ = self._run(s, root_dirs={"live-kb"})
+        self.assertEqual(manifest["pruned_kbs"], [])
+        self.assertEqual(len(manifest["skipped_in_flight"]), 1)
+        self.assertEqual(manifest["skipped_in_flight"][0]["kb_id"], "kb-stale")
+        self.assertEqual(manifest["skipped_in_flight"][0]["pending"], 3)
+        self.assertEqual(s.delete_calls, [])
+        self.assertEqual(s.export_calls, [])  # export NOT attempted (guard first)
+
+    def test_delete_body_false_raises(self):
+        # blocker 1: OWUI returns body false -> owui_delete_kb raises; the KB is
+        # NOT counted as pruned (manifest.append is after the DELETE).
+        s = _RootStores(self.tmp, _root_kb_rows(), delete_body="false")
+        with self.assertRaises(RuntimeError):
+            self._run(s, root_dirs={"live-kb"})
+        self.assertEqual(s.delete_calls, ["kb-stale"])  # attempted
+        # export happened before the delete attempt.
+        self.assertEqual(s.export_calls, ["kb-stale"])
+
+    def test_dedicated_manifest_shape(self):
+        # blocker 6: prune returns its own manifest {pruned_kbs, skipped_in_flight}.
+        s = _RootStores(self.tmp, _root_kb_rows())
+        manifest, _ = self._run(s, root_dirs={"live-kb"})
+        self.assertIn("pruned_kbs", manifest)
+        self.assertIn("skipped_in_flight", manifest)
+        entry = manifest["pruned_kbs"][0]
+        self.assertEqual(entry["kb_id"], "kb-stale")
+        self.assertEqual(entry["name"], "stale-kb")
+        self.assertIn("chunk_count", entry)
+        self.assertIn("backup", entry)
+
+    def test_no_stale_returns_empty_manifest(self):
+        s = _RootStores(self.tmp, _root_kb_rows())
+        manifest, _ = self._run(s, root_dirs={"live-kb", "stale-kb"})
+        self.assertEqual(manifest["pruned_kbs"], [])
+        self.assertEqual(manifest["skipped_in_flight"], [])
+        self.assertEqual(s.delete_calls, [])
+
+
+class TestPruneMainGates(unittest.TestCase):
+    """main() validates --prune-kb: rejects --no-backup, --maint/--repair, and
+    a missing admin key. Defends here for direct kb_check.py runs (the Makefile
+    enforces the same)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._snap = {k: os.environ.get(k) for k in
+                      ("OPENWEBUI_ADMIN_API_KEY", "VECTOR_DB", "PGVECTOR_USER",
+                       "PGVECTOR_PASSWORD", "PGVECTOR_DB", "PGVECTOR_DB_URL")}
+        os.environ["VECTOR_DB"] = "pgvector"
+        os.environ["PGVECTOR_USER"] = "u"
+        os.environ["PGVECTOR_PASSWORD"] = "p"
+        os.environ["PGVECTOR_DB"] = "d"
+        os.environ["PGVECTOR_DB_URL"] = "postgresql://u:p@postgres:5432/d"
+        os.environ.pop("OPENWEBUI_ADMIN_API_KEY", None)
+        self._orig = kc.Stores
+
+    def tearDown(self):
+        kc.Stores = self._orig
+        for k, v in self._snap.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_prune_no_backup_rejected(self):
+        with self.assertLogs("kb-check", level="ERROR") as cm:
+            rc = kc.main(["--data-dir", self.tmp, "--prune-kb", "--no-backup"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--prune-kb requires a backup", "\n".join(cm.output))
+
+    def test_prune_maint_rejected(self):
+        with self.assertLogs("kb-check", level="ERROR") as cm:
+            rc = kc.main(["--data-dir", self.tmp, "--prune-kb", "--maint"])
+        self.assertEqual(rc, 2)
+        self.assertIn("incompatible with --maint/--repair", "\n".join(cm.output))
+
+    def test_prune_repair_rejected(self):
+        with self.assertLogs("kb-check", level="ERROR") as cm:
+            rc = kc.main(["--data-dir", self.tmp, "--prune-kb", "--repair"])
+        self.assertEqual(rc, 2)
+        self.assertIn("incompatible with --maint/--repair", "\n".join(cm.output))
+
+    def test_prune_no_admin_key_rejected(self):
+        with self.assertLogs("kb-check", level="ERROR") as cm:
+            rc = kc.main(["--data-dir", self.tmp, "--prune-kb"])
+        self.assertEqual(rc, 2)
+        self.assertIn("OPENWEBUI_ADMIN_API_KEY", "\n".join(cm.output))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

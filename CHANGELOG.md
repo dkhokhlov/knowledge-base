@@ -30,6 +30,28 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `exclude={'access_grants'}`, so the `user:*` public-read grant survives). Each
   write re-embeds the KB metadata vector (one Ollama call per KB; a failed embed
   does NOT fail the update). Run on the stack host.
+- **`make kb-index` auto-creates missing KBs (find-or-create).** `kb-index.sh`
+  now resolves a `./root/<name>/` dir with `kb-bootstrap.sh` (find-or-create)
+  instead of `--resolve` (no-create). A dir with no matching KB is CREATED (with
+  the `source=root` description + public-read grant) then indexed; a 1-match
+  reuses the KB + re-asserts the grant; a >1 match still fails (ambiguous — no
+  auto-duplicate). Closes the gap exposed by the all-subdirs default
+  (`make kb-index` with no `KB=`): new operator-rsync'd dirs are indexed on the
+  first run instead of failing.
+- **`make kb-check` class 11 `stale_root_kb` + `PRUNE_KB=1`.** A new advisory
+  class flags a `source=root` KB whose `./root/<name>/` dir is gone (parsed from
+  the description kv — `source=projects-memory` KBs are never eligible; their
+  backing is `~/.claude/projects/`). `PRUNE_KB=1 make kb-check` deletes stale root
+  KBs via `DELETE /api/v1/knowledge/{id}/delete` (requires body `true`).
+  Safety: a strict timestamped backup is MANDATORY first
+  (`export_collection_strict` — no fail-open; count-verified); a per-KB in-flight
+  guard refuses a KB with a running drain (TOCTOU re-check from SQLite); a
+  dedicated `PRUNE_KB=1` flag, separate from `PURGE=1` (orphan-vector cleanup
+  never deletes a KB); incompatible with `MAINT=1`/`REPAIR=1` (both stop OWUI —
+  prune needs it running); a missing/unreadable `./root/` aborts the prune
+  (never an empty root set that would prune every root KB). With the auto-create
+  above, `./root/` ↔ OWUI-KB self-heals: index adds missing KBs, check prunes
+  stale ones.
 - **Per-file `mtime` in projects-memory indexing.** `index-projects` now writes
   `mtime` (ISO-UTC) into `File.meta.data`, mirroring the gateway root path.
   Lazy rollout: the upload-idempotency patch early-returns the existing

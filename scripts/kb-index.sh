@@ -11,9 +11,10 @@
 # calls this script once per matched dir.
 #
 # The gateway is stateless and takes kb_id, so each KB is resolved BY NAME here
-# (paginated, unique-or-fail via kb-bootstrap.sh --resolve). A KB that does not
-# resolve fails fast with a "run make kb-bootstrap" hint (no silent create here --
-# bootstrap is a separate, explicit step).
+# via kb-bootstrap.sh (find-or-create). A KB that does not exist is CREATED
+# (with the source=root description + public-read grant); a 1-match reuses the
+# existing KB (and re-asserts the grant); a >1 match fails (ambiguous -- do NOT
+# auto-create duplicates).
 #
 # Per-KB client-side in-flight guard: refuse to POST /index if a drain is already
 # in flight for that KB (pending+processing > 0); --retry-pending is EXEMPT (it
@@ -33,7 +34,8 @@
 #   - Stack running + healthy (`make start`).
 #   - OPENWEBUI_ADMIN_API_KEY in .env.local (provisioned by `make api-keys`).
 #   - KB_HOST set (shell-sourced; see .env.template).
-#   - Each target KB already bootstrapped (`make kb-bootstrap KB=<name>`).
+#   - Each target KB is created if missing (find-or-create); run
+#     `make kb-bootstrap KB=<name>` only to inspect or re-grant manually.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -93,8 +95,8 @@ except Exception:
 fail=0
 for name in "${kbs[@]}"; do
   echo "==> KB ${name}"
-  if ! kid=$(KB="$name" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null); then
-    echo "  FAIL  could not resolve KB '${name}' by name (0 or >1 match). Run: make kb-bootstrap KB=${name}" >&2
+  if ! kid=$(KB="$name" ./scripts/kb-bootstrap.sh 2>/dev/null); then
+    echo "  FAIL  could not resolve or create KB '${name}' (see: make kb-bootstrap KB=${name})" >&2
     fail=1; continue
   fi
   # in-flight guard (exempt --retry-pending)

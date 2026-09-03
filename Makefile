@@ -214,9 +214,20 @@ kb-public-read: ## Grant public read (user:*) on EVERY knowledge base + enable s
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
 	@./scripts/kb-public-read.sh
 
-kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit both stores, report 11 inconsistency classes, advise purge. PURGE=1 to purge safe classes (1 ghosts, 3 orphan file-{id}; BACKUP=1 default exports first). PURGE=1 MAINT=1 stops OWUI to also purge maint classes (5b leaked KB vectors, 7 orphan junction, 8 dead-KB junction). REPAIR=1 stops OWUI to repair class-9 stuck-processing-while-linked files (linked + content + vectors, but status stuck at processing) -> completed; combine with PURGE/MAINT to do both. KB=<id> scopes the KB-tagged classes; JSON=1 machine-readable; SHOW_NAMES=1 prints filenames (default ids-only).
+kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit both stores, report 12 inconsistency classes, advise purge. PURGE=1 to purge safe classes (1 ghosts, 3 orphan file-{id}; BACKUP=1 default exports first). PURGE=1 MAINT=1 stops OWUI to also purge maint classes (5b leaked KB vectors, 7 orphan junction, 8 dead-KB junction). REPAIR=1 stops OWUI to repair class-9 stuck-processing-while-linked files (linked + content + vectors, but status stuck at processing) -> completed; combine with PURGE/MAINT to do both. PRUNE_KB=1 deletes stale source=root KBs whose ./root/<name>/ dir is gone (class 11); always exports a timestamped backup first (mandatory); needs OWUI running (incompatible with MAINT=1/REPAIR=1); separate from PURGE (orphan-vector cleanup). KB=<id> scopes the KB-tagged classes; JSON=1 machine-readable; SHOW_NAMES=1 prints filenames (default ids-only).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
+	  if [ "$${PRUNE_KB:-0}" = "1" ]; then \
+	    if [ "$${MAINT:-0}" = "1" ] || [ "$${REPAIR:-0}" = "1" ]; then \
+	      echo "FAIL  PRUNE_KB=1 needs OWUI running (incompatible with MAINT=1 / REPAIR=1)"; exit 1; \
+	    fi; \
+	  fi; \
+	  ROOT_DIRS_ARG=; \
+	  if ROOT_DIRS=$$(python3 -c 'import os,sys,json; r="root"; sys.exit(1) if not os.path.isdir(r) else None; print(json.dumps(sorted(d for d in os.listdir(r) if not d.startswith(".") and os.path.isdir(os.path.join(r,d))), separators=(",",":")))' 2>/dev/null); then \
+	    ROOT_DIRS_ARG="--root-dirs $$ROOT_DIRS"; \
+	  else \
+	    if [ "$${PRUNE_KB:-0}" = "1" ]; then echo "FAIL  ./root not found / unreadable — refusing to prune without a root set (would prune ALL root KBs)"; exit 1; fi; \
+	  fi; \
 	  OWUI="$${OWUI_CONTAINER:-kb-openwebui}"; \
 	  VENV="-e VECTOR_DB"; \
 	  PG_ENV=; NET=; \
@@ -234,15 +245,17 @@ kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit 
 	      $$VENV $$PG_ENV \
 	      ghcr.io/dkhokhlov/open-webui:"$${OPENWEBUI_IMAGE_TAG:?OPENWEBUI_IMAGE_TAG required in .env}" \
 	      /app/kb_check.py $${KB:+--kb $$KB} $${JSON:+--json} $${SHOW_NAMES:+--show-names} \
-	        $${PURGE:+--purge} $${MAINT:+--maint} $${REPAIR:+--repair} \
+	        $${PURGE:+--purge} $${MAINT:+--maint} $${REPAIR:+--repair} $$ROOT_DIRS_ARG \
 	        $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
 	  else \
-	    KEY_ENV=; if [ "$${PURGE:-0}" = "1" ]; then \
-	      [ -n "$${OPENWEBUI_ADMIN_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (PURGE=1 ghost delete needs it)"; exit 1; }; \
+	    KEY_ENV=; if [ "$${PURGE:-0}" = "1" ] || [ "$${PRUNE_KB:-0}" = "1" ]; then \
+	      [ -n "$${OPENWEBUI_ADMIN_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (PURGE=1 / PRUNE_KB=1 needs it)"; exit 1; }; \
 	      KEY_ENV="-e OPENWEBUI_ADMIN_API_KEY"; fi; \
 	    docker exec -i $$KEY_ENV $$VENV $$PG_ENV $$OWUI python3 - < scripts/kb_check.py \
 	      $${KB:+--kb $$KB} $${JSON:+--json} $${SHOW_NAMES:+--show-names} \
-	      $${PURGE:+--purge} $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
+	      $${PURGE:+--purge} $$ROOT_DIRS_ARG \
+	      $$( [ "$${PRUNE_KB:-0}" = "1" ] && echo --prune-kb ) \
+	      $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
 	  fi
 
 kb-bm25-check: ## Release gate for patch 10 + patch 11: probe the ParadeDB pg_search extension + the idx_document_chunk_bm25 index + the ||| / pdb.score ranking path + colon-safe + zero-token + the lexical-dsl @@@ parse_with_field phrase path + malformed-DSL-raises (lenient => false). Exit 0 green / 1 red. A red probe = do not ship (a broken/missing index silently degrades every query to the langchain full-collection fallback). Run after `make kb-bm25-init`. Uses psycopg2 in the OWUI image (pgvector env); no OWUI SQLite/REST needed.
