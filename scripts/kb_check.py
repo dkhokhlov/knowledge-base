@@ -825,10 +825,14 @@ def repair(stores, classes):
 #   4. colon/dash-safe: `text ||| 'error: x'` executes without error (the C1
 #      silent-zero class for the ||| operator -- it must NOT error on colons).
 #   5. zero-token: `text ||| '???'` -> 0 rows, no error.
-# Probes 3-5 bind the query as a parameter (production binds through psycopg2,
+#   6. (patch 11) DSL phrase path: `id @@@ parse_with_field('text', :q,
+#      lenient => false)` + pdb.score + ORDER BY executes without error.
+#   7. (patch 11) malformed-DSL-raises: an unmatched `"` MUST raise
+#      (lenient => false); not raising is the C1 silent-zero regression.
+# Probes 3-7 bind the query as a parameter (production binds through psycopg2,
 # not SQL literals). A 0-row execution is green -- the gate detects a
-# broken/missing index, which errors regardless of row count; recall is verified
-# by test_09/test_11, not here.
+# broken/missing index or predicate, which errors regardless of row count;
+# recall is verified by test_09/test_11, not here.
 
 _BM25_PROBE_Q = "kb_check_probe_token"  # synthetic; not expected in the corpus
 
@@ -901,6 +905,73 @@ def bm25_gate(stores):
         return "0 rows"
     probe("zero-token (||| '???')", _zero)
 
+    # Patch-11 lexical-dsl probes (same BM25 index, same env). DB-level only --
+    # the end-to-end sentinel-agreement (HTTP 400) is covered by test_11's
+    # direct-OWUI contract (the release-gate env has no OWUI user key).
+    results.extend(lexical_dsl_gate(stores, coll))
+
+    return results
+
+
+# --- lexical-dsl release gate (patch 11) -----------------------------------
+# Patch 11 adds the `lexical-dsl` mode: a sentinel-prefixed query branch runs
+# `paradedb.parse_with_field('text', :q, lenient => false)` (Tantivy DSL). The
+# critical property is C1: `lenient => false` RAISES on bad syntax (unlike
+# patch-10's `|||`, which is colon/dash/quote-safe). A broken predicate or a
+# `lenient => true` regression would silently zero or swallow -- this gate is
+# the only DB-level detector. Probes (bound params, like the ||| probes):
+#   6. DSL phrase path: `id @@@ parse_with_field` + pdb.score + ORDER BY
+#      executes without error (0 rows is green -- the gate detects a broken
+#      predicate, which errors regardless of row count).
+#   7. malformed raises: an unmatched `"` MUST raise (lenient => false). Wrapped
+#      in try/except + rollback so the aborted transaction does not red-cascade
+#      every later _q in the run (InFailedSqlTransaction). NOT raising is the
+#      C1 regression (red).
+
+_DSL_PROBE_PHRASE = '"kb check probe phrase"'  # valid phrase; not in the corpus
+
+
+def lexical_dsl_gate(stores, coll):
+    """Run the patch-11 lexical-dsl DB-level release-gate probes. Returns a list
+    of (name, ok, detail); ok=False if the predicate errors or a malformed query
+    does NOT raise (the C1 regression)."""
+    results = []
+
+    def probe(name, fn):
+        try:
+            results.append((name, True, fn()))
+        except Exception as e:  # gate must capture every failure, never raise
+            results.append((name, False, "%s: %s" % (type(e).__name__, e)))
+
+    # 6. DSL phrase path: @@@ parse_with_field + pdb.score + ORDER BY.
+    def _phrase():
+        cur = stores._q(
+            "SELECT id, pdb.score(id) AS s FROM document_chunk "
+            "WHERE collection_name=%s "
+            "  AND id @@@ paradedb.parse_with_field('text', %s, lenient => false) "
+            "ORDER BY pdb.score(id) DESC LIMIT 5",
+            (coll, _DSL_PROBE_PHRASE))
+        return "%d rows" % len(cur.fetchall())
+    probe("DSL phrase path (@@@ parse_with_field + pdb.score)", _phrase)
+
+    # 7. malformed DSL MUST raise (lenient => false). Rollback after so the
+    # aborted transaction does not poison later probes.
+    def _malformed():
+        try:
+            stores._q(
+                "SELECT count(*) FROM document_chunk "
+                "WHERE collection_name=%s "
+                "  AND id @@@ paradedb.parse_with_field('text', %s, lenient => false)",
+                (coll, '"unmatched'))
+        except Exception:
+            stores._pg_conn().rollback()  # clear the aborted txn
+            return "raised (lenient => false)"
+        stores._pg_conn().rollback()
+        raise RuntimeError(
+            "malformed DSL did NOT raise; lenient => false expected a parse "
+            "error (the C1 silent-zero regression)")
+    probe("malformed DSL raises (lenient => false)", _malformed)
+
     return results
 
 
@@ -928,13 +999,15 @@ def main(argv=None):
     ap.add_argument("--no-backup", action="store_true",
                     help="skip the export (backup is ON by default when --purge)")
     ap.add_argument("--bm25-gate", action="store_true",
-                    help="run ONLY the patch-10 BM25 release-gate probes "
-                         "(pg_search extension + idx_document_chunk_bm25 index + "
-                         "the ||| / pdb.score ranking path + colon-safe + "
-                         "zero-token); skip the class audit. Exit 0 if all green, "
-                         "1 if any red. A red probe = do not ship (a broken/missing "
-                         "index silently degrades every query to the langchain "
-                         "full-collection fallback).")
+                    help="run ONLY the BM25 release-gate probes (patch 10 + "
+                         "patch 11): pg_search extension + idx_document_chunk_bm25 "
+                         "index + the ||| / pdb.score ranking path + colon-safe + "
+                         "zero-token + the lexical-dsl @@@ parse_with_field phrase "
+                         "path + malformed-DSL-raises (lenient => false); skip the "
+                         "class audit. Exit 0 if all green, 1 if any red. A red "
+                         "probe = do not ship (a broken/missing index silently "
+                         "degrades every query to the langchain full-collection "
+                         "fallback).")
     args = ap.parse_args(argv)
     args.ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     args.backup = not args.no_backup
@@ -948,7 +1021,7 @@ def main(argv=None):
         return 2
 
     if args.bm25_gate:
-        log.info("BM25 release gate (patch 10)...")
+        log.info("BM25 release gate (patch 10 + patch 11)...")
         results = bm25_gate(stores)
         green = all(ok for _, ok, _ in results)
         for name, ok, detail in results:

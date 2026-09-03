@@ -3,11 +3,15 @@
 # -> OWUI). Proves:
 #   - the Caddyfile @retrieve route reaches the api-gateway (validation matrix:
 #     no key -> 401, non-UUID kb_id -> 400, bad mode -> 400, empty query -> 400);
-#   - all three modes (hybrid/lexical/vector) -> 200 + the full response validated
-#     against a synthetic fixture KB (schema + the fixture chunk at rank 0). The
-#     fixture is one small .txt with a rare synthetic token, so every mode that
-#     returns anything must return that chunk. pgvector is the only backend
-#     (Chroma removed), so all three modes are content-validated on every run.
+#   - all four modes (hybrid/lexical/vector/lexical-dsl) -> 200 + the full
+#     response validated against a synthetic fixture KB (schema + the fixture
+#     chunk at rank 0). The fixture is one small .txt with a rare synthetic
+#     token, so every mode that returns anything must return that chunk.
+#     lexical-dsl runs the token through paradedb.parse_with_field (the fixture
+#     token's hyphens parse as token separators, not NOT-operators, so it OR-
+#     matches the chunk -- verified empirically against pg_search 0.25.6).
+#     pgvector is the only backend (Chroma removed), so all four modes are
+#     content-validated on every run.
 #
 # Self-contained: the temp KB is created with the admin key, granted '*' read so
 # the agent (user) key can retrieve, and deleted on EXIT (its files too). The
@@ -148,9 +152,9 @@ fi
 # at rank 0. score_order: hybrid + lexical rank by RRF score (desc); vector by
 # cosine distance (asc). pgvector is the only backend (Chroma removed), so all
 # three modes are content-validated on every run.
-section "POST /retrieve all three modes -> 200 + response validated"
-for mode in hybrid lexical vector; do
-    case "$mode" in hybrid|lexical) want_order=desc ;; vector) want_order=asc ;; esac
+section "POST /retrieve all four modes -> 200 + response validated"
+for mode in hybrid lexical vector lexical-dsl; do
+    case "$mode" in hybrid|lexical|lexical-dsl) want_order=desc ;; vector) want_order=asc ;; esac
     bf="$(mktemp)"
     code=$(curl -s -o "$bf" -w '%{http_code}' -X POST "$G/retrieve" "${RD[@]}" -H "$CT" \
       -d "{\"kb_id\":\"${KB_ID}\",\"query\":\"${FIXTURE_TOKEN}\",\"k\":10,\"mode\":\"${mode}\"}")

@@ -37,15 +37,25 @@ MAX_CONCURRENCY = int(os.environ.get("KB_MAX_CONCURRENCY", "16"))
 # hybrid_bm25_weight + k, so the gateway maps mode -> those and forwards a
 # single collection_name. RETRIEVE_MODES: mode -> (hybrid, hybrid_bm25_weight);
 # `hybrid` weight is None (omitted -> OWUI applies RAG_HYBRID_BM25_WEIGHT, the
-# single source in .env), `lexical` is literal 1.0 (mode definition, not a
-# tunable), `vector` is hybrid=False. RETRIEVE_ORDER: hybrid/lexical return an
-# RRF score (higher=better, desc); vector returns a cosine distance
-# (lower=better, asc) — the wrapper sorts by this so it does not reverse the
-# hybrid ranking.
+# single source in .env), `lexical`/`lexical-dsl` is literal 1.0 (mode
+# definition, not a tunable), `vector` is hybrid=False. `lexical-dsl` is an
+# opt-in Tantivy DSL (phrase / +AND / +x -y); the gateway signals it to OWUI by
+# prefixing the query with LEXICAL_DSL_PREFIX (a contract with the kb-openwebui
+# image's pgvector.py + retrieval/utils.py, which strip it and run the
+# id @@@ parse_with_field DSL predicate). RETRIEVE_ORDER: hybrid/lexical/
+# lexical-dsl return an RRF score (higher=better, desc); vector returns a
+# cosine distance (lower=better, asc) — the wrapper sorts by this so it does
+# not reverse the hybrid ranking.
 RETRIEVE_K_DEFAULT = int(os.environ.get("KB_RETRIEVE_K_DEFAULT", "5"))
 RETRIEVE_K_MAX = int(os.environ.get("KB_RETRIEVE_K_MAX", "50"))
-RETRIEVE_MODES = {"hybrid": (True, None), "lexical": (True, 1.0), "vector": (False, None)}
-RETRIEVE_ORDER = {"hybrid": "desc", "lexical": "desc", "vector": "asc"}
+# Sentinel prefix the gateway prepends to the query for --mode lexical-dsl. The
+# kb-openwebui image recognizes + strips it (pgvector.py branch + utils.py
+# re-raise gate). A kb_check sentinel-agreement probe catches cross-image drift.
+LEXICAL_DSL_PREFIX = "KB_LEXICAL_DSL_V1::"
+RETRIEVE_MODES = {"hybrid": (True, None), "lexical": (True, 1.0),
+                  "lexical-dsl": (True, 1.0), "vector": (False, None)}
+RETRIEVE_ORDER = {"hybrid": "desc", "lexical": "desc",
+                  "lexical-dsl": "desc", "vector": "asc"}
 MAX_QUERY = int(os.environ.get("KB_MAX_QUERY", "4096"))
 
 # Whether this Open WebUI image supports the admin user-provisioning flow
@@ -365,7 +375,8 @@ class Handler(BaseHTTPRequestHandler):
             raise GatewayError(400, "query too long (max %d chars)" % MAX_QUERY)
         mode = body.get("mode") or "hybrid"
         if mode not in RETRIEVE_MODES:
-            raise GatewayError(400, "mode must be one of hybrid, lexical, vector, got %r" % mode)
+            raise GatewayError(400, "mode must be one of %s, got %r"
+                               % (", ".join(RETRIEVE_MODES), mode))
         k = body.get("k", RETRIEVE_K_DEFAULT)
         # Reject bool (bool is a subclass of int) + str + non-int + out of range.
         if isinstance(k, bool) or not isinstance(k, int):
@@ -373,6 +384,8 @@ class Handler(BaseHTTPRequestHandler):
         if k < 1 or k > RETRIEVE_K_MAX:
             raise GatewayError(400, "k must be 1..%d, got %s" % (RETRIEVE_K_MAX, k))
         hybrid, hybrid_bm25_weight = RETRIEVE_MODES[mode]
+        if mode == "lexical-dsl":
+            query = LEXICAL_DSL_PREFIX + query
         key = self.headers.get("Authorization", "")[len("Bearer "):].strip()
         try:
             raw = owui.query_collection(key, kb_id, query, hybrid, hybrid_bm25_weight, k)
@@ -1234,7 +1247,7 @@ OPENAPI_SPEC = {
                 "properties": {
                     "kb_id": {"type": "string", "format": "uuid"},
                     "query": {"type": "string", "maxLength": 4096},
-                    "mode": {"type": "string", "enum": ["hybrid", "lexical", "vector"], "default": "hybrid"},
+                    "mode": {"type": "string", "enum": ["hybrid", "lexical", "lexical-dsl", "vector"], "default": "hybrid"},
                     "k": {"type": "integer", "minimum": 1, "maximum": 50, "default": 5}
                 }
             }}}},

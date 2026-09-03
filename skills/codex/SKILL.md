@@ -55,17 +55,50 @@ The gateway flattens the OWUI `{documents, distances, metadatas}` response into
 8-key hits (`distance, file, file_id, page, start_index, source, mtime, text`);
 the wrapper joins `File.meta.data.gdrive` per `file_id` (file-level, one GET per
 id). `score_order` in the response tells the consumer how to sort: `hybrid`/
-`lexical` return an RRF score (higher=better, `desc`); `vector` returns a cosine
-distance (lower=better, `asc`). No LLM call. Wrapper:
-`retrieve <kb-name-or-id> "<query>" [--k N] [--mode hybrid|lexical|vector]`
+`lexical`/`lexical-dsl` return an RRF/BM25 score (higher=better, `desc`);
+`vector` returns a cosine distance (lower=better, `asc`). No LLM call. Wrapper:
+`retrieve <kb-name-or-id> "<query>" [--k N] [--mode hybrid|lexical|lexical-dsl|vector]`
 (`--k` default 5; use 10–20 for broader recall — the agent synthesizes from raw
-chunks, so more chunks serve it better. `--mode` default `hybrid`; `lexical` = pure
-FTS/BM25 (server-side, indexed — the mode for exact register/signal/keyword
-queries); `vector` = pure vector. `--no-hybrid` is a deprecated alias for
-`--mode vector`). The wrapper resolves the name to a KB id via
-`GET /api/v1/knowledge/` (exact name or exact id; a valid UUID that is not a real
-id FAILS — no silent fallthrough, so a wrong hand-copied id cannot query the
-wrong KB) and prints the resolved `kb_id` + `kb_name` alongside the hits.
+chunks, so more chunks serve it better. `--mode` default `hybrid`. `--no-hybrid`
+is a deprecated alias for `--mode vector`.) The wrapper resolves the name to a
+KB id via `GET /api/v1/knowledge/` (exact name or exact id; a valid UUID that is
+not a real id FAILS — no silent fallthrough, so a wrong hand-copied id cannot
+query the wrong KB) and prints the resolved `kb_id` + `kb_name` alongside the
+hits.
+
+**Mode selection**:
+
+| Need | Mode | Why |
+|---|---|---|
+| broad recall across concepts / multi-topic | `hybrid` | RRF fuses BM25 + vector (`bm25_weight=0.5`) |
+| exact-token precision (rare id / keyword / register name) | `lexical` | pure BM25/IDF; `|||` tokenized OR (colon/dash/quote-safe) |
+| phrase / `+AND` / `+x -y` composite-NOT | `lexical-dsl` | Tantivy DSL; agent owns quoting |
+| pure semantic similarity (synonyms) | `vector` | cosine |
+
+**Query form matters** (the #1 first-time gap). A bare natural-language query
+with ubiquitous terms returns IDF-flat boilerplate: "tell me about scheduling"
+→ generic chunks; `DMA_WRR_VEC` → the deep spec. Rule: **use rare
+register/identifier/symbol names, not prose.** The index is fine; query
+formulation is the lever.
+
+**`lexical-dsl` reference** (4 operators, over the `text` field):
+
+| Operator | Example | Meaning |
+|---|---|---|
+| phrase | `"zenith rotating zephyr"` | exact phrase (token order) |
+| phrase-slop | `"zenith rotating"~2` | phrase within N token edits |
+| `+AND` | `+termA +termB` | both terms required |
+| composite-NOT | `+termA -termB` | termA required, termB excluded |
+
+- No `field:` prefixes (text-scoped). The agent owns quoting: `:` and a leading
+  `-` are operators, not literals — quote a literal phrase.
+- **Unsupported on this index** (they error or silently return 0): fuzzy `~`,
+  regex `/re/`, wildcard `*`, pure-NOT `-x` alone. Do not try them.
+- The `pdb.simple` tokenizer lowercases + splits on `_`/`-`, so `+`-terms should
+  be single words or quoted phrases.
+- **A 0-hit `lexical-dsl` is most likely a syntax error, not "not found".**
+  `lenient => false` raises; the wrapper reports a clear error. Retry with
+  `lexical` (`|||` OR) to confirm the content exists, then re-formulate the DSL.
 
 - **To confirm a specific file is searchable**, retrieve by its **literal
   filename stem** with a higher `--k` (e.g. 20). A generic concept query can be

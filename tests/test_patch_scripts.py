@@ -36,6 +36,7 @@ import apply_query_mode as p7  # noqa: E402
 import apply_query_top_k as p8  # noqa: E402
 import apply_skip_cosine_reranker as p9  # noqa: E402
 import apply_bm25_search as p10  # noqa: E402
+import apply_lexical_dsl as p11  # noqa: E402
 
 
 # --- fixtures: built from the apply scripts' own anchor constants ------------
@@ -379,6 +380,162 @@ class TestP10Bm25Search(unittest.TestCase):
         rc, out, err = _run_script(self.SCRIPT, {"OWUI_PGVECTOR_PY": p})
         self.assertNotEqual(rc, 0)
         self.assertIn("site1", err)
+
+
+# --- P11 fixtures: built from the apply scripts' own anchor constants ---------
+# The pgvector fixture embeds the patch-10 SITE1_OLD (the FTS arm) + SITE2_OLD
+# (the GIN-index call) + the patch-11 PGV_EXCEPT_OLD (the hybrid_search except)
+# + the `log = logging.getLogger(__name__)` constant-injection anchor, in valid
+# Python. Patch 11 chains AFTER patch 10: its PGV_FTS_OLD == p10.SITE1_NEW
+# (verified), so applying patch 10 first yields the post-patch-10 text patch 11
+# expects.
+P11_PGVECTOR_FIXTURE = (
+    "import logging\n"
+    "from sqlalchemy import text\n"
+    "log = logging.getLogger(__name__)\n"
+    "class FakeStore:\n"
+    "    def hybrid_search(self, collection_name, query, vectors, limit, hybrid_bm25_weight):\n"
+    "        bm25_weight = hybrid_bm25_weight\n"
+    "        try:\n"
+    "            fts_results = []\n"
+    + p10.SITE1_OLD +
+    "            return merge_hybrid_search_results(fts_results=fts_results)\n"
+    + p11.PGV_EXCEPT_OLD +
+    "    def _ensure_vector_index(self, index_method, index_options):\n"
+    "        pass\n"
+    "    def _ensure_text_search_index(self):\n"
+    "        pass\n"
+    "    def _vector_index_configuration(self):\n"
+    "        return 'ivfflat', {}\n"
+    "    def init_db(self):\n"
+    "        if True:\n"
+    "            index_method, index_options = self._vector_index_configuration()\n"
+    + p10.SITE2_OLD +
+    "        return None\n"
+)
+
+# The utils fixture embeds the patch-11 UTL_NATIVE_EXCEPT_OLD (the
+# query_doc_with_native_hybrid_search except, 4-space) + UTL_COLLECT_EXCEPT_OLD
+# (the query_collection hybrid-fallback except, 8-space inside an `if`) +
+# UTL_ENRICHED_BYPASS_OLD (the query_collection_with_hybrid_search enriched
+# bypass, Site 7) + the `log` constant-injection anchor. `query` / `queries`
+# are function params so the re-raise gates + bypass guard compile.
+P11_UTILS_FIXTURE = (
+    "import logging\n"
+    "log = logging.getLogger(__name__)\n"
+    "async def query_doc_with_native_hybrid_search(collection_name, query,\n"
+    "        embedding_function, k, hybrid_bm25_weight):\n"
+    "    try:\n"
+    "        result = await something(query)\n"
+    "        return result\n"
+    + p11.UTL_NATIVE_EXCEPT_OLD +
+    "async def query_collection(request, collection_names, queries,\n"
+    "        embedding_function, k, hybrid, hybrid_bm25_weight):\n"
+    "    if request:\n"
+    "        try:\n"
+    "            return await something(queries)\n"
+    + p11.UTL_COLLECT_EXCEPT_OLD +
+    "    results = []\n"
+    "    return results\n"
+    "async def query_collection_with_hybrid_search(collection_names, queries,\n"
+    "        embedding_function, k, hybrid_bm25_weight, enable_enriched_texts):\n"
+    "    results = []\n"
+    + p11.UTL_ENRICHED_BYPASS_OLD +
+    "            return await something(collection_name, query)\n"
+    "    return results\n"
+)
+
+
+class TestP11LexicalDsl(unittest.TestCase):
+    SCRIPT = "apply_lexical_dsl.py"
+
+    def setUp(self):
+        self._d = tempfile.mkdtemp(prefix="kb-patch-")
+        self.pgvector = _write(self._d, "pgvector.py", P11_PGVECTOR_FIXTURE)
+        self.utils = _write(self._d, "utils.py", P11_UTILS_FIXTURE)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._d, ignore_errors=True)
+
+    def test_applies_chained_after_patch10(self):
+        # Patch 11 runs AFTER patch 10 in the Dockerfile chain. Apply patch 10
+        # first (||| block), then patch 11 (DSL branch + sentinel + 3 gates).
+        rc, out, err = _run_script("apply_bm25_search.py",
+                                   {"OWUI_PGVECTOR_PY": self.pgvector})
+        self.assertEqual(rc, 0, "patch10 exit %d stderr=%s" % (rc, err))
+        rc, out, err = _run_script(self.SCRIPT,
+                                   {"OWUI_PGVECTOR_PY": self.pgvector,
+                                    "OWUI_UTILS_PY": self.utils})
+        self.assertEqual(rc, 0, "patch11 exit %d stderr=%s" % (rc, err))
+        p = open(self.pgvector).read()
+        u = open(self.utils).read()
+        # the patch-10 ||| block is now the else branch (still present)
+        self.assertIn("text ||| :query", p)
+        # the patch-11 DSL branch is present
+        self.assertIn("paradedb.parse_with_field", p)
+        self.assertIn("'text', :query, lenient => false", p)
+        self.assertIn("is_dsl = query.startswith(LEXICAL_DSL_PREFIX)", p)
+        # the standalone pre-branch ||| block (PGV_FTS_OLD) is gone (now else)
+        self.assertNotIn(p11.PGV_FTS_OLD, p)
+        # the sentinel constant is injected in BOTH files (cross-image contract)
+        self.assertEqual(p.count("LEXICAL_DSL_PREFIX = 'KB_LEXICAL_DSL_V1::'"), 1)
+        self.assertEqual(u.count("LEXICAL_DSL_PREFIX = 'KB_LEXICAL_DSL_V1::'"), 1)
+        # the 3 re-raise gates (C1 fix): pgvector except + utils native + utils collect
+        self.assertEqual(p.count("if query.startswith(LEXICAL_DSL_PREFIX):"), 1)
+        self.assertEqual(u.count("if query.startswith(LEXICAL_DSL_PREFIX):"), 1)
+        self.assertEqual(
+            u.count("if any(q.startswith(LEXICAL_DSL_PREFIX) for q in queries):"), 1)
+        # Site 7: the enriched-texts bypass is gated on the sentinel. The old
+        # bare `if not enable_enriched_texts:` anchor is gone (replaced by the
+        # guarded condition), so a DSL query forces the native path even when an
+        # admin enabled enriched texts (the C1 raise then fires on bad syntax).
+        self.assertNotIn(p11.UTL_ENRICHED_BYPASS_OLD, u)
+        self.assertIn("enable_enriched_texts or any(", u)
+        # both patched files are valid Python (the build injects exactly this)
+        __import__("py_compile").compile(self.pgvector, doraise=True)
+        __import__("py_compile").compile(self.utils, doraise=True)
+
+    def test_fails_loud_on_drifted_fts_anchor(self):
+        # Apply patch 10 first, then drift the ||| operator so patch 11's FTS
+        # anchor (PGV_FTS_OLD, "site2") is absent -> exit 1, no write.
+        rc, out, err = _run_script("apply_bm25_search.py",
+                                   {"OWUI_PGVECTOR_PY": self.pgvector})
+        self.assertEqual(rc, 0, "patch10 exit %d stderr=%s" % (rc, err))
+        drifted = open(self.pgvector).read().replace(
+            "AND document_chunk.text ||| :query",
+            "AND document_chunk.text &&& :query")
+        dp = _write(self._d, "pgvector_drift.py", drifted)
+        rc, out, err = _run_script(self.SCRIPT,
+                                   {"OWUI_PGVECTOR_PY": dp,
+                                    "OWUI_UTILS_PY": self.utils})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("site2", err)
+
+    def test_fails_loud_on_drifted_enriched_anchor(self):
+        # Site 7: if the enriched-texts bypass anchor (the bare
+        # `if not enable_enriched_texts:` in query_collection_with_hybrid_search)
+        # is absent or altered, patch 11 must exit 1 (no fragile patch).
+        rc, out, err = _run_script("apply_bm25_search.py",
+                                   {"OWUI_PGVECTOR_PY": self.pgvector})
+        self.assertEqual(rc, 0, "patch10 exit %d stderr=%s" % (rc, err))
+        drifted = open(self.utils).read().replace(
+            "    if not enable_enriched_texts:\n",
+            "    if not enable_enriched_texts_something_else:\n", 1)
+        du = _write(self._d, "utils_drift.py", drifted)
+        rc, out, err = _run_script(self.SCRIPT,
+                                   {"OWUI_PGVECTOR_PY": self.pgvector,
+                                    "OWUI_UTILS_PY": du})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("site7", err)
+
+    def test_p10_untouched(self):
+        # M4: TestP10Bm25Search runs apply_bm25_search.py alone against its own
+        # stock fixture; its assertNotIn("parse_with_field") still holds because
+        # patch 10 does not emit parse_with_field. Re-affirm the constant here:
+        # patch 10's SITE1_NEW has no DSL branch.
+        self.assertNotIn("parse_with_field", p10.SITE1_NEW)
+        self.assertNotIn("LEXICAL_DSL_PREFIX", p10.SITE1_NEW)
 
 
 if __name__ == "__main__":

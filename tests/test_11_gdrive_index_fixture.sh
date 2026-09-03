@@ -35,6 +35,16 @@ O="$(kb_host)"
 # below MUST use -regextype posix-extended for the alternation to work.
 ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
 MARKER="gdrive-fixture-marker-7f3a2"
+# Patch 11 lexical-dsl sentinel. MUST equal docker/gateway/app.py
+# LEXICAL_DSL_PREFIX + apply_lexical_dsl.py SENTINEL. The direct-OWUI contract
+# below prefixes the query with this manually (simulating the gateway's
+# mode=lexical-dsl dispatch) to verify OWUI recognizes + strips it.
+SENTINEL="KB_LEXICAL_DSL_V1::"
+# Coined single-word DSL probe tokens (pdb.simple splits on _/-, so these are
+# single tokens). Unique across root/.tests/ (verified: no collisions).
+DSL_PHRASE='zenith rotating zephyr'        # exact phrase in dsl-phrase.md
+DSL_AND_A='dslwordalpha'                   # in dsl-and-a.md AND dsl-and-b.md
+DSL_AND_B='dslwordbeta'                    # in dsl-and-a.md only
 
 # --- skip condition ----------------------------------------------------------
 # Exclude .meta/.meta.json sidecars: the gateway's _entry_for skips them by
@@ -296,6 +306,38 @@ SQL
   rc=$?
   printf '%s %s' "${cnt:-ERR}" "$rc"
 }
+# Patch 11: DSL count via paradedb.parse_with_field (lenient => false). Same
+# heredoc + :'q' binding as bm25_count. ON_ERROR_STOP=1 makes psql exit non-zero
+# (rc=3) on a parse error -> the malformed-raises assertion checks rc!=0. A
+# fresh psql connection per call (no persistent txn), so a raising query does
+# not poison later probes (unlike kb_check's shared stores._pg connection).
+bm25_dsl_count() {  # print "<count|ERR> <rc>" for a parse_with_field count scoped to KB_ID
+  local cnt rc
+  cnt=$(docker exec -i "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" \
+    -v ON_ERROR_STOP=1 -tA -v kb_id="$KB_ID" -v q="$1" 2>/dev/null <<'SQL'
+SELECT count(*) FROM document_chunk WHERE collection_name = :'kb_id' AND id @@@ paradedb.parse_with_field('text', :'q', lenient => false)
+SQL
+)
+  rc=$?
+  printf '%s %s' "${cnt:-ERR}" "$rc"
+}
+bm25_dsl_count_text() {  # args: dsl_query, token, rel(1=ILIKE contains/0=NOT ILIKE lacks)
+  # -> "<count|ERR> <rc>". Operator semantics discriminator: counts DSL-matched
+  # chunks whose raw text contains (rel=1) or lacks (rel=0) a token. Lets the
+  # AND/composite-NOT assertions catch a parser that ignores a +/- operand: a
+  # correct AND (+a +b) never matches a beta-less chunk; a correct composite-NOT
+  # (+a -b) never matches a beta chunk. The unquoted heredoc expands ${op} only
+  # (no $ in the rest of the SQL); :'tok' / :'q' are psql vars.
+  local cnt rc rel="$3" op
+  if [ "$rel" = "0" ]; then op="NOT ILIKE"; else op="ILIKE"; fi
+  cnt=$(docker exec -i "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" \
+    -v ON_ERROR_STOP=1 -tA -v kb_id="$KB_ID" -v q="$1" -v tok="$2" 2>/dev/null <<SQL
+SELECT count(*) FROM document_chunk WHERE collection_name = :'kb_id' AND id @@@ paradedb.parse_with_field('text', :'q', lenient => false) AND text ${op} '%' || :'tok' || '%'
+SQL
+)
+  rc=$?
+  printf '%s %s' "${cnt:-ERR}" "$rc"
+}
 # extension + index exist
 ext=$(docker exec "$PG_CTN" psql -U "${PGVECTOR_USER:?}" -d "${PGVECTOR_DB:?}" -tA -c \
   "SELECT count(*) FROM pg_extension WHERE extname='pg_search'" 2>/dev/null)
@@ -339,6 +381,113 @@ if [ "${z_rc:-1}" = "0" ] && [ "${z_cnt:-0}" = "0" ] 2>/dev/null; then
   pass "||| zero-token '???' -> 0 hit(s) (no error)"
 else
   fail "||| zero-token '???' -> ${z_cnt} (rc=${z_rc}) — expected 0 rows, no error"
+  finish; exit 1
+fi
+
+# --- patch 11 lexical-dsl SQL probes (paradedb.parse_with_field, lenient => false)
+# Direct psql probes of the patch-11 DSL predicate on the temp fixture KB. The
+# 4 dsl/*.md fixtures (single-word coined tokens; pdb.simple splits on _/-) give
+# ground truth the kb_check smoke gate cannot (kb_check has no semantic ground
+# truth). ON_ERROR_STOP=1 + a fresh psql per call -> a malformed query exits
+# rc!=0 (the lenient => false raise), no txn cascade.
+section "lexical-dsl SQL probes (parse_with_field, lenient => false)"
+# phrase: "zenith rotating zephyr" -> >0 (only dsl-phrase.md has the phrase)
+read -r ph_cnt ph_rc < <(bm25_dsl_count "\"$DSL_PHRASE\"")
+if [ "${ph_rc:-1}" = "0" ] && [ "${ph_cnt:-0}" -gt 0 ] 2>/dev/null; then
+  pass "dsl phrase \"${DSL_PHRASE}\" -> ${ph_cnt} hit(s)"
+else
+  fail "dsl phrase \"${DSL_PHRASE}\" -> ${ph_cnt} (rc=${ph_rc}) -- expected >0 (dsl-phrase.md)"
+  finish; exit 1
+fi
+# phrase negative: "zenith rotating nowhere" -> 0, rc=0 (valid syntax, no match)
+read -r pn_cnt pn_rc < <(bm25_dsl_count "\"zenith rotating nowhere\"")
+if [ "${pn_rc:-1}" = "0" ] && [ "${pn_cnt:-0}" = "0" ] 2>/dev/null; then
+  pass "dsl phrase-negative \"zenith rotating nowhere\" -> 0 hit(s) (valid, no match)"
+else
+  fail "dsl phrase-negative -> ${pn_cnt} (rc=${pn_rc}) -- expected 0 rows, rc=0"
+  finish; exit 1
+fi
+# AND: +dslwordalpha +dslwordbeta -> >0 (only dsl-and-a.md has both)
+read -r and_cnt and_rc < <(bm25_dsl_count "+${DSL_AND_A} +${DSL_AND_B}")
+if [ "${and_rc:-1}" = "0" ] && [ "${and_cnt:-0}" -gt 0 ] 2>/dev/null; then
+  pass "dsl AND +${DSL_AND_A} +${DSL_AND_B} -> ${and_cnt} hit(s)"
+else
+  fail "dsl AND +${DSL_AND_A} +${DSL_AND_B} -> ${and_cnt} (rc=${and_rc}) -- expected >0 (dsl-and-a.md)"
+  finish; exit 1
+fi
+# AND discriminator: no matched chunk may LACK beta. A parser that ignores
+# +dslwordbeta (ORs instead of ANDs) matches dsl-and-b.md too (alpha, lacks beta)
+# -> violation count >0. Fixture ground truth: only dsl-and-a.md has both.
+read -r andv_cnt andv_rc < <(bm25_dsl_count_text "+${DSL_AND_A} +${DSL_AND_B}" "$DSL_AND_B" 0)
+if [ "${andv_rc:-1}" = "0" ] && [ "${andv_cnt:-0}" = "0" ] 2>/dev/null; then
+  pass "dsl AND excludes beta-less chunks (${andv_cnt} violation(s))"
+else
+  fail "dsl AND +${DSL_AND_A} +${DSL_AND_B} -> ${andv_cnt} beta-less chunk(s) (rc=${andv_rc}) -- +beta ignored (OR not AND)"
+  finish; exit 1
+fi
+# composite-NOT: +dslwordalpha -dslwordbeta -> >0 (only dsl-and-b.md: has alpha, lacks beta)
+read -r not_cnt not_rc < <(bm25_dsl_count "+${DSL_AND_A} -${DSL_AND_B}")
+if [ "${not_rc:-1}" = "0" ] && [ "${not_cnt:-0}" -gt 0 ] 2>/dev/null; then
+  pass "dsl composite-NOT +${DSL_AND_A} -${DSL_AND_B} -> ${not_cnt} hit(s)"
+else
+  fail "dsl composite-NOT +${DSL_AND_A} -${DSL_AND_B} -> ${not_cnt} (rc=${not_rc}) -- expected >0 (dsl-and-b.md)"
+  finish; exit 1
+fi
+# composite-NOT discriminator: no matched chunk may CONTAIN beta. A parser that
+# ignores -dslwordbeta matches dsl-and-a.md too (has both) -> violation count >0.
+# Fixture ground truth: only dsl-and-b.md has alpha without beta.
+read -r notv_cnt notv_rc < <(bm25_dsl_count_text "+${DSL_AND_A} -${DSL_AND_B}" "$DSL_AND_B" 1)
+if [ "${notv_rc:-1}" = "0" ] && [ "${notv_cnt:-0}" = "0" ] 2>/dev/null; then
+  pass "dsl composite-NOT excludes beta chunks (${notv_cnt} violation(s))"
+else
+  fail "dsl composite-NOT +${DSL_AND_A} -${DSL_AND_B} -> ${notv_cnt} beta chunk(s) (rc=${notv_rc}) -- -beta ignored (NOT broken)"
+  finish; exit 1
+fi
+# malformed: "unmatched phrase -> rc!=0 (lenient => false RAISES -- the C1 property)
+read -r bad_cnt bad_rc < <(bm25_dsl_count '"unmatched phrase')
+if [ "${bad_rc:-1}" != "0" ]; then
+  pass "dsl malformed (unmatched quote) -> rc=${bad_rc} (lenient => false raised)"
+else
+  fail "dsl malformed (unmatched quote) -> rc=0 (lenient => false did NOT raise -- the C1 silent-zero regression)"
+  finish; exit 1
+fi
+
+# --- patch 11 lexical-dsl direct-OWUI contract (sentinel + C1 re-raise) ------
+# Send a sentinel-prefixed query through the gateway passthrough to OWUI's
+# /api/v1/retrieval/query/collection (hybrid_bm25_weight=1.0 skips the vector
+# arm; the FTS arm recognizes the sentinel + runs parse_with_field). Verifies
+# OWUI recognizes + strips the sentinel (the cross-image contract) and that a
+# malformed DSL re-raises through the 3 except gates -> HTTPException 400 (the
+# C1 fix), not a silent 200 + 0 / full-collection fallback.
+section "lexical-dsl direct-OWUI contract (sentinel + C1 re-raise)"
+# valid phrase: sentinel + "zenith rotating zephyr" -> >=1 hit
+dsl_q=$(python3 -c 'import sys,json;print(json.dumps(sys.argv[1]))' "${SENTINEL}\"${DSL_PHRASE}\"")
+dsl_hits=$(curl -s -X POST "$O/api/v1/retrieval/query/collection" "${RD[@]}" -H 'Content-Type: application/json' \
+  -d "{\"collection_names\":[\"${KB_ID}\"],\"query\":${dsl_q},\"k\":4,\"hybrid\":true,\"hybrid_bm25_weight\":1.0}" \
+  | python3 -c '
+import sys,json
+d=json.load(sys.stdin)
+docs=[]
+if isinstance(d,list): docs=d
+elif isinstance(d,dict):
+    if "documents" in d: docs=[t for sub in d["documents"] for t in (sub if isinstance(sub,list) else [sub])]
+    else: docs=d.get("files") or d.get("results") or d.get("docs") or []
+print(len(docs))
+' 2>/dev/null || echo 0)
+if [ "${dsl_hits:-0}" -gt 0 ]; then
+  pass "lexical-dsl valid phrase -> ${dsl_hits} hit(s) (sentinel recognized + stripped)"
+else
+  fail "lexical-dsl valid phrase -> 0 hits (sentinel not recognized, or DSL predicate broken)"
+  finish; exit 1
+fi
+# malformed: sentinel + "unmatched -> HTTP 400 (the C1 re-raise, not silent 200)
+bad_q=$(python3 -c 'import sys,json;print(json.dumps(sys.argv[1]))' "${SENTINEL}\"unmatched")
+http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$O/api/v1/retrieval/query/collection" "${RD[@]}" -H 'Content-Type: application/json' \
+  -d "{\"collection_names\":[\"${KB_ID}\"],\"query\":${bad_q},\"k\":4,\"hybrid\":true,\"hybrid_bm25_weight\":1.0}")
+if [ "${http_code}" = "400" ]; then
+  pass "lexical-dsl malformed -> HTTP 400 (C1 re-raise propagates, not silent 200)"
+else
+  fail "lexical-dsl malformed -> HTTP ${http_code} (expected 400; C1 re-raise broken -- error swallowed)"
   finish; exit 1
 fi
 

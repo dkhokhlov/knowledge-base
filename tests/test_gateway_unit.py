@@ -484,6 +484,32 @@ class TestRetrieveRoute(unittest.TestCase):
         self.assertTrue(captured["hybrid"])
         self.assertIsNone(captured["bm25"])
 
+    def test_lexical_dsl_prefixes_sentinel(self):
+        # mode=lexical-dsl: the handler prefixes LEXICAL_DSL_PREFIX to the query
+        # (the sentinel contract with the kb-openwebui image), hybrid=True,
+        # bm25_weight=1.0 (vector arm skipped). The agent never types the sentinel.
+        captured = {}
+
+        def _qc(api_key, kb_id, query, hybrid, hybrid_bm25_weight, k):
+            captured.update(query=query, hybrid=hybrid,
+                            hybrid_bm25_weight=hybrid_bm25_weight)
+            return _RAW
+
+        with mock.patch.object(owui, "query_collection", side_effect=_qc):
+            h = _FakeHandler({"kb_id": self.KB, "query": "CAP_ENGAGE",
+                              "mode": "lexical-dsl", "k": 5})
+            app.Handler._retrieve_kb(h, None,
+                                     {"kb_id": self.KB, "query": "CAP_ENGAGE",
+                                      "mode": "lexical-dsl", "k": 5})
+        self.assertEqual(captured["hybrid"], True)
+        self.assertEqual(captured["hybrid_bm25_weight"], 1.0)
+        self.assertEqual(captured["query"],
+                         app.LEXICAL_DSL_PREFIX + "CAP_ENGAGE")
+        # the sentinel must equal the OWUI-image constant (apply_lexical_dsl.SENTINEL)
+        self.assertEqual(app.LEXICAL_DSL_PREFIX, "KB_LEXICAL_DSL_V1::")
+        # the response echoes the mode (not the prefixed query)
+        self.assertEqual(h.sent[1]["mode"], "lexical-dsl")
+
     # -- forwarder body (owui.query_collection -> OWUI HTTP) --
 
     def _capture_forwarded_body(self, mode):
@@ -510,6 +536,15 @@ class TestRetrieveRoute(unittest.TestCase):
 
     def test_forwarder_body_lexical_sends_weight_one(self):
         c = self._capture_forwarded_body("lexical")
+        self.assertEqual(c["body"]["hybrid"], True)
+        self.assertEqual(c["body"]["hybrid_bm25_weight"], 1.0)
+
+    def test_forwarder_body_lexical_dsl_sends_weight_one(self):
+        # the forwarder (owui.query_collection -> OWUI HTTP) sends the query
+        # verbatim -- the sentinel prefix is the HANDLER's job (tested above);
+        # the forwarder just carries weight=1.0 like lexical. The tuple stays
+        # 2-element, so the *app.RETRIEVE_MODES[mode] splat still works (M3).
+        c = self._capture_forwarded_body("lexical-dsl")
         self.assertEqual(c["body"]["hybrid"], True)
         self.assertEqual(c["body"]["hybrid_bm25_weight"], 1.0)
 
@@ -613,9 +648,11 @@ class TestRetrieveRoute(unittest.TestCase):
         self.assertIsNone(obj["hits"][1]["page"])
 
     def test_score_order_per_mode(self):
-        for mode, order in [("hybrid", "desc"), ("lexical", "desc"), ("vector", "asc")]:
+        for mode, order in [("hybrid", "desc"), ("lexical", "desc"),
+                            ("lexical-dsl", "desc"), ("vector", "asc")]:
             r = self._run({"kb_id": self.KB, "query": "x", "mode": mode})
             self.assertEqual(r[1]["score_order"], order, mode)
+            self.assertEqual(r[1]["mode"], mode, mode)
 
     def test_flatten_hits_eight_keys(self):
         hits = app._flatten_hits(_RAW)

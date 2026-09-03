@@ -237,7 +237,7 @@ kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit 
 	      $${PURGE:+--purge} $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
 	  fi
 
-kb-bm25-check: ## Release gate for patch 10: probe the ParadeDB pg_search extension + the idx_document_chunk_bm25 index + the ||| / pdb.score ranking path + colon-safe + zero-token. Exit 0 green / 1 red. A red probe = do not ship (a broken/missing index silently degrades every query to the langchain full-collection fallback). Run after `make kb-bm25-init`. Uses psycopg2 in the OWUI image (pgvector env); no OWUI SQLite/REST needed.
+kb-bm25-check: ## Release gate for patch 10 + patch 11: probe the ParadeDB pg_search extension + the idx_document_chunk_bm25 index + the ||| / pdb.score ranking path + colon-safe + zero-token + the lexical-dsl @@@ parse_with_field phrase path + malformed-DSL-raises (lenient => false). Exit 0 green / 1 red. A red probe = do not ship (a broken/missing index silently degrades every query to the langchain full-collection fallback). Run after `make kb-bm25-init`. Uses psycopg2 in the OWUI image (pgvector env); no OWUI SQLite/REST needed.
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  OWUI="$${OWUI_CONTAINER:-kb-openwebui}"; \

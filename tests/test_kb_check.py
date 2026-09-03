@@ -957,7 +957,8 @@ class _GateStores:
     """Minimal stub for bm25_gate: scripts _q results for each probe."""
 
     def __init__(self, ext=1, idx=1, rank_rows=(), colon_rows=0,
-                 zero_rows=0, rank_exc=None, colls=None):
+                 zero_rows=0, rank_exc=None, colls=None,
+                 dsl_malformed_raises=True):
         self._ext = ext
         self._idx = idx
         self._rank = rank_rows
@@ -965,9 +966,13 @@ class _GateStores:
         self._zero = zero_rows
         self._rank_exc = rank_exc
         self._colls = colls if colls is not None else {"c1": None}
+        self._dsl_malformed_raises = dsl_malformed_raises
 
     def chroma_collections(self):
         return dict(self._colls)
+
+    def _pg_conn(self):
+        return _PgConn()
 
     def _q(self, sql, params=None):
         if params is None:
@@ -975,6 +980,15 @@ class _GateStores:
                 return _FakeCur([(self._ext,)])
             if "pg_indexes" in sql:
                 return _FakeCur([(self._idx,)])
+        # patch-11 DSL probes: parse_with_field, lenient => false. The malformed
+        # query (unmatched quote) RAISES (lenient=false); a valid phrase returns
+        # 0 rows, no error. dsl_malformed_raises=False simulates the C1
+        # regression (lenient=true / error swallowed -> no raise -> gate RED).
+        if "parse_with_field" in sql:
+            q = params[1] if params else ""
+            if q.startswith('"unmatched') and self._dsl_malformed_raises:
+                raise RuntimeError("could not parse query string")
+            return _FakeCur([(0,)])
         # bound-param probes: params = (collection_name, query)
         if "pdb.score" in sql:  # ranking path
             if self._rank_exc:
@@ -984,6 +998,13 @@ class _GateStores:
         if q == "???":
             return _FakeCur([(self._zero,)])
         return _FakeCur([(self._colon,)])  # colon/dash-safe
+
+
+class _PgConn:
+    """Stub with only rollback() (the malformed-DSL probe clears the aborted
+    txn via stores._pg_conn().rollback())."""
+    def rollback(self):
+        pass
 
 
 class TestBm25Gate(unittest.TestCase):
@@ -1010,7 +1031,8 @@ class TestBm25Gate(unittest.TestCase):
     def test_green(self):
         rc, out = self._run()
         self.assertEqual(rc, 0)
-        self.assertEqual(out.count("OK  "), 5)
+        # 5 patch-10 probes + 2 patch-11 DSL probes (phrase path + malformed raises)
+        self.assertEqual(out.count("OK  "), 7)
         self.assertNotIn("FAIL", out)
 
     def test_red_missing_extension(self):
@@ -1038,6 +1060,13 @@ class TestBm25Gate(unittest.TestCase):
         # No collections: the ranking path still executes (0 rows) -> green.
         rc, out = self._run(colls={})
         self.assertEqual(rc, 0)
+
+    def test_red_malformed_dsl_not_raised(self):
+        # C1 regression: lenient => false should RAISE on a malformed DSL. If it
+        # does not (the error-swallow class), the gate goes RED.
+        rc, out = self._run(dsl_malformed_raises=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("malformed DSL", out)
 
 
 if __name__ == "__main__":

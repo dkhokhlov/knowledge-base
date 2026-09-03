@@ -1003,8 +1003,9 @@ def main():
     sp = sub.add_parser("retrieve", help="retrieve documents from a KB by name or id (semantic)")
     sp.add_argument("kb", help="KB name or id"); sp.add_argument("query")
     sp.add_argument("--k", type=int, default=5)
-    sp.add_argument("--mode", choices=["hybrid", "lexical", "vector"], default=None,
-                    help="retrieval mode (default hybrid; lexical = pure FTS, vector = pure vector)")
+    sp.add_argument("--mode", choices=["hybrid", "lexical", "lexical-dsl", "vector"], default=None,
+                    help="retrieval mode (default hybrid; lexical = pure FTS, "
+                         "lexical-dsl = Tantivy DSL phrase/AND/NOT, vector = pure vector)")
     sp.add_argument("--no-hybrid", action="store_true",
                     help="deprecated alias for --mode vector (pure vector)")
 
@@ -1032,8 +1033,9 @@ def main():
     sp.add_argument("--mine", action="store_true", help="alias for the default (account = caller)")
     sp.add_argument("--kb-glob", default=None, help="fnmatch glob on the KB name")
     sp.add_argument("--k", type=int, default=5, help="top-k hits after merge")
-    sp.add_argument("--mode", choices=["hybrid", "lexical", "vector"], default=None,
-                    help="retrieval mode (default hybrid; lexical = pure FTS, vector = pure vector)")
+    sp.add_argument("--mode", choices=["hybrid", "lexical", "lexical-dsl", "vector"], default=None,
+                    help="retrieval mode (default hybrid; lexical = pure FTS, "
+                         "lexical-dsl = Tantivy DSL phrase/AND/NOT, vector = pure vector)")
     sp.add_argument("--no-hybrid", action="store_true",
                     help="deprecated alias for --mode vector (pure vector)")
 

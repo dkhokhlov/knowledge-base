@@ -1,6 +1,6 @@
-# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete + offset-aware chunking + resilient terminal status + per-request hybrid mode + top-k preservation + skip-cosine-reranker + ParadeDB BM25 FTS arm
+# Open WebUI custom image — path-aware dedup hash + upload idempotency + source mtime + orphan-vector cleanup on delete + offset-aware chunking + resilient terminal status + per-request hybrid mode + top-k preservation + skip-cosine-reranker + ParadeDB BM25 FTS arm + lexical-dsl Tantivy DSL
 
-This directory builds a thin-overlay custom Open WebUI image that applies ten
+This directory builds a thin-overlay custom Open WebUI image that applies eleven
 build-time patches to the backend. Patches 1–2 target the **2b churn**: the
 gdrive-indexer (oikb) re-uploading files every sync cycle. Patch 3 propagates
 the source file mtime into chunk metadata so a retrieve hit can report it.
@@ -18,7 +18,11 @@ stops the reranker candidate cap truncating below the requested `k`, and patch
 real reranker is configured. Patch 10 replaces the `plainto_tsquery` AND-every-
 token FTS arm (multi-term → 0 hits; `ts_rank_cd` = no IDF/length-norm) with
 ParadeDB `pg_search` real BM25 (`text ||| :query` tokenized OR + `pdb.score`),
-fixing the hybrid collapse-to-vector on multi-term technical queries.
+fixing the hybrid collapse-to-vector on multi-term technical queries. Patch 11
+adds an opt-in `lexical-dsl` retrieval mode: a sentinel-prefixed query branch
+runs `paradedb.parse_with_field` (Tantivy DSL — phrase / `+AND` / `+x -y`
+composite-NOT) and re-raises parse errors as HTTP 400 instead of swallowing
+them into a full-collection fallback.
 
 - **Patch 1 — path-aware dedup hash** (`retrieval.py`): OWUI rejected same-content
   files at different paths as `DUPLICATE_CONTENT`; oikb re-uploaded them every cycle.
@@ -1293,3 +1297,142 @@ is **never committed** to this (MIT, public) repo, and the image is **never
 pushed** to a registry (`compose.yml` postgres `pull_policy: never`; `make pull`
 skips it). It stays local. The OWUI overlay image is unaffected (it only emits
 the `|||` SQL; the extension + index live in kb-postgres).
+
+# Patch 11 — lexical-dsl Tantivy DSL (`pgvector.py` + `retrieval/utils.py`)
+
+## Problem (patch 11)
+
+Patch 10's `text ||| :query` is the match-any OR recall default — it cannot
+express phrase or boolean constraints. An agent that needs "the exact phrase
+`rotating thread`", "`termA` AND `termB`", or "`termA` but NOT `termB`" has no
+way to ask. The DSL candidate (`paradedb.parse_with_field`) was cut from patch 10
+because `lenient => true` silent-zeros on `:` / leading `-` (the C1 blocker); an
+explicit opt-in mode with `lenient => false` (loud raise) is the safe path.
+
+## Fix (patch 11)
+
+An opt-in `lexical-dsl` retrieval mode. The plumbing is a **query-string
+sentinel prefix** (not a threaded `syntax` param): the gateway
+(`docker/gateway/app.py`, `RETRIEVE_MODES["lexical-dsl"] = (True, 1.0)`) prefixes
+the query with `LEXICAL_DSL_PREFIX = "KB_LEXICAL_DSL_V1::"` before forwarding to
+OWUI. OWUI recognizes the sentinel, strips it, and runs the remainder through
+the Tantivy `QueryParser`:
+
+```sql
+SELECT document_chunk.id AS id, document_chunk.text AS text,
+       document_chunk.vmetadata AS vmetadata,
+       pdb.score(document_chunk.id) AS rank
+FROM document_chunk
+WHERE document_chunk.collection_name = :collection_name
+  AND document_chunk.id @@@ paradedb.parse_with_field(
+         'text', :query, lenient => false)
+ORDER BY pdb.score(document_chunk.id) DESC
+LIMIT :limit
+```
+
+- `paradedb.parse_with_field('text', :query, lenient => false)` rewrites to
+  `text:(:query)` and parses it as a Tantivy query string. `lenient => false`
+  **raises** on bad syntax (the only safe choice for an explicit opt-in; `true`
+  silent-zeros on `:` / leading `-`).
+- Shares the patch-10 `idx_document_chunk_bm25` index — **no kb-postgres
+  rebuild, no kb-bm25-init change**.
+- `bm25_weight = 1.0` (same as `lexical`), so `vector_weight = 0` → the vector
+  arm is skipped → the sentinel never reaches embeddings (no semantic
+  pollution). The FTS arm branches on the sentinel; the `else` branch is the
+  patch-10 `|||` block verbatim (`hybrid` + `lexical` regression preserved).
+- `:query` stays a bound parameter (no interpolation). The agent owns
+  quoting/escaping (`:` and leading `-` are operators, not literals).
+
+## DSL scope — 4 operators (verified against pg_search 0.25.6)
+
+A codex deep-dive against the `v0.25.6` tag (commit `d06d83a`; Tantivy fork
+`c3caae3`) confirmed there is **no higher-level parser**: `paradedb.parse()` and
+`parse_with_field()` use the SAME Tantivy `QueryParser` (only field scoping
+differs). Four operators work through `parse_with_field` on this index:
+
+| Operator | Example | Behavior |
+|---|---|---|
+| phrase | `"zenith rotating zephyr"` | exact phrase (token order) |
+| phrase-slop | `"zenith rotating"~2` | phrase within N token edits |
+| `+AND` | `+dslwordalpha +dslwordbeta` | both terms required |
+| composite-NOT | `+dslwordalpha -dslwordbeta` | first required, second excluded |
+
+Four operators were cut (they error or silently return 0 on this index — parser/
+grammar grounds, NOT escaping; a tokenizer change does not fix them): fuzzy
+`term~N` (`~` is a bare-word char; fuzzy is per-field `set_field_fuzzy`), regex
+`/re/` (`regexes_allowed=false`; `allow_regex()` never called), wildcard `pre*`
+(`*` stays in the word; `pdb.simple` strips it), pure-NOT `-x` alone
+(`AllButQueryForbidden`; needs a positive anchor — composite-NOT covers it).
+Full-DSL support is a gateway-side **compiler** to `paradedb.boolean(...)`
+builders (one `@@@`, no reindex) — a larger follow-on; `luqum` is the candidate
+parser library. See the memory note `pgsearch-no-higher-level-dsl-parser`.
+
+## C1 — the error-swallow fix (mandatory)
+
+A DSL parse error is swallowed by a **three-layer** except/None chain and would
+fall through to a full-collection in-memory `BM25Retriever` load with the raw DSL
+as query → the agent gets confident **wrong** results, not an error. Each swallow
+site is gated on the sentinel (so `hybrid`/`lexical` keep their fault-tolerant
+fallback) and re-raises so the error propagates to `query_collection_handler`
+(`routers/retrieval.py`) → `HTTPException(400)` → the gateway maps 4xx verbatim
+→ the agent sees a clear parse error:
+
+1. **`pgvector.py` `hybrid_search` broad except** (`except → rollback; log;
+   return None`): re-raise after `rollback` if `query` carries the sentinel.
+2. **`utils.py` `query_doc_with_native_hybrid_search` except** (`except →
+   log.debug; return None`): the re-raise from site 1 propagates through
+   `asyncio.gather`; re-raise again if `query` carries the sentinel.
+3. **`utils.py` `query_collection` hybrid-fallback except** (`except →
+   log.debug` then falls through to vector search): this is the **third** swallow
+   site — it catches the re-raise from site 2 and would fall back to embedding
+   the sentinel-prefixed query. Re-raise if any of `queries` carries the
+   sentinel.
+4. **`utils.py` `query_collection_with_hybrid_search` enriched-texts bypass**
+   (the `/retrieve` entry point): when an admin sets
+   `rag.enable_hybrid_search_enriched_texts=true`, this function skips the native
+   path (where sites 1–3 live) and runs the in-memory `BM25Retriever` on the raw
+   sentinel-prefixed query → no `lenient => false` raise fires → a malformed DSL
+   returns 200 with wrong results. Guard: force the native path for any
+   sentinel-prefixed query regardless of the enriched setting
+   (`if not enable_enriched_texts or any(q.startswith(LEXICAL_DSL_PREFIX) for q
+   in queries)`). Found by a codex blocker review.
+
+`lenient => false` is what makes the raise fire on a real parse error.
+
+## Sentinel contract + drift detection
+
+The sentinel is a contract between two separately-versioned images (gateway +
+kb-openwebui). The gateway is the ONLY writer; the agent never types it. Drift
+breaks silently → a `kb_check` sentinel-agreement probe + the `test_11`
+direct-OWUI contract catch it at gate time: a sentinel-prefixed valid DSL query
+→ ≥1 hit; a sentinel-prefixed malformed query → HTTP 400. If the sentinel
+changes, both images must rebuild together.
+
+## What patch 11 changes (3 sites in `pgvector.py` + 4 in `utils.py`)
+
+`apply_lexical_dsl.py` (runs AFTER `apply_bm25_search.py` in the Dockerfile
+chain) does seven targeted replacements, each asserting the anchor occurs exactly
+once (fail loud on drift):
+
+- **`pgvector.py`** — inject the `LEXICAL_DSL_PREFIX` constant; branch the FTS
+  arm on the sentinel (DSL → `parse_with_field`, else the patch-10 `|||` block
+  verbatim); re-raise at the `hybrid_search` except.
+- **`utils.py`** — inject the `LEXICAL_DSL_PREFIX` constant; re-raise at the
+  `query_doc_with_native_hybrid_search` except; re-raise at the
+  `query_collection` hybrid-fallback except; guard the
+  `query_collection_with_hybrid_search` enriched-texts bypass (force the native
+  path for sentinel queries).
+
+## No KB reset on cutover (patch 11)
+
+The `@@@` predicate queries the **existing** patch-10 BM25 index — no re-embed,
+no chunk change, no re-index. Existing vectors + chunks are untouched; only the
+FTS arm gains a branch and three excepts gain a gate. Run after a `kb-bm25-init`
+provision (the index the predicate queries is already present).
+
+## Rollback (patch 11)
+
+Revert the OWUI image to the patch-10 tag (`-lexicaldsl` suffix dropped). The
+`else` branch IS the patch-10 `|||` block, so a sentinel-less query is identical
+to patch 10; the sentinel gates are dead code without a writer. No kb-postgres
+change to revert.
