@@ -8,6 +8,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+_(nothing yet)_
+
+### Changed
+
+_(nothing yet)_
+
+### Fixed
+
+_(nothing yet)_
+
+## [v3.0.0] — 2026-09-02
+
+### Added
+
 - **ParadeDB BM25 FTS arm (OWUI patch 10).** Replaces the
   `plainto_tsquery('simple', :query)` FTS arm — which ANDed every token (multi-
   term → 0 hits) and scored with `ts_rank_cd` (no IDF, no length norm) — with
@@ -34,7 +48,32 @@ project adheres to [Semantic Versioning](https://semver.org/).
   dead GIN FTS index. Wired into `make provision` + both e2e provision paths.
   `kb-bm25-rollback` drops the index then the extension (order load-bearing).
   `kb-bm25-check` runs the `scripts/kb_check.py --bm25-gate` release gate
-  (extension + index + ranking-path + colon-safe + zero-token probes).
+  (extension + index + ranking-path + colon-safe + zero-token probes; patch 11
+  adds the `@@@ parse_with_field` phrase path + malformed-DSL-raises).
+- **`lexical-dsl` retrieval mode (OWUI patch 11).** An opt-in
+  `--mode lexical-dsl` exposes ParadeDB pg_search's Tantivy query-string DSL
+  (4 operators: phrase `"..."`, phrase-slop `"..."~N`, `+AND`, `+x -y`
+  composite-NOT) through the existing `/retrieve` path. The gateway prefixes an
+  unambiguous sentinel (`KB_LEXICAL_DSL_V1::`) to the query; the OWUI image
+  strips it and runs `document_chunk.id @@@ paradedb.parse_with_field('text',
+  :query, lenient => false)` instead of the patch-10 `|||` OR block (the else
+  branch is patch-10 verbatim → no lexical/hybrid regression). `bm25_weight=1.0`
+  skips the vector arm; shares the patch-10 `idx_document_chunk_bm25` index (no
+  kb-postgres rebuild, no `kb-bm25-init` change). `lenient => false` RAISES on
+  bad syntax — a 0-hit `lexical-dsl` is most likely a syntax error, not "not
+  found". **C1 error-swallow fix (4 gates, sentinel-gated):** a DSL parse error
+  was swallowed by a 3-layer `except → None` chain → full-collection in-memory
+  `BM25Retriever` → confident wrong results. Gates 1-3 re-raise (pgvector.py
+  `hybrid_search` except; utils.py `query_doc_with_native_hybrid_search` except;
+  utils.py `query_collection` hybrid-fallback except). Gate 4 forces the native
+  path for sentinel queries when an admin enabled
+  `rag.enable_hybrid_search_enriched_texts` (the bypass ran in-memory
+  `BM25Retriever` on the raw sentinel → no raise). Cross-image contract (gateway
+  writes the sentinel, OWUI reads it): `kb-bm25-check` + `test_11` catch drift.
+  Fuzzy `~`, regex `/re/`, wildcard `*`, pure-NOT `-x` alone do NOT work through
+  `parse_with_field` (no higher-level parser in pg_search 0.25.6) — cut from
+  scope. `skills/{claude,codex,opencode,pi}/SKILL.md` document the mode +
+  query-form sensitivity. See `docker/open-webui/PATCH.md` patch 11.
 
 ### Changed
 
@@ -53,11 +92,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Notes
 
-- **No Lucene DSL yet.** Phrase / `+AND` / `-NOT` / `field:` / regex is a future
-  opt-in mode (patch 11). `paradedb.parse_with_field(..., lenient => true)`
-  silent-zeros on `:` / leading `-` common in the corpus (the C1 blocker), so
-  the default stays `|||` (safe OR); the DSL will be an explicit opt-in where
-  the agent is responsible for quoting/escaping.
+- **Cross-image patch: rebuild both images.** Patches touching both the
+  gateway (`docker/gateway/app.py`) and the OWUI image must `docker compose
+  build` + `up -d` both `api-gateway` and `openwebui`. The DB-level
+  `kb-bm25-check` gate probes the DB/OWUI layer, NOT gateway dispatch — a green
+  gate + a broken gateway coexist. Verify with a live gateway-path probe
+  (`python3 kb.py retrieve ... --mode lexical-dsl`).
 - **No KB reset on cutover.** The `USING bm25` index builds over existing
   `document_chunk` rows — no re-embed, no chunk change. Queryable immediately
   after `make kb-bm25-init`.
