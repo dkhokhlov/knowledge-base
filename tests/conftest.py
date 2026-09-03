@@ -185,7 +185,7 @@ def _setup_iso_env(name, ocr, request, at_scale=False):
         lambda: _iso_teardown(captured["E2E_NAME"], captured["E2E_STAMP"]))
     if at_scale:
         # The unified deny-list (gitignored PII: Drive file paths) is read by
-        # `make gdrive-sync` so rclone does not abort on non-downloadable paths.
+        # `make kb-sync` so rclone does not abort on non-downloadable paths.
         # The provision bash has no E2E_SRC (_child_env/_ISO_VARS do not carry
         # it), so the fixture -- which has REPO = the source repo root -- copies
         # it into the clone's ./root/ now, before the provision runs. The clone-root

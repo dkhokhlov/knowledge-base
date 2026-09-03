@@ -404,7 +404,7 @@ def main(argv=None):
     logging.Formatter.converter = time.gmtime
 
     if not os.path.isdir(GDRIVE_DIR):
-        log.error("gdrive mirror not found: %s (run: make gdrive-sync)", GDRIVE_DIR)
+        log.error("gdrive mirror not found: %s (run: make kb-sync)", GDRIVE_DIR)
         return 1
 
     try:

@@ -210,12 +210,31 @@ class OwuiTests(_Assertions):
 
     def test_kbs(self):
         items = [{"id": "k1", "name": "KB1", "file_count": 3, "write_access": True,
-                  "user": {"email": "o@x"}}]
+                  "user": {"email": "o@x"},
+                  "description": "Indexed from local root/gdrive/ via api-gateway | source=root | host=testhost | path=gdrive"}]
         ns = mock.Mock(spec=[])
         out = _run([(kb, "jget", {"items": items})], kb.cmd_kbs, ns)
         d = self.assert_json(out); self.assert_compact(out)
         self.assertEqual(d["kbs"], [{"id": "k1", "name": "KB1", "file_count": 3,
-                                     "write_access": True, "owner": "o@x"}])
+                                     "write_access": True, "owner": "o@x",
+                                     "description": "Indexed from local root/gdrive/ via api-gateway | source=root | host=testhost | path=gdrive",
+                                     "source": "root", "host": "testhost", "path": "gdrive",
+                                     "project": None, "repo": None}])
+
+    def test_kbs_legacy_and_unknown(self):
+        # Legacy root prose (no kv) -> prefix fallback source=root, path=<top dir>.
+        items = [{"id": "k1", "name": "xgen", "file_count": 0, "write_access": False,
+                  "user": {"email": "o@x"},
+                  "description": "Indexed from local root/xgen/ via api-gateway"},
+                 {"id": "k2", "name": "weird", "file_count": 0, "write_access": False,
+                  "user": None,
+                  "description": "some random description"}]
+        ns = mock.Mock(spec=[])
+        out = _run([(kb, "jget", {"items": items})], kb.cmd_kbs, ns)
+        d = self.assert_json(out); self.assert_compact(out)
+        self.assertEqual(d["kbs"][0]["source"], "root")
+        self.assertEqual(d["kbs"][0]["path"], "xgen")
+        self.assertEqual(d["kbs"][1]["source"], "unknown")
 
     def test_kbs_empty(self):
         ns = mock.Mock(spec=[])

@@ -390,7 +390,8 @@ e2e_provision_at_scale() {
   make rag-config || return 1
   make kb-bm25-init || return 1
   make kb-bootstrap KB=gdrive || return 1
-  make gdrive-sync || return 1
+  make kb-sync || return 1
+  make kb-index KB=gdrive || return 1
   echo "==> make ci (provision the clone .venv for the in-clone suite)"
   make ci || return 1
 }

@@ -156,9 +156,17 @@ def cmd_whoami(base, key, a):
 def cmd_kbs(base, key, a):
     d = jget(base, key, "GET", "/api/v1/knowledge/")
     items = d.get("items", []) if isinstance(d, dict) else d
-    kbs = [{"id": k.get("id"), "name": k.get("name"),
-            "file_count": k.get("file_count"), "write_access": k.get("write_access"),
-            "owner": ((k.get("user") or {}).get("email") or "-")} for k in items]
+    kbs = []
+    for k in items:
+        desc = k.get("description") or ""
+        src = _parse_kb_desc(desc)
+        kbs.append({"id": k.get("id"), "name": k.get("name"),
+                    "description": desc, "source": src.get("source", "unknown"),
+                    "host": src.get("host"), "path": src.get("path"),
+                    "project": src.get("project"), "repo": src.get("repo"),
+                    "file_count": k.get("file_count"),
+                    "write_access": k.get("write_access"),
+                    "owner": ((k.get("user") or {}).get("email") or "-")})
     print(json.dumps({"kbs": kbs}))
 
 
@@ -511,6 +519,47 @@ def _parse_repo(desc):
     return None
 
 
+def _parse_kb_desc(desc):
+    """Parse the KB source attribute from the description string.
+
+    The source attribute lives in the writable `description` (OWUI's REST API
+    cannot write the `meta` JSONB field) as `<prose lead> | <kv>`. The parser is
+    kv-order-agnostic: split on `|`, read each `k=v` token, ignore non-kv prose.
+    If a `source=` kv is present it is authoritative. Else prefix-detect the
+    legacy prose lead: `Indexed from local root/` (new-migration) or
+    `Indexed from local <name>/` (pre-migration, no `root/`) -> source=root
+    (path = the top dir), `Claude projects memory` -> source=projects-memory
+    (path = the absolute project dir). Unparseable -> source=unknown.
+    """
+    d = desc or ""
+    kv = {}
+    for tok in d.split("|"):
+        tok = tok.strip()
+        if "=" in tok:
+            k, _, v = tok.partition("=")
+            kv[k.strip()] = v.strip()
+    if "source" in kv:
+        return kv
+    if d.startswith("Indexed from local root/"):
+        # New-migration root description without the kv tail: path = the top dir
+        # after `root/` (e.g. "Indexed from local root/gdrive/ via api-gateway").
+        kv.setdefault("source", "root")
+        kv.setdefault("path", d.split("root/", 1)[-1].split("/", 1)[0] if "root/" in d else "")
+        return kv
+    if d.startswith("Indexed from local "):
+        # Pre-migration root description: "Indexed from local <name>/ via
+        # kb-gateway" (no `root/` segment; gateway was named kb-gateway). Derive
+        # path = the top dir after `local ` (e.g. "local gdrive/" -> "gdrive").
+        kv.setdefault("source", "root")
+        rest = d[len("Indexed from local "):]
+        kv.setdefault("path", rest.split("/", 1)[0] if "/" in rest else "")
+        return kv
+    if d.startswith("Claude projects memory"):
+        kv.setdefault("source", "projects-memory")
+        return kv
+    return {"source": "unknown"}
+
+
 def _wait_deadline():
     return time.time() + 600
 
@@ -700,8 +749,13 @@ def cmd_index_projects(base, key, a):
                   "created": created, "added": 0, "modified": 0, "reused": 0,
                   "deleted": 0, "failed": 0, "errors": []}
         if not a.dry_run and not kb:
-            desc = ("Claude projects memory | repo=%s | host=%s | project=%s | path=%s"
-                    % (repo, host, encoded, project_path))
+            # Description = prose lead (feeds OWUI's KB-metadata embedding) +
+            # source kv (parsed by `kb kbs`). OWUI's REST API cannot write the KB
+            # meta JSONB field, so the source attribute lives here. `path` is the
+            # absolute decoded project dir for source=projects-memory.
+            desc = ("Claude projects memory | source=projects-memory | host=%s "
+                    "| project=%s | repo=%s | path=%s"
+                    % (host, encoded, repo, project_path))
             code, txt = call(base, key, "POST", "/api/v1/knowledge/create",
                              {"name": kb_name, "description": desc})
             if code != 200:
@@ -754,7 +808,9 @@ def cmd_index_projects(base, key, a):
             for fn, (p, sha) in src.items():
                 meta = {"host": host, "project": encoded, "project_path": project_path,
                         "repo": repo, "account": account,
-                        "source_relpath": "memory/%s" % fn}
+                        "source_relpath": "memory/%s" % fn,
+                        "mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                time.gmtime(os.path.getmtime(p)))}
                 with open(p, "rb") as fh:
                     data = fh.read()
                 ex = existing.get(fn)

@@ -231,7 +231,7 @@ if [ "$completed" -ge "$expected_min" ] && [ "$completed" -gt 0 ]; then
   pass "completed=${completed} >= source(${src_count}) - failed(${failed}) = ${expected_min}"
 else
   fail "completed=${completed} < source(${src_count}) - failed(${failed}) = ${expected_min} (unexplained gap)"
-  fail "re-run: make gdrive-sync; then docker logs ${OWUI_CONTAINER:-kb-openwebui} / ${MARKITDOWN_CONTAINER:-kb-markitdown-ocr}"
+  fail "re-run: make kb-sync && make kb-index KB=gdrive; then docker logs ${OWUI_CONTAINER:-kb-openwebui} / ${MARKITDOWN_CONTAINER:-kb-markitdown-ocr}"
   finish
   exit 1
 fi

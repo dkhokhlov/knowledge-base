@@ -121,7 +121,7 @@ def test_12_kb_check(iso_env_named):
 
 @pytest.mark.iso
 def test_16_generic_kb(iso_env_named):
-    """Generic (non-gdrive) KB under ./root/<name>/: the additive .kb-ignore ancestor-chain deny-list (root/.kb-ignore globals + per-KB root/<name>/.kb-ignore, with a `!` re-include) on a non-gdrive KB + the generic shell pipeline (make kb-bootstrap/kb-sync/kb-finalize by name). Named own-iso stack (REINDEX is instance-wide)."""
+    """Generic (non-gdrive) KB under ./root/<name>/: the additive .kb-ignore ancestor-chain deny-list (root/.kb-ignore globals + per-KB root/<name>/.kb-ignore, with a `!` re-include) on a non-gdrive KB + the generic shell pipeline (make kb-bootstrap/kb-index/kb-finalize by name). Named own-iso stack (REINDEX is instance-wide)."""
     iso_env_named("gentest")("tests/test_16_generic_kb.sh")
 
 @pytest.mark.iso

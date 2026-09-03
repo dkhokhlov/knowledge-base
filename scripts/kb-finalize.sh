@@ -8,7 +8,7 @@
 #      into the lists only on REINDEX, so the drained vectors sit outside the
 #      lists until this step runs. This is their first publish, not a re-do.
 #   2. It must not collide with the gateway's own "reindex_all"
-#      (POST /index?reindex_all=1 / INDEX_ALL=1 make gdrive-sync), which
+#      (POST /index?reindex_all=1 / INDEX_ALL=1 make kb-index), which
 #      RE-PROCESSES files — drains the KB and re-extracts + re-embeds every
 #      file (~40min cold OCR). That is a different operation at a different
 #      layer. A "make kb-reindex" would read as "re-run the document indexing".
@@ -34,19 +34,22 @@
 #
 # Two entry points (see Makefile):
 #   make kb-finalize            REINDEX only (assumes the drain is terminal).
-#   make gdrive-sync-finalize   gdrive-sync prereq (dispatches the async drain),
-#                              then --wait: poll GET /status until the drain is
+#   make kb-index-finalize      kb-index prereq (dispatches the async drain), then
+#                              --wait: poll GET /status until the drain is
 #                              terminal (pending+processing=0 AND
 #                              completed+failed>=source_count), then REINDEX.
-#                              One command = dispatch + wait + finalize.
-#                              Times out after GDRIVE_TEST_WAIT (default 2400s) if
-#                              the drain never terminates; fails loud (do not
-#                              REINDEX while inserts are in flight — that races
-#                              the live index).
+#                              One command = dispatch + wait + finalize. KB=<name>
+#                              waits on one KB; no KB= waits on EVERY top-level
+#                              non-dot subdir of ./root/ (matches make kb-index's
+#                              all-KB dispatch). Times out after GDRIVE_TEST_WAIT
+#                              (default 2400s) per KB if the drain never
+#                              terminates; fails loud (do not REINDEX while inserts
+#                              are in flight — that races the live index).
 #
 # Preconditions:
-#   - Stack running + the target drain dispatched (make gdrive-sync / make kb-sync)
-#     for --wait. KB=<name> selects the KB to wait on (default: gdrive).
+#   - Stack running + the target drain dispatched (make kb-sync / make kb-index)
+#     for --wait. KB=<name> selects one KB to wait on; no KB= waits on every
+#     top-level non-dot subdir of ./root/.
 #   - PGVECTOR_USER / PGVECTOR_DB in .env (scaffolded by make bootstrap).
 #   - OPENWEBUI_ADMIN_API_KEY in .env.local + KB_HOST (always: the global terminal
 #     guard below polls /status for every KB under ./root/ before REINDEX).
@@ -106,21 +109,23 @@ PG_CTN="${POSTGRES_CONTAINER:-kb-postgres}"
 : "${KB_HOST:?FAIL  KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}"
 : "${OPENWEBUI_ADMIN_API_KEY:?FAIL  OPENWEBUI_ADMIN_API_KEY not set in .env.local (run: make api-keys)}"
 adm=(-H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}")
-KB="${KB:-gdrive}"
-if ! KB_ID=$(KB="$KB" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null); then
-  echo "FAIL  could not resolve KB '$KB' by name (run: make kb-bootstrap KB=$KB ; then retry)" >&2
-  exit 1
-fi
 
-if [ "$WAIT" = "1" ]; then
-  wait_s="${GDRIVE_TEST_WAIT:-2400}"
-  status_url="${KB_HOST}/status?kb_id=${KB_ID}&dir=${KB}&json=1"
-
-  # source_count: the drain's reference set. Read ONCE before polling (the source
-  # dir is stable after `make gdrive-sync`, so this is a constant for the drain).
-  # Fail loud if unreadable -- do NOT finalize without a verified reference: an
-  # unknown source_count would let the all-zero error fallback break the loop and
-  # REINDEX mid-drain. -1 = unreadable (curl fail / bad JSON / missing key).
+# wait_kb <name> <wait_s>: poll GET /status until KB <name>'s drain is terminal
+# (pending+processing == 0 AND completed+failed >= source_count), or time out
+# failing loud. Terminal = every uploaded file reached a terminal state. The
+# source_count guard is load-bearing: a /status error (curl fail / 401 / bad
+# JSON) falls back to all-zero counts, for which pending+processing == 0 BUT
+# accounted(0) < source_count(N>0) -> does NOT break -> keeps polling -> times
+# out failing loud. Without it a transient /status error would break immediately
+# and REINDEX while the drain is still in flight. src_count is read from /status
+# (the gateway's authoritative source walk), so this stays allowlist-agnostic.
+wait_kb() {
+  local kb="$1" wait_s="$2" kid status_url src_count deadline completed pending processing failed
+  if ! kid=$(KB="$kb" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null); then
+    echo "FAIL  could not resolve KB '$kb' by name (run: make kb-bootstrap KB=$kb ; then retry)" >&2
+    return 1
+  fi
+  status_url="${KB_HOST}/status?kb_id=${kid}&dir=${kb}&json=1"
   src_count=$(curl -sS "$status_url" "${adm[@]}" 2>/dev/null | python3 -c '
 import sys, json
 try:
@@ -130,11 +135,10 @@ except Exception:
     print("-1")
 ' 2>/dev/null || echo "-1")
   if [ "${src_count}" -lt 0 ] 2>/dev/null; then
-    echo "FAIL  could not read source_count from /status (got '${src_count}'); refusing to finalize." >&2
+    echo "FAIL  could not read source_count from /status for KB $kb (got '${src_count}'); refusing to finalize." >&2
     echo "       do not REINDEX without a verified terminal state; check KB_HOST / admin key / gateway health." >&2
-    exit 1
+    return 1
   fi
-
   deadline=$(( $(date +%s) + wait_s ))
   completed=0; pending=0; processing=0; failed=0
   while :; do
@@ -156,15 +160,31 @@ except Exception:
   in_flight=$(( pending + processing ))
   accounted=$(( completed + failed ))
   if [ "$in_flight" != "0" ] || [ "$accounted" -lt "$src_count" ]; then
-    printf 'FAIL  drain did not terminate after %ss: completed=%s failed=%s pending=%s processing=%s source=%s (accounted=%s)\n' \
-      "$wait_s" "$completed" "$failed" "$pending" "$processing" "$src_count" "$accounted" >&2
+    printf 'FAIL  KB %s drain did not terminate after %ss: completed=%s failed=%s pending=%s processing=%s source=%s (accounted=%s)\n' \
+      "$kb" "$wait_s" "$completed" "$failed" "$pending" "$processing" "$src_count" "$accounted" >&2
     echo '       do not REINDEX while inserts are in flight or /status is unreadable; check: docker logs kb-openwebui / kb-markitdown-ocr' >&2
-    exit 1
+    return 1
   fi
-  printf '==> drain terminal: completed=%s failed=%s pending=%s processing=%s source=%s\n' \
-    "$completed" "$failed" "$pending" "$processing" "$src_count"
+  printf '==> KB %s drain terminal: completed=%s failed=%s pending=%s processing=%s source=%s\n' \
+    "$kb" "$completed" "$failed" "$pending" "$processing" "$src_count"
   [ "$src_count" -gt 0 ] \
     || echo 'WARN  source_count=0 (empty corpus) — REINDEXing anyway (idempotent, harmless)'
+}
+
+if [ "$WAIT" = "1" ]; then
+  wait_s="${GDRIVE_TEST_WAIT:-2400}"
+  if [ -n "${KB:-}" ]; then
+    wait_kb "$KB" "$wait_s" || exit 1
+  else
+    # No KB= -> wait on EVERY top-level non-dot subdir of ./root/ (matches make
+    # kb-index's all-KB dispatch). A dispatched-but-not-waited KB would hit the
+    # 300s global guard below unprepared; waiting here (2400s/KB) makes the global
+    # guard a quick final safety net, not the primary wait.
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      wait_kb "$d" "$wait_s" || exit 1
+    done < <(find root -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort)
+  fi
 fi
 
 # --- global terminal guard + lock (B11) ---------------------------------------

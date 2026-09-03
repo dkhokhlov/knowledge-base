@@ -40,7 +40,9 @@ with `scripts/` symlinked to `../claude/scripts`. The wrappers are zero-dependen
 Python 3.10+ stdlib:
 
 - `scripts/kb.py` — one self-contained CLI. **Top level:** Open WebUI REST KB
-  surface (read-scoped) `whoami`, `kbs`, `retrieve`, `file`; **projects memory**
+  surface (read-scoped) `whoami`, `kbs`, `retrieve`, `file` (`kbs` surfaces each
+  KB's `description` + the parsed source attribute — `source`/`host`/`path`/
+  `project`/`repo` — read from the description kv); **projects memory**
   (user-key writes to owned KBs) `index-projects`, `retrieve-projects`,
   `status-projects` — **Claude Code skill copy only**; the shared `kb.py` keeps the
   subcommands, but the codex/opencode/pi `SKILL.md` copies do not document them.
@@ -143,8 +145,11 @@ KBs. `index-projects` fails with a clear message until this is run.
 
 KB name = `<host>--<encoded-dir-without-leading-dash>` (host = short hostname).
 Per-file metadata: `host`, `project`, `project_path`, `repo` (git repo name),
-`account`, `source_relpath` — `repo` rides in the KB `description` too, so hits
-are easy to reason about (`retrieve-projects` returns compact JSON
+`account`, `source_relpath`, `mtime` (file mtime, ISO-UTC; only new/changed
+files — idempotency reuses unchanged files without touching `File.meta`). The
+KB `description` carries the source-attribute kv (`source=projects-memory |
+host=.. | project=.. | repo=.. | path=..`); `kbs` parses it, so hits are easy
+to reason about (`retrieve-projects` returns compact JSON
 `{"kbs":N,"hits":[{"repo","kb_name","file","text"}],"errors":[...]}`).
 
 ```

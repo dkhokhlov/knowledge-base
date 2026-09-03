@@ -8,15 +8,66 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-_(nothing yet)_
+- **KB source attribute (in the `description`).** Each KB now carries a
+  structured source attribute as kv appended to its `description`:
+  root KBs — `Indexed from local root/<name>/ via api-gateway | source=root |
+  host=<hostname> | path=<name>`; projects-memory KBs — `Claude projects memory
+  | source=projects-memory | host=<hostname> | project=<encoded-dir> |
+  repo=<git-repo> | path=<project-dir>`. OWUI's REST API cannot write the KB
+  `meta` JSONB field (`KnowledgeForm` has no `meta`; create/update silently drop
+  it), so the attribute lives in the writable `description` (the prose lead is
+  kept — OWUI re-embeds `f'{name}\n\n{description}'` into the KB-metadata
+  collection on every write). `kb kbs` parses the kv and surfaces
+  `source`/`host`/`path`/`project`/`repo` per KB; a consumer reads `source` to
+  interpret `path` (root-relative for `source=root`, the absolute project dir
+  for `source=projects-memory`). New KBs get the kv at create time
+  (`kb-bootstrap.sh` for root; `kb.py` for projects).
+- **`make kb-desc-backfill`** — one-time, idempotent, non-destructive backfill
+  of the source-attribute kv into the descriptions of legacy KBs created before
+  this landed. SKIPs any KB whose description already carries a `source=` kv;
+  appends the kv to the prose lead for root + projects KBs; skips unparseable
+  descriptions. `access_grants` is NOT clobbered (`/knowledge/{id}/update` uses
+  `exclude={'access_grants'}`, so the `user:*` public-read grant survives). Each
+  write re-embeds the KB metadata vector (one Ollama call per KB; a failed embed
+  does NOT fail the update). Run on the stack host.
+- **Per-file `mtime` in projects-memory indexing.** `index-projects` now writes
+  `mtime` (ISO-UTC) into `File.meta.data`, mirroring the gateway root path.
+  Lazy rollout: the upload-idempotency patch early-returns the existing
+  FileModel on a hash match without touching `File.meta`, so `mtime` lands only
+  on new/changed files (already-indexed memory files stay `mtime: null` until
+  they change).
 
 ### Changed
 
-_(nothing yet)_
-
-### Fixed
-
-_(nothing yet)_
+- **`make kb-sync` / `make kb-index` semantic split (BREAKING).** `make kb-sync`
+  is now SYNC-ONLY: it runs rclone to sync external sources into `./root/`
+  (gdrive today) and does NOT index. `make kb-index` is INDEX-ONLY: it POSTs
+  `/index` to reconcile `./root/<name>/` trees into their OWUI KBs. A full
+  gdrive refresh is now `make kb-sync && make kb-index KB=gdrive` (the two
+  stages are split so each is independently retryable). The old one-shot
+  `make gdrive-sync` (which chained rclone → `/index`) is **removed**; its
+  rclone stage lives on as the impl of `make kb-sync` (`scripts/gdrive-sync`).
+- **`make kb-index` (no `KB=`) indexes EVERY top-level non-dot `./root/` subdir**
+  (was: defaulted to `gdrive`). `KB=<glob>` (e.g. `xgen-*`) expands against
+  `./root/` in the Makefile; the gateway never sees a wildcard.
+- **`make kb-status` requires `KB=<name>`** (was: defaulted to `gdrive`).
+- **Finalize chain realigned.** `kb-index-finalize: kb-index` replaces the
+  removed `gdrive-sync-finalize` / `kb-sync-finalize` (a `kb-sync` prereq
+  dispatches no drain → would REINDEX against nothing). `kb-index-finalize`
+  propagates `KB=` like `kb-index`; no `KB=` waits on every non-dot subdir.
+- **Gateway `dir` validation + `path`/`SCOPE_PATH` removal (BREAKING).** The
+  gateway scope param `dir` is now a single top-dir name only: it rejects
+  empty, `.`, `..`, any `/`/backslash/wildcard (`*?[`), a non-existent subdir,
+  and a realpath that escapes the source root. The `?path=<relpath>` query
+  param and the `SCOPE_PATH` env var are **removed** from `/index`, `/status`,
+  the scripts, and the Makefile — `path` was a full-reconcile footgun that
+  deletes every KB file outside the subpath and broke the "KB = one top dir"
+  rule. KB identity is now enforced as the top dir name only. (The per-file
+  `path` field — the OWUI sync/diff directory key — is unchanged; a different
+  concept.) `_normalize_path` is removed; `_validate_dir` replaces it.
+- **test_17 fixture moved** to `root/.tests-meta-sidecar/` (a top-level dot-dir)
+  so it indexes via `dir=.tests-meta-sidecar` (single segment) instead of the
+  removed `dir=.tests&path=meta-sidecar`.
 
 ## [v3.0.0] — 2026-09-02
 

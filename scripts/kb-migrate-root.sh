@@ -28,7 +28,8 @@
 # gateway is still the old code for the drain check, and the new compose.yml is on
 # disk for the recreate). Then:
 #   make kb-bootstrap KB=gdrive   (re-assert the grant on the existing KB by name)
-#   make gdrive-sync              (incremental reconcile -- NO mass drain: dir=gdrive
+#   make kb-sync                  (rclone the shared drives into ./root/gdrive/)
+#   make kb-index KB=gdrive       (incremental reconcile -- NO mass drain: dir=gdrive
 #                                  keeps manifest keys identical to the old source=gdrive)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -181,7 +182,7 @@ make start
 # dry_run runs ZERO mutations (gateway app.py: returns the sync/diff plan only).
 # Assert key-shape parity: added=modified=deleted=0 -- dir=gdrive keeps manifest
 # keys identical to the old source=gdrive shape. If any delta > 0 the dir= root
-# is WRONG: abort BEFORE the operator's `make gdrive-sync` would apply it.
+# is WRONG: abort BEFORE the operator's `make kb-sync && make kb-index KB=gdrive` would apply it.
 O="${KB_HOST%/}"
 adm=(-H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}")
 say "==> waiting for the new api-gateway /health..."
@@ -226,12 +227,13 @@ read -r g_added g_mod g_del g_unmod <<< "$plan"
 say "post-move dry_run: added=${g_added} modified=${g_mod} deleted=${g_del} unmodified=${g_unmod}"
 if [ "$g_added" != "0" ] || [ "$g_mod" != "0" ] || [ "$g_del" != "0" ]; then
   say "FAIL  key-shape parity broken: added=${g_added} modified=${g_mod} deleted=${g_del} (expected all 0; dir=gdrive keeps manifest keys identical)" >&2
-  say "       DO NOT run make gdrive-sync -- it would apply these deltas. Revert the move (mv root/gdrive gdrive) and investigate the dir= root." >&2
+  say "       DO NOT run make kb-sync && make kb-index KB=gdrive -- it would apply these deltas. Revert the move (mv root/gdrive gdrive) and investigate the dir= root." >&2
   exit 1
 fi
-say "OK  key-shape parity holds (added=0 modified=0 deleted=0 unmodified=${g_unmod}) -- safe to run make gdrive-sync"
+say "OK  key-shape parity holds (added=0 modified=0 deleted=0 unmodified=${g_unmod}) -- safe to run make kb-sync && make kb-index KB=gdrive"
 say ""
 say "DONE  migration complete. Next:"
 say "  make kb-bootstrap KB=gdrive   # re-assert the public-read grant on the existing KB"
-say "  make gdrive-sync              # incremental reconcile (NO mass drain: dir=gdrive keeps keys identical)"
+say "  make kb-sync                  # rclone the shared drives into ./root/gdrive/"
+say "  make kb-index KB=gdrive       # incremental reconcile (NO mass drain: dir=gdrive keeps keys identical)"
 say "  make kb-status KB=gdrive      # verify the same file count as before migration"

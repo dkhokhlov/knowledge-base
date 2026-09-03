@@ -13,7 +13,7 @@
 #      allowlist) that must drop .json + .log, and the `!` that must keep .md.
 #   2. The generic shell pipeline BY NAME (no gdrive, no GDRIVE_KB_ID):
 #        make kb-bootstrap KB=<name>  (find-or-create + grant user:* read)
-#        make kb-sync KB=<name>       (POST /index?dir=<name>&kb_id=<id>)
+#        make kb-index KB=<name>      (POST /index?dir=<name>&kb_id=<id>)
 #        poll GET /status?dir=<name>  (drain terminal)
 #        make kb-finalize KB=<name>   (global-terminal guard + flock + REINDEX)
 #
@@ -107,15 +107,15 @@ else
   fail "kb-bootstrap KB=${NAME} produced no kb_id"; finish; exit 1
 fi
 
-# --- make kb-sync KB=gentest (POST /index?dir=gentest&kb_id=<id>) --------------
-section "make kb-sync KB=${NAME} (reconcile)"
-sync_out=$(make kb-sync KB="$NAME" 2>&1) || true
+# --- make kb-index KB=gentest (POST /index?dir=gentest&kb_id=<id>) --------------
+section "make kb-index KB=${NAME} (reconcile)"
+sync_out=$(make kb-index KB="$NAME" 2>&1) || true
 printf '%s\n' "$sync_out" | grep -E 'added=|FAIL|OK|DONE' | tail -5
 added=$(printf '%s\n' "$sync_out" | sed -n 's/.*added=\([0-9][0-9]*\).*/\1/p' | head -1)
 if [ "${added:-0}" -gt 0 ] 2>/dev/null; then
-  pass "kb-sync: added=${added} (the .md + .txt; .json + .log excluded upstream)"
+  pass "kb-index: added=${added} (the .md + .txt; .json + .log excluded upstream)"
 else
-  fail "kb-sync added=0 (expected 2: the .kb-ignore may have over-denied, or /index failed)"; finish; exit 1
+  fail "kb-index added=0 (expected 2: the .kb-ignore may have over-denied, or /index failed)"; finish; exit 1
 fi
 
 # --- poll GET /status until the drain is terminal ------------------------------

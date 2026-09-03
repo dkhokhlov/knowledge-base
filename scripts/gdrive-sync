@@ -10,21 +10,8 @@ Download all accessible Google Drive shared drives into a local directory.
 
 Options:
   -r, --remote NAME       rclone remote name (default: gdrive)
-  -d, --destination DIR  local destination (default: ./gdrive)
+  -d, --destination DIR  local destination (default: ./root/gdrive)
       --dry-run           show transfers without downloading files
-      --index-all         force a full re-index of every file (default:
-                          incremental: only new/changed files are indexed)
-      --retry-pending     also re-trigger files still pending (stalled in
-                          extraction/OCR). Default re-triggers only failed
-                          files; use this after a drain stalls (a pending file
-                          stuck in OCR). Interrupts in-flight OCR, so it is not
-                          the default.
-      --path RELPATH      index only a subpath of ./gdrive (a dir or a single
-                          file; relative to the gdrive root). The reconcile is a
-                          FULL reconcile of that subpath: use a KB whose whole
-                          scope is that path (a dedicated/subpath KB). On the
-                          shared gdrive KB this deletes every KB file outside
-                          the subpath, so do not use it there.
   -h, --help              show this help
 
 The destination contains one directory per shared drive. The command uses
@@ -33,13 +20,10 @@ rclone sync, so files removed from Drive are deleted from the destination
 (.<destination>-backup/<UTC-ISO>/) as a recovery net, NOT deleted in place —
 so a bad/empty mount is recoverable from the backup dir (`make clean` clears it).
 
-After the sync (unless --dry-run), the synced tree is reconciled into the OWUI
-"gdrive" knowledge base via api-gateway POST /index (stateless sync/diff against
-the live KB; the gateway holds the admin key). Default is incremental (only
-new/changed files uploaded + extracted); --index-all drains + re-uploads every
-file. Fail-fast: a non-2xx /index response or ok=false aborts after the report.
-Skipped silently if OPENWEBUI_ADMIN_API_KEY is unset (run: make api-keys), or if the
-"gdrive" KB cannot be resolved by name (run: make kb-bootstrap KB=gdrive).
+SYNC-ONLY: this script downloads the Drive tree into ./root/gdrive/. It does
+NOT index — run `make kb-index KB=gdrive` after to reconcile the synced tree
+into the OWUI KB (api-gateway POST /index). The old one-shot sync+index target
+chained both; the split makes sync and index independently retryable.
 
 Fail-fast: ANY transfer error aborts the run immediately (the report is still
 written with the failing files + rclone reasons). A per-drive empty-source guard
@@ -78,9 +62,6 @@ EOF
 remote="gdrive"
 destination="./root/gdrive"
 dry_run=0
-index_all=0
-retry_pending=0
-path=""
 
 # KB-indexable document filter — MUST match DEFAULT_ALLOW in gateway/app.py
 # (the gdrive index documents-only set: docx,pdf,pptx,xlsx,txt,md,html,json,log,
@@ -121,21 +102,8 @@ while (($# > 0)); do
             destination="$2"
             shift 2
             ;;
-        --path)
-            (($# >= 2)) || { echo "error: --path needs a value" >&2; exit 2; }
-            path="$2"
-            shift 2
-            ;;
         --dry-run)
             dry_run=1
-            shift
-            ;;
-        --index-all)
-            index_all=1
-            shift
-            ;;
-        --retry-pending)
-            retry_pending=1
             shift
             ;;
         -h|--help)
@@ -717,120 +685,10 @@ if (( !dry_run )) && [[ -d "$backup_root" ]]; then
 fi
 emit "Files backed up (deleted/overwritten): ${backed_up} (in ${backup_root})"
 
-# --- index chain: reconcile the synced tree into the OWUI KB via api-gateway ---
-# Stateless: the gateway walks ./root/gdrive (ro mount, dir=gdrive), drives OWUI
-# sync/diff against the live KB, uploads new/changed files (the OWUI per-upload
-# background task is the sole linker: extract -> embed -> link), cleans up removed
-# ones, and re-triggers failed files (delete + re-upload so a fresh background task
-# is queued). Default incremental; --index-all drains + re-uploads everything;
-# --retry-pending also re-triggers files still pending (stalled in OCR). Fail-fast
-# on a non-2xx response or ok=false. The gdrive KB is resolved BY NAME (the gateway
-# is stateless; no GDRIVE_KB_ID env). Skipped under --dry-run or if the gdrive KB
-# cannot be resolved (run: make kb-bootstrap KB=gdrive).
-if (( !dry_run )); then
-    set -a; . ./.env 2>/dev/null || true; . ./.env.local 2>/dev/null || true; set +a
-    if [[ -n "${OPENWEBUI_ADMIN_API_KEY:-}" ]]; then
-        if [[ -z "${KB_HOST:-}" ]]; then
-            echo "FAIL  KB_HOST not set -- export KB_HOST=http://<host>:<port> (see .env.template)" >&2
-            exit 1
-        fi
-        O="${KB_HOST%/}"
-        # Resolve the "gdrive" KB by name (paginated, unique-or-fail). The gateway
-        # holds the admin key but takes kb_id, so resolve here and pass it through.
-        if ! KB_ID=$(KB=gdrive ./scripts/kb-bootstrap.sh --resolve 2>/dev/null); then
-            emit "FAIL: could not resolve the 'gdrive' KB by name (0 or >1 match). Run: make kb-bootstrap KB=gdrive ; then retry. Diagnose: KB=gdrive ./scripts/kb-bootstrap.sh --resolve"
-            write_report_and_exit 1
-        fi
-        # --- in-flight drain guard (client-side): refuse to POST /index if a gdrive
-        #     drain is already running for this KB. A drain is in flight when OWUI
-        #     still has un-finished files (pending+processing > 0); re-dispatching
-        #     then races the per-file extract->embed->link (markitdown-ocr) + the
-        #     gateway sync/diff, and --index-all would delete the in-flight files.
-        #     --retry-pending is EXEMPT (it intentionally re-triggers pending files).
-        #     Strict + fail-closed: curl -f fails on HTTP 401/503/etc (a gateway
-        #     error body is valid JSON {"error":..} WITHOUT pending/processing, so a
-        #     plain .get(,0) would parse it as 0 -> unsafe proceed); --max-time bounds
-        #     the paginating scan; missing/invalid pending/processing -> refuse.
-        #     CLIENT-SIDE guard: bypassable by raw curl / make kb-index; has a
-        #     check-then-dispatch TOCTOU; the /status scan caps at 10k files
-        #     (owui.py page-200), so a pending file beyond that is missed.
-        if (( ! retry_pending )); then
-            if ! status_resp=$(curl -fsS --max-time 1200 \
-                    "${O}/status?kb_id=${KB_ID}&dir=gdrive&json=1" \
-                    -H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}" 2>/dev/null); then
-                emit "FAIL: could not read /status (gateway error/unreachable/timeout) for KB ${KB_ID}; refusing to dispatch (cannot confirm no drain in flight). Check: ${O}/health ; make kb-status KB=gdrive"
-                write_report_and_exit 1
-            fi
-            inflight=$(printf '%s' "$status_resp" | python3 -c '
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    p, q = d["pending"], d["processing"]   # KeyError if absent -> fail-closed
-    if not (isinstance(p, int) and isinstance(q, int) and p >= 0 and q >= 0):
-        raise ValueError
-    print(p + q)
-except Exception:
-    print("ERR")
-')
-            if [[ "$inflight" == "ERR" ]]; then
-                emit "FAIL: /status response for KB ${KB_ID} missing/invalid pending or processing (got: ${status_resp:0:120}); refusing to dispatch (cannot confirm no drain in flight)"
-                write_report_and_exit 1
-            fi
-            if (( inflight > 0 )); then
-                emit "FAIL: a gdrive drain is in flight for KB ${KB_ID} (pending+processing=${inflight}). Refusing to re-dispatch (would race the in-flight extract->embed->link). Wait for terminal: make kb-status KB=gdrive ; make gdrive-sync-finalize (polls then REINDEXes). Or retry stalled pending: make gdrive-sync RETRY_PENDING=1"
-                write_report_and_exit 1
-            fi
-        fi
-        idx_q="kb_id=${KB_ID}&dir=gdrive"
-        (( index_all )) && idx_q="${idx_q}&reindex_all=1"
-        (( retry_pending )) && idx_q="${idx_q}&retry_pending=1"
-        if [[ -n "${path}" ]]; then
-            # URL-encode the subpath (gdrive paths may contain spaces) before
-            # appending it to the query string.
-            path_enc=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$path")
-            idx_q="${idx_q}&path=${path_enc}"
-        fi
-        if (( index_all )); then
-            emit "Indexing synced tree into OWUI KB (via api-gateway /index, full re-index)..."
-        else
-            emit "Indexing synced tree into OWUI KB (via api-gateway /index, incremental)..."
-        fi
-        # shellcheck disable=SC2086 # idx_q is a single query string, intentionally unquoted
-        if ! idx_resp=$(curl -sS --max-time 1200 -X POST \
-                -H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}" \
-                -H "Content-Type: application/json" -d '{}' \
-                "${O}/index?${idx_q}" 2>&1); then
-            emit "FAIL: kb /index call failed (curl error): ${idx_resp}"
-            write_report_and_exit 1
-        fi
-        # Parse the JSON response (jq is a declared dependency above). jq -e
-        # sets exit status from the last value's truthiness; it prints the
-        # boolean TEXT (true/false) to stdout, so use the exit status, not
-        # stdout, to decide JSON-ness (comparing stdout to "1" is always false).
-        if ! printf '%s' "$idx_resp" | jq -e 'has("ok")' >/dev/null 2>&1; then
-            emit "FAIL: kb /index returned a non-JSON/error response: ${idx_resp}"
-            write_report_and_exit 1
-        fi
-        idx_added=$(printf '%s' "$idx_resp" | jq -r '.added')
-        idx_modified=$(printf '%s' "$idx_resp" | jq -r '.modified')
-        idx_deleted=$(printf '%s' "$idx_resp" | jq -r '.deleted')
-        idx_unmodified=$(printf '%s' "$idx_resp" | jq -r '.unmodified')
-        idx_retried=$(printf '%s' "$idx_resp" | jq -r '.retried // 0')
-        idx_ok=$(printf '%s' "$idx_resp" | jq -r '.ok')
-        idx_errn=$(printf '%s' "$idx_resp" | jq -r '(.errors // []) | length')
-        idx_errn=${idx_errn:-0}
-        emit "KB index: added=${idx_added} modified=${idx_modified} deleted=${idx_deleted} unmodified=${idx_unmodified} retried=${idx_retried} errors=${idx_errn}"
-        if (( idx_errn > 0 )); then
-            printf 'KB index per-file errors:\n' >&2
-            printf '%s' "$idx_resp" | jq -r '.errors[] | "  \(.filename // .file_id // "?"): \(.status) — \(.error // "")"' >&2
-        fi
-        if [[ "$idx_ok" != "true" ]]; then
-            emit "FAIL: kb /index completed with errors (ok=false) — see per-file errors above"
-            write_report_and_exit 1
-        fi
-    else
-        printf 'OPENWEBUI_ADMIN_API_KEY unset — skipping kb index (run: make api-keys)\n' >&2
-    fi
-fi
+# SYNC-ONLY: this script stops here. The synced tree in ./root/gdrive/ is
+# reconciled into the OWUI KB by a separate `make kb-index KB=gdrive` (api-gateway
+# POST /index, with its own client-side in-flight drain guard). The old one-shot
+# sync+index target chained sync + index; the split makes them independently
+# retryable and lets the drain guard live in one place (scripts/kb-index.sh).
 
 write_report_and_exit 0

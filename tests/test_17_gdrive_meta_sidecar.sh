@@ -9,8 +9,8 @@
 # File.meta.data.gdrive AND comes back through the kb skill `retrieve` join.
 #
 # Flow: index a small committed fixture set (docs + their .meta.json sidecars
-# under root/.tests/meta-sidecar/) into a throwaway temp KB via
-# POST /index?dir=.tests&path=meta-sidecar (the gateway reads each sidecar at
+# under root/.tests-meta-sidecar/) into a throwaway temp KB via
+# POST /index?dir=.tests-meta-sidecar (the gateway reads each sidecar at
 # upload via _gdrive_meta_for and stores it in File.meta.data.gdrive). Poll the
 # drain. Then invoke the kb skill `retrieve` (skills/claude/scripts/kb.py) for
 # each fixture's rare marker token and assert the returned hit's `gdrive` field
@@ -21,7 +21,7 @@
 # Self-contained: the temp KB is created with the admin key, granted '*' read so
 # the agent (user) key can retrieve + read file meta (the kb skill _file_gdrive
 # join does one GET /files/{id} per hit), and deleted on EXIT (its files too).
-# The committed fixture files under root/.tests/meta-sidecar/ are NOT deleted.
+# The committed fixture files under root/.tests-meta-sidecar/ are NOT deleted.
 set -u
 . "$(dirname "$0")/lib.sh"
 load_env
@@ -32,7 +32,7 @@ G="$(kb_host)"
 # Emacs regex treats (a|b) as LITERAL, so every -iregex below uses -regextype
 # posix-extended.
 ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
-FIXDIR="root/.tests/meta-sidecar"
+FIXDIR="root/.tests-meta-sidecar"
 
 # --- skip condition: the committed fixture must exist -------------------------
 # Count only files the gateway indexes: exclude the .meta/.meta.json sidecars
@@ -103,13 +103,13 @@ curl -s -X POST "$G/api/v1/knowledge/${KB_ID}/access/update" "${ADM[@]}" -H "$CT
   -d "{\"access_grants\":[{\"resource_type\":\"knowledge\",\"resource_id\":\"${KB_ID}\",\"principal_type\":\"user\",\"principal_id\":\"*\",\"permission\":\"read\"}]}" >/dev/null 2>&1
 pass "granted '*' read on temp KB"
 
-# --- POST /index (admin): reconcile root/.tests/meta-sidecar into the temp KB --
-# path=meta-sidecar scopes the walk to the fixture subpath (the .meta.json is
+# --- POST /index (admin): reconcile root/.tests-meta-sidecar into the temp KB -
+# dir=.tests-meta-sidecar scopes the walk to the fixture dir (the .meta.json is
 # skipped by _entry_for; the .txt is indexed). The gateway reads the sidecar via
 # _gdrive_meta_for at upload + stores it in File.meta.data.gdrive.
-section "POST /index (api-gateway, dir=.tests path=meta-sidecar)"
+section "POST /index (api-gateway, dir=.tests-meta-sidecar)"
 idx_resp=$(curl -sS --max-time 1200 -X POST \
-  "$G/index?dir=.tests&path=meta-sidecar&kb_id=${KB_ID}" \
+  "$G/index?dir=.tests-meta-sidecar&kb_id=${KB_ID}" \
   "${ADM[@]}" -H "$CT" -d '{}' 2>&1)
 read -r added modified deleted unmodified retried errn < <(printf '%s' "$idx_resp" | python3 -c '
 import sys, json
@@ -142,12 +142,12 @@ for e in (d.get("errors") or [])[:20]:
 fi
 
 # --- poll GET /status until the drain reaches a terminal state ---------------
-section "poll GET /status (real drain, path=meta-sidecar)"
+section "poll GET /status (real drain, dir=.tests-meta-sidecar)"
 wait_s="${META_SIDECAR_WAIT:-180}"
 deadline=$(( $(date +%s) + wait_s ))
 completed=0; pending=0; processing=0; failed=0
 while :; do
-  read -r completed pending processing failed < <(curl -sS "$G/status?dir=.tests&kb_id=${KB_ID}&json=1" "${ADM[@]}" 2>/dev/null | python3 -c '
+  read -r completed pending processing failed < <(curl -sS "$G/status?dir=.tests-meta-sidecar&kb_id=${KB_ID}&json=1" "${ADM[@]}" 2>/dev/null | python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)

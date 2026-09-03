@@ -144,7 +144,7 @@ for e in (d.get("errors") or [])[:20]:
 fi
 
 # --- poll GET /status until the drain reaches a terminal state ---------------
-section "poll GET /status (real drain, path=.tests)"
+section "poll GET /status (real drain, dir=.tests)"
 wait_s="${GDRIVE_FIXTURE_WAIT:-180}"
 deadline=$(( $(date +%s) + wait_s ))
 completed=0; pending=0; processing=0; failed=0; status_json=""

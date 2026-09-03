@@ -9,7 +9,7 @@
 # use provision to change it.
 #
 # gdrive indexing is no longer a sidecar: api-gateway serves POST /index (manual,
-# driven by `make gdrive-sync`). No gdrive profile.
+# driven by `make kb-sync` + `make kb-index KB=gdrive`). No gdrive profile.
 #
 # Refuses to start without .env.local + a WEBUI_SECRET_KEY, and fails fast if
 # OLLAMA_HOST is unset (compose `${OLLAMA_HOST:?...}` + `./scripts/preflight.sh`).

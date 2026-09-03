@@ -1,12 +1,14 @@
 # gdrive source — rclone setup
 
 The `gdrive` knowledge base is populated from Google Drive shared drives through
-[rclone][rclone]. `make gdrive-sync` runs `rclone sync` of the shared drives
-into `./root/gdrive`, then POSTs `/index?dir=gdrive` to reconcile the tree into
-the KB. The `gdrive` KB is one instance of the generic source-root pattern:
-every top-level subdir of `./root/` is one KB, named after the subdir. To add a
-non-gdrive KB, drop a folder at `./root/<name>/` and run
-`make kb-bootstrap KB=<name>` + `make kb-sync KB=<name>` (no rclone stage).
+[rclone][rclone]. The gdrive pipeline is split into two stages: `make kb-sync`
+runs `rclone sync` of the shared drives into `./root/gdrive` (SYNC-ONLY; does
+NOT index), then `make kb-index KB=gdrive` POSTs `/index?dir=gdrive` to
+reconcile the synced tree into the KB. The `gdrive` KB is one instance of the
+generic source-root pattern: every top-level subdir of `./root/` is one KB,
+named after the subdir. To add a non-gdrive KB, drop a folder at
+`./root/<name>/` and run `make kb-bootstrap KB=<name>` + `make kb-index KB=<name>`
+(no rclone stage).
 
 This doc covers the **one-time rclone setup** (the gdrive prerequisite). The
 sync / index mechanics, the exclude list, the backup-dir retention, and the
@@ -17,16 +19,16 @@ old `./gdrive` layout, run `make kb-migrate-root` (one-time) to move to
 
 ## Prerequisite
 
-`make gdrive-sync` needs two host tools and one authenticated rclone remote:
+`make kb-sync` needs two host tools and one authenticated rclone remote:
 
 - **rclone** (v1.60+) and **jq** on the host `PATH`. The script fail-fasts with
   a clear message if either is missing (`exit 127`).
 - A rclone remote (default name **`gdrive`**) of storage type `drive` (Google
   Drive), authenticated with a Google account that has access to the shared
-  drives you index. Override the remote name with `gdrive-sync --remote NAME`
-  or `make gdrive-sync REMOTE=NAME` is not wired — use the script flag.
+  drives you index. Override the remote name with `scripts/gdrive-sync --remote NAME`
+  (`make kb-sync REMOTE=NAME` is not wired — use the script flag).
 
-`make gdrive-sync` enumerates the shared drives with
+`make kb-sync` enumerates the shared drives with
 `rclone backend --json drives gdrive:` and syncs each one. It fail-fasts if
 the remote is missing, not authenticated, or sees zero shared drives.
 
@@ -104,7 +106,8 @@ or the sync fail-fasts on `cannot list shared drives`.
 
 ## How indexing uses the remote
 
-`make gdrive-sync` (and `make kb-index KB=gdrive`, the `/index`-only variant):
+`make kb-sync` (the rclone stage; `make kb-index KB=gdrive` is the separate
+`/index` stage that reconciles the synced tree into the KB):
 
 - enumerates shared drives with `rclone backend --json drives gdrive:`;
 - runs `rclone sync --backup-dir --delete-after` of each drive into a per-drive
@@ -113,8 +116,9 @@ or the sync fail-fasts on `cannot list shared drives`.
 - normalizes the synced tree to owner-only perms (dirs 700, files 600) because
   Drive content is business-sensitive — rclone v1.60 has no `--umask`, so the
   script normalizes after the sync;
-- POSTs `/index?dir=gdrive&kb_id=<id>` to api-gateway to reconcile
-  `./root/gdrive` into the `gdrive` KB. The KB is resolved by name
+- stops here — it is SYNC-ONLY. `make kb-index KB=gdrive` then POSTs
+  `/index?dir=gdrive&kb_id=<id>` to api-gateway to reconcile `./root/gdrive`
+  into the `gdrive` KB. The KB is resolved by name
   (`scripts/kb-bootstrap.sh --resolve`); the gateway is stateless and takes
   `kb_id` + `dir`.
 

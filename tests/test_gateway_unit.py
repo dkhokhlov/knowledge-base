@@ -272,8 +272,8 @@ class TestKbIgnore(unittest.TestCase):
 
     def test_kb_ignore_file_itself_not_indexed(self):
         # .kb-ignore is a dot-name (walk_source drops dot-names in a normal walk);
-        # _entry_for hardcodes the skip for the single-file path= route, which
-        # deliberately opts into dot-files. Assert it returns None.
+        # _entry_for hardcodes the skip for the sidecar/.kb-ignore names. Assert
+        # it returns None.
         root = tempfile.mkdtemp()
         try:
             self._ignore_at(root, "gdrive", "*.pdf\n")
@@ -741,13 +741,93 @@ class TestKeepAliveBodyDrain(unittest.TestCase):
         self.assertTrue(f._body_consumed)  # set despite the parse failure
 
 
+class TestValidateDir(unittest.TestCase):
+    """_validate_dir: the KB name is one top-level subdir under KB_SOURCE_ROOT.
+    Reject empty, `.`, `..`, multi-segment, wildcard, non-existent; accept a
+    single segment incl. a dot-prefixed name (`.tests`). Real temp source root
+    so isdir + realpath checks exercise. No stack needed."""
+
+    def setUp(self):
+        self._root = tempfile.mkdtemp()
+        for d in ("gdrive", ".tests"):
+            os.mkdir(os.path.join(self._root, d))
+        self._env = mock.patch.dict(os.environ, {"KB_SOURCE_ROOT": self._root})
+        self._env.start()
+        self.addCleanup(self._env.stop)
+        import shutil
+
+        def _rm():
+            shutil.rmtree(self._root, ignore_errors=True)
+        self.addCleanup(_rm)
+
+    def _qs(self, dir):
+        return "dir=%s" % dir if dir is not None else ""
+
+    def _call(self, dir):
+        # _validate_dir reads `dir` from the parsed qs dict (app._qs parses the
+        # querystring). Pass a real querystring through _qs via a tiny shim:
+        # build a qs string and let urllib.parse.parse_qs read it.
+        import urllib.parse as up
+        qs = "" if dir is None else ("dir=%s" % up.quote(dir or "", safe=""))
+        return app._validate_dir(qs, self._root)
+
+    def _err(self, dir):
+        with self.assertRaises(app.GatewayError) as cm:
+            self._call(dir)
+        return cm.exception.status
+
+    def test_single_segment_accepted(self):
+        self.assertEqual(self._call("gdrive"), "gdrive")
+
+    def test_dot_prefixed_segment_accepted(self):
+        self.assertEqual(self._call(".tests"), ".tests")
+
+    def test_empty_rejected(self):
+        self.assertEqual(self._err(""), 400)
+        self.assertEqual(self._err(None), 400)
+
+    def test_dot_and_dotdot_rejected(self):
+        self.assertEqual(self._err("."), 400)
+        self.assertEqual(self._err(".."), 400)
+
+    def test_multi_segment_rejected(self):
+        for d in ("a/b", "gdrive/sub", "a\\b", "/gdrive"):
+            self.assertEqual(self._err(d), 400, d)
+
+    def test_wildcard_rejected(self):
+        for d in ("gdrive*", "g?drive", "g[drive]", "x*"):
+            self.assertEqual(self._err(d), 400, d)
+
+    def test_nonexistent_rejected(self):
+        self.assertEqual(self._err("no-such-dir"), 400)
+
+    def test_dotdot_escape_rejected(self):
+        # a single `..` is rejected explicitly; a constructed escape via a
+        # symlink would also fail realpath containment, but `..` alone covers
+        # the in-process gate.
+        self.assertEqual(self._err(".."), 400)
+
+
 class TestStatusRoute(unittest.TestCase):
     """GET /status?json=1: per-file size + top-level drain runtime/started_at.
     Mocks owui.list_file_status + walk_source + owui._admin_key + app.time.time.
-    No stack needed."""
+    Uses a real temp KB_SOURCE_ROOT/gdrive so _validate_dir's isdir + realpath
+    checks pass (walk_source itself is mocked). No stack needed."""
 
     KB = "550e8400-e29b-41d4-a716-446655440000"
     T0 = 1788069380  # a fixed created_at baseline (unix seconds)
+
+    def setUp(self):
+        self._src_root = tempfile.mkdtemp()
+        os.mkdir(os.path.join(self._src_root, "gdrive"))
+        self._env = mock.patch.dict(os.environ, {"KB_SOURCE_ROOT": self._src_root})
+        self._env.start()
+        self.addCleanup(self._env.stop)
+        import shutil
+
+        def _rm():
+            shutil.rmtree(self._src_root, ignore_errors=True)
+        self.addCleanup(_rm)
 
     def _run(self, file_status, now=None):
         """Invoke Handler._status(json=1) with mocked dependencies. Returns the

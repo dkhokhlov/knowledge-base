@@ -174,8 +174,13 @@ with a clear message if this has not been done.
 - Per-file metadata (flat in `File.meta.data`): `host`, `project` (exact encoded
   dir), `project_path` (decode; authoritative when the path exists on disk, else
   lossy), `repo` (git repo name = path basename), `account` (caller email),
-  `source_relpath` (`memory/<file>`). `repo` is the human-friendly identifier
-  for reasoning about hits; it also rides in the KB `description`.
+  `source_relpath` (`memory/<file>`), `mtime` (file mtime, ISO-UTC; lands only on
+  new/changed files — OWUI idempotency reuses unchanged files without touching
+  `File.meta`). `repo` is the human-friendly identifier for reasoning about hits.
+- KB `description` = `Claude projects memory | source=projects-memory | host=..
+  | project=.. | repo=.. | path=<project-dir>` (the source attribute lives in the
+  writable `description` — OWUI's REST API cannot write the `meta` JSONB field).
+  `kbs` parses the kv and surfaces `source`/`host`/`path`/`project`/`repo`.
 
 ## Workflow
 

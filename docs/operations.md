@@ -191,7 +191,7 @@ The archive contains the full `./data` tree (OWUI `webui.db` + its `-wal`/`-shm`
 - [Ollama][ollama] and its pulled models (external; re-pull on the destination with `make pull-models`).
 - Docker images (re-pull with `make pull`, or rebuild built images).
 - `graphiti/config.yaml` and `caddy/Caddyfile` (tracked in git — they come with the repo clone).
-- The `./root/gdrive` mirror (re-derivable with `make gdrive-sync`; other `./root/<name>/` KB trees are operator-supplied — back them up off-host).
+- The `./root/gdrive` mirror (re-derivable with `make kb-sync`; other `./root/<name>/` KB trees are operator-supplied — back them up off-host).
 
 ### Restore on another host
 
@@ -222,32 +222,40 @@ The destination host needs a clone of this repo and the external prerequisites a
 ## KB RAG indexing (source root → Open WebUI)
 
 `./root/` is the single source root. Each top-level non-dot subdir of `./root/`
-is one KB, named after the subdir (`./root/gdrive/` is the gdrive KB). The
-`gdrive` KB is indexed by **api-gateway** (stateless, no sidecar). `make
-gdrive-sync` runs rclone to sync `./root/gdrive` from the shared drives, then POSTs
-`/index?dir=gdrive` to api-gateway, which walks `./root/gdrive` read-only and drives OWUI's
-native sync/diff protocol to reconcile the tree into the KB. Indexing is
-**manual/on-demand only**: no daemon, no schedule, no hooks. `make kb-index KB=gdrive`
-runs POST `/index` alone (no rclone); `make kb-status KB=gdrive` reads GET `/status`. `make
-gdrive-sync` fails fast before dispatch if a drain is already in flight
-(`pending+processing>0`; exempt `RETRY_PENDING=1`); `make kb-index` and raw `curl
-POST /index` are not guarded. The
-drain is async (OWUI background extract→embed→link), so after `make gdrive-sync`
-the vectors are written but — on pgvector/ivfflat — not yet queryable: ivfflat
+is one KB, named after the subdir (`./root/gdrive/` is the gdrive KB). A KB
+carries a structured source attribute as kv in its `description`:
+`source=root | host=<hostname> | path=<name>` for root KBs, or
+`source=projects-memory | host=.. | project=.. | repo=.. | path=..` for
+projects-memory KBs. OWUI's REST API cannot write the `meta` JSONB field, so
+the attribute lives in the writable `description` (prose lead kept); `kb kbs`
+parses the kv. `make kb-desc-backfill` (one-time, idempotent) appends the kv to
+legacy KB descriptions. The
+`gdrive` KB is indexed by **api-gateway** (stateless, no sidecar). The gdrive
+pipeline is split into two stages: `make kb-sync` runs rclone to sync
+`./root/gdrive` from the shared drives (SYNC-ONLY; does NOT index), then
+`make kb-index KB=gdrive` POSTs `/index?dir=gdrive` to api-gateway, which walks
+`./root/gdrive` read-only and drives OWUI's native sync/diff protocol to reconcile
+the tree into the KB. The split makes sync and index independently retryable.
+Indexing is **manual/on-demand only**: no daemon, no schedule, no hooks.
+`make kb-index KB=<name>` runs POST `/index` alone (no rclone); `make kb-status
+KB=<name>` reads GET `/status`. `make kb-index` fails fast before dispatch if a
+drain is already in flight for that KB (`pending+processing>0`; exempt
+`RETRY_PENDING=1`); raw `curl POST /index` is not guarded. The drain is async
+(OWUI background extract→embed→link), so after `make kb-index KB=gdrive` the
+vectors are written but — on pgvector/ivfflat — not yet queryable: ivfflat
 folds post-build rows into its inverted lists only on `REINDEX`, and OWUI hybrid is
 vector-fetch→BM25 with no FTS fallback (vector=0 → hybrid=0). `make kb-finalize`
-runs that `REINDEX` (ivfflat vector) once the drain is terminal;
-`make gdrive-sync-finalize` dispatches the drain (`make gdrive-sync`) then waits
-for `pending+processing=0` and finalizes in one command. `REINDEX` is instance-wide
+runs that `REINDEX` (ivfflat vector) once the drain is terminal; `make
+kb-index-finalize` dispatches the drain (`make kb-index`) then waits for
+`pending+processing=0` and finalizes in one command. `REINDEX` is instance-wide
 on the shared `document_chunk` table, so `make kb-finalize` first requires EVERY KB
-under `./root/` terminal + acquires a host lock (it serializes concurrent finalizes);
-`make kb-sync-finalize KB=<name>` is the generic (non-gdrive) variant. pgvector
-is the only supported backend: `kb-finalize` fails loud on any other `VECTOR_DB`
-(pgvector's ivfflat index needs `REINDEX` after a bulk drain; HNSW-style indexes
-are incremental and do not). Named "finalize" (not "reindex") because the fresh vectors
-were never queryable (a first publish, not a re-do) and to avoid collision with
-the gateway `reindex_all` (`POST /index?reindex_all=1` re-PROCESSES files — a
-different operation). The FTS arm uses ParadeDB `pg_search` BM25
+under `./root/` terminal + acquires a host lock (it serializes concurrent finalizes).
+pgvector is the only supported backend: `kb-finalize` fails loud on any other
+`VECTOR_DB` (pgvector's ivfflat index needs `REINDEX` after a bulk drain; HNSW-style
+indexes are incremental and do not). Named "finalize" (not "reindex") because the
+fresh vectors were never queryable (a first publish, not a re-do) and to avoid
+collision with the gateway `reindex_all` (`POST /index?reindex_all=1` re-PROCESSES
+files — a different operation). The FTS arm uses ParadeDB `pg_search` BM25
 (`idx_document_chunk_bm25`, a `USING bm25` index created by `make kb-bm25-init`),
 which is incremental — queryable immediately after a bulk drain, no `REINDEX`
 needed; the old GIN FTS index is gone. Only ivfflat needs the finalize `REINDEX`.
@@ -274,10 +282,11 @@ deleting it does not interrupt legit in-flight OCR the way `?retry_pending=1`
 would (which re-triggers ALL pending, including those with a live source).
 Failed/pending files are not linked, so `sync/diff` never sees them as deleted
 and would otherwise leave them permanently (the `/status` "failed: N forever"
-/ stuck-pending symptom). This orphan-delete fires only on a **full** reconcile
-(`path` empty) and only for a file carrying a gateway `file_hash` (a
-gateway-managed file); a subpath reconcile, a non-gateway file, or a no-source
-`completed` file (`sync/diff`'s job — it is linked) is skipped, not deleted.
+/ stuck-pending symptom). This orphan-delete fires on every reconcile (every
+reconcile is KB-wide — `dir=<name>` selects the whole top dir) and only for a
+file carrying a gateway `file_hash` (a gateway-managed file); a non-gateway
+file or a no-source `completed` file (`sync/diff`'s job — it is linked) is
+skipped, not deleted.
 It **fails closed on an empty source** (0 files + not
 `?force=1` → 422, no `cleanup`, so a bad/empty mount cannot mass-delete the KB).
 Per-file transparency: the response carries `{added, modified, deleted,
@@ -288,26 +297,6 @@ files deleted this run — the diagnosis surface (no
 opaque daemon aggregate). `ok=false` means a real upload/extract error (the
 upload-idempotency + path-aware-dedup patches make duplicate-content 400s not
 occur). api-gateway references a pre-existing KB by id — it does not create KBs.
-
-**Subpath reconcile (`?path=<relpath>`).** `/index` and `/status` accept an
-optional `path` query param: a path relative to the KB root — `dir=<name>`
-already selects the KB, so `path` needs no `<name>/` prefix (a directory or
-a single file; normalized — absolute and `..` rejected with 400). `path` is a
-SOURCE FILTER only: it scopes the `walk_source` manifest to that subpath (entry
-keys stay relative to the KB root, so a subpath index and a later full
-`/index` see `unmodified`, not re-`added`). The reconcile is a FULL reconcile of
-that manifest — `sync/diff` `deleted` + `rmdir` flow through unscoped, so files
-removed from the source under that subpath ARE removed from the KB. Use a KB
-whose whole scope is that `path` (a dedicated/subpath KB, e.g. a throwaway test
-KB): on a SHARED KB `path` would delete every KB file outside the subpath.
-`/status` with `path` scopes `source_count` to the subpath; the file-status
-counts are KB-wide (accurate when the KB's whole scope is `path`). The operator
-surface is `make gdrive-sync SCOPE_PATH=<relpath>` / `make kb-index KB=gdrive SCOPE_PATH=<relpath>`
-/ `make kb-status KB=gdrive SCOPE_PATH=<relpath>` (the env var is `SCOPE_PATH`, not `PATH`,
-so it does not clobber the shell's executable-search `PATH`; the REST `?path=` is an internal detail).
-The full walk skips dot-dirs and dot-files (so hidden metadata like
-`.sync-reports`/`.sync.lock` is never indexed); `path` opts into a dot-subtree
-(the committed `root/.tests/` fixtures are indexed this way via `dir=.tests`).
 
 Posture change: for the `/index`+`/status` path the gateway holds
 `OPENWEBUI_ADMIN_API_KEY` (compose env, from `.env.local`) and uses it for the
@@ -333,7 +322,7 @@ identity-from-key pattern the api-gateway uses — no email env var needed); the
 read grant lets the read-scoped user key search / RAG the KB
 (`write_access=False`). `make provision` runs `make kb-bootstrap KB=gdrive`
 (only `./root/gdrive/` exists at provision time). For a non-gdrive KB, drop the
-tree at `./root/<name>/` and run `make kb-bootstrap KB=<name>` + `make kb-sync KB=<name>`.
+tree at `./root/<name>/` and run `make kb-bootstrap KB=<name>` + `make kb-index KB=<name>`.
 
 ### Migrating to ./root (one-time)
 
@@ -344,34 +333,34 @@ terminal first (`pending+processing==0`; refuses if in flight), moves
 `.kb-ignore` chain (`[*]` → `./root/.kb-ignore` globals; per-drive `[X]` →
 `./root/gdrive/X/.kb-ignore`), removes `GDRIVE_KB_ID` from
 `.env.local`, and recreates api-gateway with the `./root:/kb-source:ro` mount.
-Then run `make kb-bootstrap KB=gdrive` (re-assert the grant) + `make gdrive-sync`
-(incremental — `dir=gdrive` keeps manifest keys identical to the old `source=gdrive`,
-so no mass drain).
+Then run `make kb-bootstrap KB=gdrive` (re-assert the grant) + `make kb-sync` +
+`make kb-index KB=gdrive` (incremental — `dir=gdrive` keeps manifest keys identical
+to the old `source=gdrive`, so no mass drain).
 
 ### Populating the source
 
-**Prerequisite — rclone `gdrive` remote (Google Drive login).** `make
-gdrive-sync` reads the source through rclone's `gdrive` remote (default name;
+**Prerequisite — rclone `gdrive` remote (Google Drive login).** `make kb-sync`
+reads the source through rclone's `gdrive` remote (default name;
 override with `--remote NAME`). Configure + authenticate it once before the
 first sync: `rclone config` → new remote `gdrive` → Google Drive storage →
 complete the OAuth login in a browser. The remote must list the shared drives
-you index; `make gdrive-sync` fail-fasts if no drives are visible. Re-login
+you index; `make kb-sync` fail-fasts if no drives are visible. Re-login
 only if the OAuth token expires or Drive access is revoked. Full one-time setup
 (headless auth, verify, re-auth): see [docs/gdrive.md](gdrive.md).
 
-`make gdrive-sync` runs `rclone copy --files-from --backup-dir` of the shared
+`make kb-sync` runs `rclone copy --files-from --backup-dir` of the shared
 drive into `./root/gdrive` (downloads only the `.kb-ignore`-allowed files; the
 wrapper reconciles deletions — files removed from Drive that are not protected
-are moved to the backup dir), then POSTs `/index?dir=gdrive` to reconcile the tree
-into the KB (manual; `./root/*` is gitignored except tracked
-`root/.tests/` fixtures). It is delta:
-files removed from Drive are moved out of `./root/gdrive` (and the chained `/index`
-drops them from the KB via `sync/cleanup`). Deleted/overwritten files are NOT
-lost — the wrapper / rclone moves them (in their original hierarchy) into a dated
-`./.gdrive-backup/<UTC-ISO>/` dir, which sits OUTSIDE `./root` so `/index`
-does not index them. That backup dir is the recovery net for a bad/empty mount:
-an empty Drive enumeration empties `./root/gdrive`
-— but the removed files are in `./.gdrive-backup/`, not gone. `make clean-backup`
+are moved to the backup dir). It is SYNC-ONLY: it does NOT index — run
+`make kb-index KB=gdrive` after to reconcile the synced tree into the KB
+(manual; `./root/*` is gitignored except tracked `root/.tests/` fixtures). It is
+delta: files removed from Drive are moved out of `./root/gdrive` (and the next
+`make kb-index` drops them from the KB via `sync/cleanup`). Deleted/overwritten
+files are NOT lost — the wrapper / rclone moves them (in their original
+hierarchy) into a dated `./.gdrive-backup/<UTC-ISO>/` dir, which sits OUTSIDE
+`./root` so `/index` does not index them. That backup dir is the recovery net
+for a bad/empty mount: an empty Drive enumeration empties `./root/gdrive` — but
+the removed files are in `./.gdrive-backup/`, not gone. `make clean-backup`
 clears the backup tree (so does `make clean-all`).
 
 **Fail-fast + empty-source guard.** Any transfer error aborts the run
@@ -392,7 +381,7 @@ shared dir.
 semantics: `./root/.kb-ignore` holds the GLOBALS (apply to every KB, not just
 gdrive); `./root/gdrive/<drive name>/.kb-ignore` lists patterns that apply only
 to that shared drive; `./root/<kb>/.kb-ignore` applies only to the `./root/<kb>/`
-KB. The `gdrive-sync` download stage enumerates the per-drive remote file list
+KB. The `kb-sync` download stage enumerates the per-drive remote file list
 (`rclone lsf -R --files-only`), filters it through the shared matcher
 (`scripts/kb_ignore.py`), and downloads only the allowed files
 (`rclone copy --files-from`); the gateway index walk applies the same ancestor
@@ -456,7 +445,7 @@ pending+processing=0 (see Monitoring). `--retry-pending` forwards
 
 ### Monitoring
 
-`make kb-status KB=<name>` (default `gdrive`) reads GET `/status?dir=<name>` (api-gateway). `/status` reports real
+`make kb-status KB=<name>` reads GET `/status?dir=<name>` (api-gateway). `/status` reports real
 per-file progress from OWUI `file.data.status`, paged via
 `GET /api/v1/files/?content=false` (the `/knowledge/{id}/files` list defers
 `File.data`, so status reads null there; `GET /files/` returns `data.status` +
@@ -493,8 +482,8 @@ wedge. A `failed` entry with `error="Failed to link file … to knowledge …"` 
 a double-link race (a second link insert collided with an existing one); it
 must not occur — the background task is the sole linker. Other `failed` entries
 (empty content, OCR timeout) are genuine source-file issues: re-run `make
-gdrive-sync` (or `make kb-index KB=gdrive`) to re-trigger them, or `make gdrive-sync
---retry-pending` if a file is stuck `pending`.
+kb-index KB=gdrive` to re-trigger them, or `make kb-index KB=gdrive
+RETRY_PENDING=1` if a file is stuck `pending`.
 
 ### File types and skips
 
@@ -559,7 +548,12 @@ KBs at run time.
 (host = short hostname). Per-file metadata (flat in `File.meta.data`): `host`,
 `project` (encoded dir), `project_path` (decode; authoritative when the path
 exists on disk), `repo` (git repo name), `account` (caller email),
-`source_relpath` (`memory/<file>`); `repo` also rides in the KB `description`.
+`source_relpath` (`memory/<file>`), `mtime` (file mtime, ISO-UTC; lands only on
+new/changed files — the upload-idempotency patch early-returns the existing
+FileModel on a hash match without touching `File.meta`, so already-indexed
+memory files stay `mtime: null` until they change). The KB `description` carries
+the source-attribute kv: `Claude projects memory | source=projects-memory |
+host=.. | project=.. | repo=.. | path=<project-dir>` (parsed by `kb kbs`).
 
 On first create of a project KB the caller (user key, owner) grants public read
 (`user:*`) on it via `POST /knowledge/{id}/access/update`, so every
@@ -630,8 +624,8 @@ dependency is down.
 | Need to reach Open WebUI directly (it is behind Caddy; no direct host port) | OWUI is internal-only on `owui_net` | `docker exec kb-openwebui curl -s localhost:8080/...`, or a temporary `docker compose run --rm -p 3001:8080 openwebui` (avoid `:3000` — that is Caddy) |
 | RAG chat is slow; `ollama ps` shows a CPU/GPU split | `OPENWEBUI_MODEL` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; `GRAPHITI_MODEL` (extraction) and `OPENWEBUI_MODEL` (chat) are independent — two different 14B tags cannot both be resident at once on this GPU |
 | `make health` says `degraded` but the UI works | OWUI `/health` returned non-2xx | inspect the `openwebui` logs; the gateway reports degraded whenever the identity dependency is not healthy |
-| `make kb-status KB=gdrive` shows `completed` below `source_count` with `pending+processing=0` | a file failed to upload or extract; `/status` `failed_files` + the per-file `errors` from the last `POST /index` hold the WHY | re-run `make kb-index KB=gdrive` (or `make gdrive-sync`) to re-trigger failed; `docker logs kb-openwebui` / `docker logs kb-markitdown-ocr` for the upstream cause |
-| `POST /index` returns 422 "source walk yielded 0 files" | the `./root/<name>` mount is empty/unreadable, or `KB_SOURCE_ROOT`/`dir`/`KB_MAX_SIZE`/`DEFAULT_ALLOW` exclude everything | check `make gdrive-sync` populated `./root/gdrive`; check `HOST_UID` matches the `./root` owner uid; `?force=1` proceeds with an empty manifest (drives full `cleanup` — use only to drain the KB) |
+| `make kb-status KB=gdrive` shows `completed` below `source_count` with `pending+processing=0` | a file failed to upload or extract; `/status` `failed_files` + the per-file `errors` from the last `POST /index` hold the WHY | re-run `make kb-index KB=gdrive` to re-trigger failed; `docker logs kb-openwebui` / `docker logs kb-markitdown-ocr` for the upstream cause |
+| `POST /index` returns 422 "source walk yielded 0 files" | the `./root/<name>` mount is empty/unreadable, or `KB_SOURCE_ROOT`/`dir`/`KB_MAX_SIZE`/`DEFAULT_ALLOW` exclude everything | check `make kb-sync` populated `./root/gdrive`; check `HOST_UID` matches the `./root` owner uid; `?force=1` proceeds with an empty manifest (drives full `cleanup` — use only to drain the KB) |
 
 ## Make targets
 
@@ -654,18 +648,17 @@ dependency is down.
 | `clean-test` | tear down ONE isolated e2e run + remove its clone. `NAME=<suffix>` (default `e2e`; the iso tests name their clones `.test-env/<stamp>-<suffix>/`) + optional `STAMP=<stamp>`. Safe anytime (no-op if absent); use after a failed iso run (`NAME=gdrive` for `test_09`, `NAME=kbcheck` for `test_12`) |
 | `rag-config` | set the strict-grounding RAG template + sync `rag.ollama.base_url` to the translated `OLLAMA_HOST` (run after `make api-keys`; re-run after a DB reset or an `OLLAMA_HOST` change; see [Repointing OLLAMA_HOST](#repointing-ollama_host)) |
 | `ocr-config` | re-assert the OWUI external-extraction keys (engine + URL + API key); auto-set by `make api-keys` when `OCR_ENABLED=true`; re-run after a DB reset; no-ops (exit 0) when `OCR_ENABLED!=true` |
-| `gdrive-sync` | rclone `sync --backup-dir --delete-after` the shared drive into `./root/gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); INI-format excludes from gitignored `./root/.exclude.conf` (`[gdrive/<drive name>]` + `[*]` sections, e.g. `*.tmp`); writes `./root/gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections; then POSTs `/index?dir=gdrive` to reconcile the tree into the `gdrive` KB (`--index-all` for a full re-index; `--retry-pending` to re-trigger stalled pending; fail-fast on `ok=false`) |
-| `kb-sync` | generic reconcile: for each top-level subdir of `./root/` (or `KB=<name>` for one), resolve the KB by name (`scripts/kb-bootstrap.sh --resolve`), guard against an in-flight drain, then POST `/index?kb_id=<id>&dir=<name>`. No rclone stage — the operator supplies the tree (rsync, bind-mount, ...). `INDEX_ALL=1` / `RETRY_PENDING=1` / `SCOPE_PATH=<relpath>` forwarded as for `kb-index`. `gdrive-sync` is the rclone-equipped variant of this for the `gdrive` subdir |
-| `kb-index` | POST `/index` alone (no rclone): reconcile `./root/<KB>` into the KB via api-gateway (admin; incremental). `KB=<name>` selects the source-root subdir + resolves the KB by name (default `gdrive`); `dir=<name>` roots the walk at that subdir. `INDEX_ALL=1` for a full re-index. `RETRY_PENDING=1` also re-triggers stalled `pending` files (default retries only `failed`). `SCOPE_PATH=<relpath>` indexes only a subpath (FULL reconcile of that subpath; relative to the KB root `./root/<name>`, not the source root — see "Subpath reconcile" above) |
-| `kb-bootstrap` | create a KB named `<name>`, grant public read (`user:*`) (run after `make api-keys`; idempotent; no sidecar). `KB=<name>` (default `gdrive`); with `--resolve`, paginated name→id lookup (unique-or-fail: 0 or >1 matches error). Replaces the old `gdrive-index-bootstrap` (which wrote `GDRIVE_KB_ID` to `.env.local`) |
+| `kb-sync` | sync external sources into `./root/` (SYNC-ONLY; does NOT index). Today this is gdrive: rclone `sync --backup-dir --delete-after` the shared drives into `./root/gdrive` (delta; deleted/overwritten files retained in `./.gdrive-backup/`); fail-fast on any transfer error; name-collision guard; concurrency lock (`<destination>/.sync.lock`, retaken if the holder PID is dead); excludes from the gitignored `.kb-ignore` chain (globals `./root/.kb-ignore` + per-drive `./root/gdrive/<drive name>/.kb-ignore`, e.g. `*.tmp`); writes `./root/gdrive/.sync-reports/sync-<iso>.report` (0600) with remote/local/excluded/dups table + COPY/UPDATE/DELETE + Files excluded + Duplicates ignored + not-downloaded sections. Run `make kb-index KB=gdrive` after to reconcile the synced tree into the `gdrive` KB. The sync and index stages are split so each is independently retryable |
+| `kb-index` | POST `/index` alone (no rclone): reconcile `./root/<KB>` trees into their KBs via api-gateway (admin; incremental). `KB=<name>` selects one `./root` subdir + resolves the KB by name (`scripts/kb-bootstrap.sh --resolve`, paginated unique-or-fail); no `KB=` indexes EVERY top-level non-dot subdir; `KB=<glob>` (e.g. `xgen-*`) expands against `./root/` (Makefile glob — the gateway never sees a wildcard). `dir=<name>` roots the walk at that single top-dir subdir. `INDEX_ALL=1` for a full re-index. `RETRY_PENDING=1` also re-triggers stalled `pending` files (default retries only `failed`). Per-KB client-side in-flight guard (refuses if `pending+processing>0`; exempt `RETRY_PENDING=1`); fail-fast on `ok=false` |
+| `kb-bootstrap` | create a KB named `<name>`, grant public read (`user:*`) (run after `make api-keys`; idempotent; no sidecar). `KB=<name>`; no `KB=` bootstraps every `./root` subdir; with `--resolve`, paginated name→id lookup (unique-or-fail: 0 or >1 matches error). Replaces the old `gdrive-index-bootstrap` (which wrote `GDRIVE_KB_ID` to `.env.local`) |
 | `kb-public-read` | grant public read (`user:*`) on EVERY knowledge base + enable `sharing.public_knowledge` so all authenticated users read all KBs (admin). One-time backfill for an already-running stack; re-run as a safety net for KBs created outside the flows (e.g. via the OWUI UI). Idempotent |
-| `kb-status` | GET `/status` (api-gateway) for `KB=<name>` (default `gdrive`), pretty JSON (indent=2): `indexed_files` (completed only; `len == indexed_count`), `pending_files`, `failed_files` (last list), then `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`. Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
-| `kb-finalize` | finalize a drain: `REINDEX INDEX idx_document_chunk_vector` (pgvector ivfflat) so freshly-embedded vectors become queryable. Polls EVERY `./root/` subdir to a global terminal state first (`pending+processing=0` for all KBs — REINDEX is instance-wide on the shared `document_chunk` table), guarded by a `flock` lock; fails loud if any KB is non-terminal. Run AFTER the drain is terminal (or use `kb-sync-finalize` / `gdrive-sync-finalize` to wait). Logs the REINDEX duration. pgvector is the only supported backend; it fails loud on any other `VECTOR_DB` (HNSW-style indexes are incremental, but ivfflat needs `REINDEX`). The BM25 FTS index (`idx_document_chunk_bm25`, ParadeDB `pg_search`) is incremental — no `REINDEX` needed; the old GIN FTS index is gone. Named "finalize" not "reindex": the fresh vectors were never queryable (ivfflat folds post-build rows in only on `REINDEX`; OWUI hybrid = vector-fetch→BM25, no FTS fallback → vector=0 → hybrid=0), and to avoid collision with the gateway `reindex_all` (which re-PROCESSES files) |
+| `kb-desc-backfill` | one-time backfill of the source-attribute kv into existing KB `description` strings (admin). Idempotent + non-destructive: SKIPs any KB whose description already carries a `source=` kv; appends the kv to the prose lead for legacy root (`source=root`) + projects (`source=projects-memory`) KBs; skips unparseable descriptions. `access_grants` is NOT clobbered (`/knowledge/{id}/update` uses `exclude={'access_grants'}`, so the `user:*` public-read grant survives). Each write re-embeds the KB metadata vector (one Ollama call per KB; a failed embed does NOT fail the update). Run on the stack host |
+| `kb-status` | GET `/status` (api-gateway) for `KB=<name>`, pretty JSON (indent=2): `indexed_files` (completed only; `len == indexed_count`), `pending_files`, `failed_files` (last list), then `source_count` vs `indexed_count` (completed), `pending` (extraction/OCR) + `processing` (embed+link) + `failed`. Drain terminal when `pending+processing=0` AND `completed+failed>=source_count` |
+| `kb-finalize` | finalize a drain: `REINDEX INDEX idx_document_chunk_vector` (pgvector ivfflat) so freshly-embedded vectors become queryable. Polls EVERY `./root/` subdir to a global terminal state first (`pending+processing=0` for all KBs — REINDEX is instance-wide on the shared `document_chunk` table), guarded by a `flock` lock; fails loud if any KB is non-terminal. Run AFTER the drain is terminal (or use `kb-index-finalize` to dispatch + wait). Logs the REINDEX duration. pgvector is the only supported backend; it fails loud on any other `VECTOR_DB` (HNSW-style indexes are incremental, but ivfflat needs `REINDEX`). The BM25 FTS index (`idx_document_chunk_bm25`, ParadeDB `pg_search`) is incremental — no `REINDEX` needed; the old GIN FTS index is gone. Named "finalize" not "reindex": the fresh vectors were never queryable (ivfflat folds post-build rows in only on `REINDEX`; OWUI hybrid = vector-fetch→BM25, no FTS fallback → vector=0 → hybrid=0), and to avoid collision with the gateway `reindex_all` (which re-PROCESSES files) |
 | `kb-bm25-init` | create the ParadeDB `pg_search` extension + the `USING bm25` index `idx_document_chunk_bm25` (`text::pdb.simple` tokenizer, `collection_name::pdb.literal` fast field, `key_field='id'`) over the existing `document_chunk` rows, and drop the dead GIN FTS index. Idempotent; container-targeted (`POSTGRES_CONTAINER` or `kb-postgres`). Run once after the kb-postgres image first starts (wired into `make provision` + e2e). No re-embed — the index builds over existing chunks in seconds and is queryable immediately. Fails loud if the `document_chunk` table is absent (run after the stack is up) |
 | `kb-bm25-check` | release gate for the BM25 FTS arm: runs `scripts/kb_check.py --bm25-gate` (extension + index + ranking-path `pdb.score` + colon-safe `|||` + zero-token probes). The only detector for the silent-zero / silent-langchain-fallback class (`hybrid_search` swallows paradedb errors → HTTP 200 + 0). A red gate = do not ship |
 | `kb-bm25-rollback` | drop the `idx_document_chunk_bm25` index then the `pg_search` extension (order load-bearing — the extension refuses to drop while the index depends on it). Does NOT drop `vector`. Refuses if `pg_search` is already absent. Then revert the OWUI + kb-postgres images |
-| `gdrive-sync-finalize` | one-command full pipeline for the `gdrive` KB: dispatch the gdrive async drain (`make gdrive-sync` = rclone + `POST /index?dir=gdrive`), then wait for it to terminate (poll GET `/status` to `pending+processing=0`, timeout `GDRIVE_TEST_WAIT` default 2400s), then finalize (`REINDEX` ivfflat) — the "block until the gdrive KB is searchable" command. Fails loud if the drain does not terminate (do not `REINDEX` while inserts are in flight — that races the live index). `gdrive-sync` is `.PHONY` so the drain re-dispatches each invocation; `make gdrive-sync` fails fast if a drain is already in flight (`pending+processing>0`; exempt `RETRY_PENDING=1`) — `make kb-index` + raw `curl POST /index` are not guarded. pgvector-only (fails loud on any other `VECTOR_DB`) |
-| `kb-sync-finalize` | generic variant of `gdrive-sync-finalize` for any `./root/` subdir: `KB=<name>` (default `gdrive`). Dispatch `make kb-sync KB=<name>` (POST `/index?dir=<name>`), wait to terminal, then finalize (`kb-finalize`). Same global-terminal + flock guard, same pgvector-only (fails loud on any other `VECTOR_DB`) caveat. Use `gdrive-sync-finalize` for the rclone-equipped gdrive pipeline; use this for operator-supplied trees |
+| `kb-index-finalize` | one-command pipeline: dispatch the KB async drain (`make kb-index` = POST `/index`), wait for it to terminate (poll GET `/status` to `pending+processing=0`, timeout `GDRIVE_TEST_WAIT` default 2400s per KB), then finalize (`REINDEX` ivfflat) — the "block until the KB is searchable" command. `KB=<name>` waits on one KB; no `KB=` waits on EVERY top-level non-dot subdir (matches `make kb-index`'s all-KB dispatch). Fails loud if the drain does not terminate (do not `REINDEX` while inserts are in flight — that races the live index). Same global-terminal + flock guard + pgvector-only caveat as `kb-finalize`. For gdrive run `make kb-sync` (rclone) first |
 | `kb-migrate-root` | ONE-TIME migration from the old `./gdrive` layout to the generic `./root/` source root: guards the gdrive drain is terminal (tries the new `dir=gdrive` shape, falls back to the old `source=gdrive`+`GDRIVE_KB_ID` shape; refuses if `/status` unreachable — `make stop` first), cross-filesystem move guard, `mv gdrive root/gdrive`, translates `gdrive-exclude.conf` into the `.kb-ignore` chain (`[*]` → `./root/.kb-ignore` globals; `[X]` → `./root/gdrive/X/.kb-ignore`), removes `GDRIVE_KB_ID` from `.env.local`, `make start`. See "Migrating to ./root" above |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
@@ -734,7 +727,7 @@ template. The `e2e_*` functions in `scripts/lib-e2e-env.sh` apply it:
 | 2. isolate from the operator's shell profile | `e2e_isolate` | `unset BASH_ENV KB_HOST` (see below) |
 | 3. stamped clone + generated override + compose env | `e2e_isolate` | `git clone --no-local` to `.test-env/<stamp>-<NAME>/` (leaf reserved atomically with `mkdir` to close the same-second TOCTOU); sets `COMPOSE_PROJECT_NAME=kb-<NAME>-<stamp>`, `COMPOSE_FILE`, `OWUI_CONTAINER=kb-<NAME>-<stamp>-openwebui`, `MARKITDOWN_CONTAINER`, `KB_HOST` (auto-picked port; `KB_HOST_PORT` is derived, not set) |
 | 4. `make bootstrap KB_HOST=... OLLAMA_HOST=... [OCR_ENABLED=...]` | `e2e_isolate` | `bootstrap.sh` force-persists `KB_HOST` + derives `KB_HOST_PORT` from it; force-persists each non-empty tunable into `.env` (idempotent — no tunable means no change, so the live operator is unaffected) |
-| 5. provision the clone | `e2e_provision` (clean-prod: start + wait healthy + admin-signup + api-keys + ephemeral user + projects-bootstrap + rag-config) OR `e2e_provision_at_scale` (destructive: clean-all + re-bootstrap + restore-creds + [ollama pull OCR model] + preflight + image rebuild + start + ... + kb-bootstrap KB=gdrive + gdrive-sync + make ci) | `e2e_provision` for the shared/single iso tests; `e2e_provision_at_scale` for `test_09` (`at_scale=True`) |
+| 5. provision the clone | `e2e_provision` (clean-prod: start + wait healthy + admin-signup + api-keys + ephemeral user + projects-bootstrap + rag-config) OR `e2e_provision_at_scale` (destructive: clean-all + re-bootstrap + restore-creds + [ollama pull OCR model] + preflight + image rebuild + start + ... + kb-bootstrap KB=gdrive + kb-sync + kb-index KB=gdrive + make ci) | `e2e_provision` for the shared/single iso tests; `e2e_provision_at_scale` for `test_09` (`at_scale=True`) |
 | 6. teardown (outcome-branched) | `e2e_down` / `e2e_stop_docker` | test passed → `e2e_down` stops docker + removes the clone; test failed → `e2e_stop_docker` stops docker + KEEPS the clone for inspection; flush kept clones with `make clean-test NAME=<suffix> [STAMP=]` / `make clean-tests` |
 | 7. the at-scale provision re-forwards the same tunables to its internal `make bootstrap` | `e2e_provision_at_scale` | the values survive the internal `make clean-all` (rm `.env`) -> bootstrap (recreates `.env` from `.env.template`); `COMPOSE_PROJECT_NAME`/`COMPOSE_FILE` persist across clean-all (process env, not `.env`) so every mid-provision `docker compose` stays scoped to `kb-<suffix>-<stamp>` |
 

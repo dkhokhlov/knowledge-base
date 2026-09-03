@@ -1,30 +1,33 @@
 #!/usr/bin/env bash
-# Generic KB reconcile: POST /index one (or every) ./root/<name>/ tree into its
-# OWUI KB via api-gateway. This is the non-gdrive counterpart of `make gdrive-sync`
-# MINUS the rclone stage: the operator delivers the tree (rsync / bind-mount / copy)
-# under ./root/<name>/, then this reconciles it into the KB named <name>.
+# KB index: POST /index one (or every) ./root/<name>/ tree into its OWUI KB via
+# api-gateway. INDEX-ONLY: the operator delivers the tree under ./root/<name>/
+# (gdrive via `make kb-sync`; other dirs via external rsync / copy), THEN this
+# reconciles it into the KB named <name>. Sync and index are separate so each is
+# independently retryable.
 #
-# Each top-level non-dot subdir of ./root/ is one KB (named after the subdir). The
-# .tests dot-dir is skipped (it is indexed only by its own test via dir=.tests).
+# Each top-level non-dot subdir of ./root/ is one KB (named after the subdir).
+# The gateway takes `dir` = the single top-dir name (no slash, no wildcard, no
+# subpath scoping); glob expansion (KB='xgen-*') lives in the Makefile, which
+# calls this script once per matched dir.
 #
 # The gateway is stateless and takes kb_id, so each KB is resolved BY NAME here
 # (paginated, unique-or-fail via kb-bootstrap.sh --resolve). A KB that does not
 # resolve fails fast with a "run make kb-bootstrap" hint (no silent create here --
 # bootstrap is a separate, explicit step).
 #
-# Per-KB client-side in-flight guard (mirrors scripts/gdrive-sync): refuse to POST
-# /index if a drain is already in flight for that KB (pending+processing > 0);
-# --retry-pending is EXEMPT (it intentionally re-triggers pending files). Strict +
-# fail-closed: a /status error (curl fail / bad JSON / missing pending or
-# processing) is treated as in-flight -> refuse (never dispatch blind). Same
-# caveats as the gdrive guard: bypassable by raw curl / make kb-index; has a
+# Per-KB client-side in-flight guard: refuse to POST /index if a drain is already
+# in flight for that KB (pending+processing > 0); --retry-pending is EXEMPT (it
+# intentionally re-triggers pending files). Strict + fail-closed: a /status error
+# (curl fail / bad JSON / missing pending or processing) is treated as in-flight
+# -> refuse (never dispatch blind). Caveats: bypassable by raw curl; has a
 # check-then-dispatch TOCTOU; the /status scan caps at 10k files.
 #
 # Usage:
-#   make kb-sync                       reconcile EVERY top-level non-dot ./root/ subdir
-#   make kb-sync KB=<name>             reconcile one KB
-#   make kb-sync KB=<name> INDEX_ALL=1 full re-index of that KB
-#   make kb-sync RETRY_PENDING=1       also re-trigger stalled PENDING files
+#   make kb-index                        reconcile EVERY top-level non-dot ./root/ subdir
+#   make kb-index KB=<name>              reconcile one KB
+#   make kb-index KB='xgen-*'            reconcile every matching subdir (Makefile glob)
+#   make kb-index KB=<name> INDEX_ALL=1  full re-index of that KB
+#   make kb-index RETRY_PENDING=1        also re-trigger stalled PENDING files
 #
 # Preconditions:
 #   - Stack running + healthy (`make start`).
@@ -98,7 +101,7 @@ for name in "${kbs[@]}"; do
   if [ "$RETRY_PENDING" = "0" ]; then
     inf=$(in_flight "$kid" "$name")
     if [ "$inf" != "0" ] 2>/dev/null; then
-      echo "  FAIL  a drain is in flight for KB ${name} (pending+processing=${inf}); refusing to re-dispatch. Wait: make kb-status KB=${name} ; make kb-sync-finalize KB=${name}. Or retry stalled: make kb-sync KB=${name} RETRY_PENDING=1" >&2
+      echo "  FAIL  a drain is in flight for KB ${name} (pending+processing=${inf}); refusing to re-dispatch. Wait: make kb-status KB=${name} ; make kb-index-finalize KB=${name}. Or retry stalled: make kb-index KB=${name} RETRY_PENDING=1" >&2
       fail=1; continue
     fi
   fi
@@ -140,4 +143,4 @@ if [ "$fail" = "1" ]; then
   echo "FAIL  one or more KBs failed (see above)" >&2
   exit 1
 fi
-echo "DONE  kb-sync: reconciled ${#kbs[@]} KB(s)"
+echo "DONE  kb-index: reconciled ${#kbs[@]} KB(s)"

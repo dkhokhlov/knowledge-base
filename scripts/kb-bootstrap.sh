@@ -26,8 +26,8 @@
 #   - KB_HOST set (shell-sourced; see .env.template).
 #
 # Idempotent: re-running re-asserts the grant and prints the same kb_id.
-# Indexing itself is manual: run `make kb-sync` (or `make gdrive-sync` for the
-# gdrive KB) to populate; `make kb-status` reads GET /status.
+# Indexing itself is manual: run `make kb-sync` (gdrive; rclone into ./root/gdrive/)
+# then `make kb-index KB=<name>` to populate; `make kb-status` reads GET /status.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -57,7 +57,7 @@ export RESOLVE
 # final stdout line is the kb_id (stderr carries the human progress log);
 # bootstrap-all prints a per-KB report on stderr only.
 python3 - <<'PY'
-import os, json, sys, urllib.request, urllib.error, urllib.parse
+import os, json, sys, socket, urllib.request, urllib.error, urllib.parse
 
 O = os.environ["KB_HOST"].rstrip("/")
 AK = os.environ["OPENWEBUI_ADMIN_API_KEY"]
@@ -65,6 +65,9 @@ RESOLVE = os.environ.get("RESOLVE") == "1"
 NAME = os.environ.get("KB", "").strip()
 import os as _os
 ROOT = _os.path.join(_os.getcwd(), "root")
+# Short host (matches _short_host() in kb.py: platform.node().split(".")[0]).
+# Used in the KB description kv so `kb kbs` can surface where a root KB lives.
+HOST = socket.gethostname().split(".")[0]
 
 def call(method, path, body=None, query=None):
     url = O + path
@@ -169,8 +172,13 @@ for name in names:
         kb_id = ms[0]["id"]
         print("OK    KB %s already exists: %s" % (name, kb_id), file=sys.stderr)
     else:
+        # Description = prose lead (feeds OWUI's KB-metadata embedding) + source
+        # kv (parsed by `kb kbs`). OWUI's REST API cannot write the KB meta JSONB
+        # field (KnowledgeForm has no meta), so the source attribute lives here.
+        # `path` is root-relative (the top dir name) for source=root.
+        desc = "Indexed from local root/%s/ via api-gateway | source=root | host=%s | path=%s" % (name, HOST, name)
         d = jget("POST", "/api/v1/knowledge/create",
-                 {"name": name, "description": "Indexed from local root/%s/ via api-gateway" % name})
+                 {"name": name, "description": desc})
         kb_id = d["id"]
         print("OK    created KB %s: %s" % (name, kb_id), file=sys.stderr)
     grant_public_read(kb_id, name)
