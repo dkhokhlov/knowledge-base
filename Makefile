@@ -28,7 +28,7 @@ PYTEST   ?= .venv/bin/python -m pytest
         kb-index kb-index-finalize kb-bootstrap kb-status kb-sync kb-desc-backfill kb-migrate-root \
         kb-public-read kb-check kb-finalize kb-bm25-init kb-bm25-rollback kb-bm25-check \
         projects-bootstrap \
-        shell-owui shell-neo4j shell-graphiti shell-caddy clean clean-all clean-test clean-tests clean-backup backup
+        clean clean-all clean-test clean-tests clean-backup backup
 
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -329,18 +329,6 @@ projects-bootstrap: ## One-time admin enable of workspace.knowledge + sharing.pu
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local \
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
 	@./scripts/projects-index-bootstrap.sh
-
-shell-owui: ## Shell into the Open WebUI container
-	@docker exec -it kb-openwebui sh
-
-shell-neo4j: ## Shell into the Neo4j container
-	@docker exec -it kb-neo4j bash
-
-shell-graphiti: ## Shell into the graphiti container
-	@docker exec -it kb-graphiti sh
-
-shell-caddy: ## Shell into the Caddy gateway container
-	@docker exec -it kb-proxy sh
 
 clean: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.local.
 	@$(COMPOSE) down --remove-orphans
