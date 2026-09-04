@@ -23,7 +23,7 @@ lazy-imported so the argparse/classify/report logic imports cleanly on the host
 for unit tests.
 
 Default = audit + report + advise (zero mutation). `--purge` consents to purge
-the safe classes (1, 3); `--purge --maint` purges the maintenance-window
+the safe class (3); `--purge --maint` purges the maintenance-window
 classes (5b, 7, 8). `--no-backup` skips the export (backup is ON by default when
 purging). Stdout is ids-only by default (PII guard); `--show-names` adds
 filenames; full text is written only into the gitignored export dir.
@@ -49,7 +49,7 @@ FILE_COLL_PREFIX = "file-"
 KNOWLEDGE_BASES_COLL = "knowledge-bases"  # OWUI-internal; never treated as a KB
 SAMPLE_CAP = 8  # max sample ids/names shown per class in the report
 
-TIER_SAFE = "safe"        # safe while OWUI runs: class 1 (OWUI REST), 3
+TIER_SAFE = "safe"        # safe while OWUI runs: class 3
 TIER_MAINT = "maint"      # maintenance window only: class 5b, 7, 8
 TIER_ADVISORY = "advisory"  # report + advise only, never auto-purged
 
@@ -91,6 +91,23 @@ def _parse_kb_source(desc):
     if d.startswith("Claude projects memory"):
         return "projects-memory"
     return "unknown"
+
+
+def _parse_kb_path(desc):
+    """Parse the `path` kv from the KB description -- the source dir name for a
+    source=root KB. Returns None when absent (a legacy description without the
+    path kv; the caller falls back to the KB name). The `path` kv is immutable
+    through an OWUI UI KB rename (`PUT /knowledge/{id}/update` changes `name`
+    but preserves `description`), so it is the rename-safe identity for the
+    class-11 stale check."""
+    d = desc or ""
+    for tok in d.split("|"):
+        tok = tok.strip()
+        if "=" in tok:
+            k, _, v = tok.partition("=")
+            if k.strip() == "path":
+                return v.strip() or None
+    return None
 
 
 class _UtcISOFormatter(logging.Formatter):
@@ -542,11 +559,18 @@ def classify(stores, kb=None, root_dirs=None):
     kb_junction_file_ids = set(j.file_id for j in kb_junction)
     classes = {}
 
-    # 1. ghost rows: completed + knowledge_id set, NOT in the (scoped) junction.
+    # 1. ghost rows: completed + knowledge_id set, NOT in the GLOBAL junction.
+    # Global (not the scoped junction) so a --kb scope does not flag a file that
+    # is a live member of a different KB (matches classes 5/7). Advisory, not
+    # purgeable: /knowledge/{id}/file/remove?delete_file=false leaves
+    # meta.data.knowledge_id + status=completed after unlinking the junction, and
+    # the upload path sets status=completed before the junction insert. Both read
+    # as "ghost" but are legitimate; a purge would delete a live file (blob + row
+    # + vectors, irreversible).
     c1_ids = [fid for fid, fr in kb_files.items()
               if fr.status == "completed" and fr.knowledge_id
-              and fid not in kb_junction_file_ids]
-    classes["ghost_rows"] = ClassResult(c1_ids, TIER_SAFE)
+              and fid not in all_junction_file_ids]
+    classes["ghost_rows"] = ClassResult(c1_ids, TIER_ADVISORY)
 
     # 2. stale directory_id: non-empty directory_id not in knowledge_directory.
     c2_ids = [fid for fid, fr in kb_files.items()
@@ -606,16 +630,21 @@ def classify(stores, kb=None, root_dirs=None):
     classes["dead_kb_junction_rows"] = ClassResult(c8_ids, TIER_MAINT)
 
     # 6. missing KB-collection vectors: junction file_id (live KB, in file table,
-    #    not class 7) with 0 vectors for that file_id in its KB collection.
-    kb_vector_file_counts = {}  # kb_id -> {file_id: count}
+    #    not class 7) with 0 vectors for that file_id in its KB collection. A live
+    #    KB whose vector collection is entirely gone (total vector loss) is
+    #    represented as an empty count map so its completed linked files flag --
+    #    was: skipped -> every /query/collection returned 200 + empty while class 6
+    #    reported clean (silent). (A reindex deletes-then-rebuilds the whole
+    #    collection, so a transient false positive during a reindex drain is
+    #    possible; class 6 is advisory, so this is noise, not data loss.)
+    kb_vector_file_counts = {}  # kb_id -> {file_id: count}; {} = collection gone
     for kb_id in scan_kb_ids:
-        if kb_id not in colls:
-            continue
         counts = {}
-        for md in stores.collection_metadatas(kb_id):
-            fid = md.get("file_id") if isinstance(md, dict) else None
-            if fid:
-                counts[fid] = counts.get(fid, 0) + 1
+        if kb_id in colls:
+            for md in stores.collection_metadatas(kb_id):
+                fid = md.get("file_id") if isinstance(md, dict) else None
+                if fid:
+                    counts[fid] = counts.get(fid, 0) + 1
         kb_vector_file_counts[kb_id] = counts
     # A pending/failed file legitimately has 0 vectors; class 6 flags only COMPLETED
     # linked files whose vectors are missing (lost-vector detection).
@@ -625,9 +654,7 @@ def classify(stores, kb=None, root_dirs=None):
             continue  # class 7 / class 8
         if all_files[j.file_id].status != "completed":
             continue  # non-completed -> class 9, not a lost-vector case
-        counts = kb_vector_file_counts.get(j.knowledge_id)
-        if counts is None:
-            continue  # live KB with no collection
+        counts = kb_vector_file_counts.get(j.knowledge_id, {})
         if counts.get(j.file_id, 0) == 0:
             c6_ids.append(j.file_id)
     classes["missing_kb_vectors"] = ClassResult(c6_ids, TIER_ADVISORY)
@@ -667,22 +694,32 @@ def classify(stores, kb=None, root_dirs=None):
     c10_ids = [fid for fids in groups.values() if len(fids) > 1 for fid in fids]
     classes["idempotency_duplicates"] = ClassResult(c10_ids, TIER_ADVISORY)
 
-    # 11. stale root KBs: a source=root KB whose ./root/<name>/ dir is gone. The
-    # source attribute lives in the KB description kv (parsed by _parse_kb_source);
-    # only source=root KBs are root-backed (source=projects-memory KBs are backed
-    # by ~/.claude/projects/, never stale here; source=unknown is fail-safe-not-
-    # stale). KB-agnostic (global; orthogonal to the KB=<id> vector-store scope).
-    # root_dirs is None -> check skipped (the Makefile always passes it; a direct
-    # kb_check.py run without --root-dirs skips gracefully). root_dirs may be an
-    # empty set (./root/ exists but has no children -> every source=root KB is
-    # stale). ids are kb_id STRINGS (report joins them as strings); the (id, name)
-    # pairs live in detail for the prune path + SHOW_NAMES rendering.
+    # 11. stale root KBs: a source=root KB whose ./root/<path>/ dir is gone. The
+    # source + path attributes live in the KB description kv (parsed by
+    # _parse_kb_source / _parse_kb_path); the path kv is rename-safe (an OWUI UI
+    # KB rename changes `name` but not `description`), so the stale test uses path
+    # (name is the legacy fallback when path is absent). Only source=root KBs are
+    # root-backed (source=projects-memory KBs are backed by ~/.claude/projects/,
+    # never stale here; source=unknown is fail-safe-not-stale). KB-agnostic
+    # (global; orthogonal to the KB=<id> vector-store scope). root_dirs is None ->
+    # check skipped (the Makefile always passes it; a direct kb_check.py run
+    # without --root-dirs skips gracefully). root_dirs may be an empty set
+    # (./root/ exists but has no children -> every source=root KB is stale). ids
+    # are kb_id STRINGS (report joins them as strings); the (id, name) pairs live
+    # in detail for the prune path + SHOW_NAMES rendering.
     if root_dirs is None:
         classes["stale_root_kb"] = ClassResult(
             [], TIER_ADVISORY, {"skipped": True})
     else:
-        stale = [(kid, name) for kid, name, desc in stores.knowledge_rows()
-                 if _parse_kb_source(desc) == "root" and name not in root_dirs]
+        stale = []
+        for kid, name, desc in stores.knowledge_rows():
+            if _parse_kb_source(desc) != "root":
+                continue
+            # path kv is authoritative + rename-safe; fall back to name only for
+            # legacy descriptions that lack the path kv (preserves prior behavior).
+            key = _parse_kb_path(desc) or name
+            if key not in root_dirs:
+                stale.append((kid, name))
         classes["stale_root_kb"] = ClassResult(
             [kid for kid, _ in stale], TIER_ADVISORY, {"stale_kbs": stale})
 
@@ -732,13 +769,13 @@ def _fmt_samples(samples, show_names, names):
 
 def advised_commands(classes):
     cmds = []
-    safe = (classes["ghost_rows"].count + classes["orphan_file_collections"].count) > 0
+    safe = classes["orphan_file_collections"].count > 0
     maint = (classes["orphan_kb_vectors"].detail.get("leaked", 0)
             + classes["orphan_junction_rows"].count
             + classes["dead_kb_junction_rows"].count) > 0
     if safe:
-        cmds.append("PURGE=1 make kb-check            # purge safe classes (1,3); backup on")
-        cmds.append("PURGE=1 BACKUP=0 make kb-check   # purge safe classes, no backup export")
+        cmds.append("PURGE=1 make kb-check            # purge class 3 (orphan file-{id} collections); backup on")
+        cmds.append("PURGE=1 BACKUP=0 make kb-check   # purge class 3, no backup export")
     if maint:
         cmds.append("PURGE=1 MAINT=1 make kb-check    # maintenance window: stop OWUI, purge 5b,7,8")
     stuck = (classes["non_completed_leftovers"].detail or {}).get("stuck_processing_linked", [])
@@ -838,7 +875,7 @@ def export_collection(stores, name, export_dir):
 # --- purge ----------------------------------------------------------------
 
 def purge(stores, classes, opts, export_dir):
-    """Execute the purge for the active tier. Safe (no --maint): classes 1, 3.
+    """Execute the purge for the active tier. Safe (no --maint): class 3.
     Maintenance (--maint): classes 5b, 7, 8. Returns a manifest."""
     manifest = {"ts": opts.ts, "tier": TIER_MAINT if opts.maint else TIER_SAFE,
                 "purged_collections": [], "kb_vectors": []}
@@ -850,19 +887,8 @@ def purge(stores, classes, opts, export_dir):
 
 
 def _purge_safe(stores, classes, opts, export_dir, manifest):
-    # class 1 ghosts: OWUI REST DELETE, then drop the residual file-{id} collection.
-    c1 = classes["ghost_rows"]
-    if c1.count:
-        log.info("purge ghosts: %d (OWUI REST DELETE + residual file-{id} drop)", c1.count)
-    for fid in c1.ids:
-        stores.owui_delete_file(fid)
-        coll = FILE_COLL_PREFIX + fid
-        if opts.backup:
-            entry = export_collection(stores, coll, export_dir)
-            manifest["purged_collections"].append(entry)
-        stores.delete_collection(coll)
-
-    # class 3 orphan file-{id} collections: export + delete_collection.
+    # class 3 orphan file-{id} collections: export + delete_collection. (Class 1
+    # ghosts are advisory -- not purged; see classify().)
     c3 = classes["orphan_file_collections"]
     if c3.count:
         log.info("purge orphan file-{id} collections: %d (%d chunks)",
@@ -1248,13 +1274,6 @@ def main(argv=None):
 
     log.info("auditing (scope=%s)...", args.kb or "ALL")
     classes = classify(stores, args.kb, root_dirs=root_dirs)
-
-    # prerequisite: ghost purge (safe tier, non-maint) needs the admin key + OWUI up.
-    if args.purge and not args.maint and classes["ghost_rows"].count > 0:
-        if not admin_key:
-            log.error("--purge will delete %d ghost row(s) via OWUI REST, but "
-                      "OPENWEBUI_ADMIN_API_KEY is unset.", classes["ghost_rows"].count)
-            return 2
 
     names = {fid: fr.filename for fid, fr in stores.file_rows().items()}
     # class-11 stale KB ids -> KB names for SHOW_NAMES rendering (ids are kb_ids,

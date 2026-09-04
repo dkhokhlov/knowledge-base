@@ -275,6 +275,56 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(c["orphan_file_collections"].count, 2)
         self.assertEqual(c["file_rows_no_knowledge_id"].count, 1)
 
+    def test_class1_scope_uses_global_junction(self):
+        """A file tagged knowledge_id=kb-1 but linked (junction) to kb-2 is a live
+        member of kb-2. Under --kb kb-1 scope it must NOT read as a class-1 ghost:
+        the test uses the GLOBAL junction (like classes 5/7), not the scoped one
+        (which would flag + previously purge a live member of another KB)."""
+        files = {
+            "f-cross": _fr("f-cross", kb="kb-1", status="completed"),
+            "f1":      _fr("f1", kb="kb-1", status="completed"),
+        }
+        junction = [
+            kc.JunctionRow("jc", "kb-2", "f-cross", "d1"),  # linked to kb-2, not kb-1
+            kc.JunctionRow("j1", "kb-1", "f1", "d1"),
+        ]
+        kb_ids = {"kb-1": "KB One", "kb-2": "KB Two"}
+        stores = FakeStores(
+            self.tmp, files=files, junction=junction, kb_ids=kb_ids,
+            dir_ids={"d1"},
+            colls={"file-f-cross": "x", "file-f1": "y", "kb-1": "z", "kb-2": "w"},
+            coll_meta={"kb-1": [{"file_id": "f1"}], "kb-2": [{"file_id": "f-cross"}]},
+            coll_docs={})
+        c = kc.classify(stores, kb="kb-1")
+        self.assertNotIn("f-cross", c["ghost_rows"].ids)
+        self.assertEqual(c["ghost_rows"].count, 0)
+
+    def test_class6_detects_total_vector_loss(self):
+        """A live KB (kb-2) with a completed linked file but NO vector collection
+        (whole collection dropped) is total vector loss: every /query/collection
+        returns 200 + empty. Class 6 must flag the completed linked file -- was:
+        `kb_id not in colls -> continue` skipped the KB so class 6 reported clean
+        (silent). The fix records an empty count map for a collection-less live KB."""
+        files = {
+            "f-tot": _fr("f-tot", kb="kb-2", status="completed"),
+            "f1":    _fr("f1", kb="kb-1", status="completed"),
+        }
+        junction = [
+            kc.JunctionRow("jt", "kb-2", "f-tot", "d1"),
+            kc.JunctionRow("j1", "kb-1", "f1", "d1"),
+        ]
+        kb_ids = {"kb-1": "KB One", "kb-2": "KB Two"}  # both live
+        stores = FakeStores(
+            self.tmp, files=files, junction=junction, kb_ids=kb_ids,
+            dir_ids={"d1"},
+            colls={"file-f-tot": "x", "file-f1": "y", "kb-1": "z"},  # NO kb-2 coll
+            coll_meta={"kb-1": [{"file_id": "f1"}]},                 # kb-2 absent
+            coll_docs={})
+        c = kc.classify(stores)
+        self.assertIn("f-tot", c["missing_kb_vectors"].ids)
+        # kb-1's f1 still has vectors -> not flagged
+        self.assertNotIn("f1", c["missing_kb_vectors"].ids)
+
     def test_totals(self):
         c, _ = self._classes()
         self.assertEqual(c["_totals"]["file_rows"], 10)
@@ -297,12 +347,12 @@ class TestPurgeSafe(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_safe_purge_drops_ghosts_and_orphans(self):
+    def test_safe_purge_drops_orphans_only(self):
         export_dir = kc._export_dir(self.stores.data_dir, self.opts.ts)
         manifest = kc.purge(self.stores, self.classes, self.opts, export_dir)
-        # ghost -> OWUI DELETE + residual file-g1 collection drop
-        self.assertEqual(self.stores.owui_deletes, ["g1"])
-        self.assertIn("file-g1", self.stores.deleted_collections)
+        # class 1 ghosts are advisory -> NOT purged (no OWUI DELETE, no file-g1 drop)
+        self.assertEqual(self.stores.owui_deletes, [])
+        self.assertNotIn("file-g1", self.stores.deleted_collections)
         # class 3 orphans dropped
         for name in ("file-ORPHAN1", "file-ORPHAN2"):
             self.assertIn(name, self.stores.deleted_collections)
@@ -310,8 +360,8 @@ class TestPurgeSafe(unittest.TestCase):
         self.assertEqual(self.stores.deleted_kb_vectors, [])
         self.assertEqual(self.stores.deleted_junction_files, [])
         self.assertEqual(self.stores.deleted_junction_kbs, [])
-        # manifest + export written (backup on)
-        self.assertEqual(len(manifest["purged_collections"]), 3)  # g1 + 2 orphans
+        # manifest + export written (backup on): the 2 class-3 orphans only
+        self.assertEqual(len(manifest["purged_collections"]), 2)
         self.assertTrue(os.path.isdir(export_dir))
         for entry in manifest["purged_collections"]:
             self.assertTrue(os.path.isfile(
@@ -320,8 +370,8 @@ class TestPurgeSafe(unittest.TestCase):
     def test_no_backup_skips_export(self):
         opts = _opts(purge=True, maint=False, backup=False)
         manifest = kc.purge(self.stores, self.classes, opts, None)
-        # drops still happen
-        self.assertIn("file-g1", self.stores.deleted_collections)
+        # class 3 orphan drop still happens (class 1 ghosts are advisory, not purged)
+        self.assertNotIn("file-g1", self.stores.deleted_collections)
         self.assertIn("file-ORPHAN1", self.stores.deleted_collections)
         # no export files written
         self.assertEqual(len(manifest["purged_collections"]), 0)
@@ -329,6 +379,9 @@ class TestPurgeSafe(unittest.TestCase):
     def test_advisory_classes_not_purged(self):
         export_dir = kc._export_dir(self.stores.data_dir, self.opts.ts)
         kc.purge(self.stores, self.classes, self.opts, export_dir)
+        # class 1 (g1) is advisory too -> no OWUI delete, no file-g1 drop
+        self.assertNotIn("g1", self.stores.owui_deletes)
+        self.assertNotIn("file-g1", self.stores.deleted_collections)
         # class 4 (f2), class 2 (f3), class 6 (f6), class 9 (p1), class 10, class 12
         # are advisory -> no collections deleted for them, no OWUI delete
         self.assertNotIn("file-f2", self.stores.deleted_collections)
@@ -399,7 +452,7 @@ class TestReport(unittest.TestCase):
         self.assertIn("totals", obj)
         self.assertIn("classes", obj)
         self.assertEqual(obj["classes"]["ghost_rows"]["count"], 1)
-        self.assertEqual(obj["classes"]["ghost_rows"]["tier"], "safe")
+        self.assertEqual(obj["classes"]["ghost_rows"]["tier"], "advisory")
         # ids-only: samples is a flat list of ids
         self.assertEqual(obj["classes"]["ghost_rows"]["samples"], ["g1"])
         self.assertIn("PURGE=1 make kb-check", obj["advised_commands"])
@@ -1206,6 +1259,28 @@ class TestClass11StaleRootKb(unittest.TestCase):
         rows = [("kb-u", "u-kb", "no parseable source")]
         c, _ = self._classes(kb_rows=rows, root_dirs=set())
         self.assertEqual(c["stale_root_kb"].count, 0)
+
+    def test_class11_rename_not_stale(self):
+        """An OWUI UI KB rename changes `name` but preserves the description's
+        `path` kv. A root KB named 'Company Drive' whose path=live-kb is NOT stale
+        when root_dirs has live-kb. Was: name-based -> 'Company Drive' not in
+        root_dirs -> stale -> PRUNE_KB=1 deleted a healthy renamed KB."""
+        rows = [("kb-live", "Company Drive",
+                 "Indexed from local root/live-kb/ via api-gateway | "
+                 "source=root | host=testhost | path=live-kb")]
+        c, _ = self._classes(kb_rows=rows, root_dirs={"live-kb"})
+        self.assertEqual(c["stale_root_kb"].count, 0)
+        self.assertNotIn("kb-live", c["stale_root_kb"].ids)
+
+    def test_class11_missing_path_falls_back_to_name(self):
+        """A legacy root KB whose description lacks the path kv falls back to the
+        KB name for the stale test (preserves prior behavior)."""
+        rows = [("kb-leg", "legacy-kb",
+                 "Indexed from local root/legacy-kb/ via api-gateway | "
+                 "source=root | host=testhost")]
+        c, _ = self._classes(kb_rows=rows, root_dirs=set())
+        self.assertEqual(c["stale_root_kb"].count, 1)
+        self.assertIn("kb-leg", c["stale_root_kb"].ids)
 
     def test_root_dirs_none_skipped(self):
         c, _ = self._classes(root_dirs=None)
