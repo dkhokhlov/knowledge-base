@@ -17,7 +17,7 @@
 # child env (only the iso vars + PATH/HOME/LANG/TERM; no operator BASH_ENV,
 # no live KB_HOST/KB_API_KEY), so load_env reads the clone .env/.env.local
 # (the ephemeral user key). e2e_provision (make start + admin-signup + api-keys
-# + e2e_ephemeral_user) suffices for the /memory endpoints -- no rag-config,
+# + e2e_ephemeral_user) suffices for the /memory endpoints -- no config-rag,
 # no projects-bootstrap, no gdrive. The shared EXTERNAL Ollama already has the
 # extraction model (qwen2.5:14b) pulled by the live stack, so the async
 # extraction after `add` works without a model pull.

@@ -6,7 +6,7 @@
 #
 # Enable-only. Auto-run by `make api-keys` when OCR_ENABLED=true (the one
 # post-start DB step, folded into the standard chain); re-assert manually with
-# `make ocr-config` (e.g. after a DB reset). No-op when OCR_ENABLED!=true.
+# `make config-ocr` (e.g. after a DB reset). No-op when OCR_ENABLED!=true.
 #
 # Preconditions:
 #   - Stack running and healthy (`make start`).
@@ -21,7 +21,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Capture a `make ocr-config OCR_ENABLED=<val>` override before sourcing .env
+# Capture a `make config-ocr OCR_ENABLED=<val>` override before sourcing .env
 # (which would clobber it).
 _OCR_ENABLED_OVR="${OCR_ENABLED:-}"
 set -a

@@ -116,7 +116,7 @@ export KB_HOST=http://<host>:3000
 make provision
 ```
 
-`make provision` chains the full first-time setup and leaves the stack running: `bootstrap` (creates `.env`/`.env.local` + the JWT key, `OCR_SERVICE_TOKEN`, first-user password, `./data` dirs; bakes `COMPOSE_PROFILES=ocr` into `.env` from `OCR_ENABLED`) → `pull-models` (BLOCKING: pulls the base LLM + ctx variant + embedder + `deepseek-ocr` from Ollama) → `start` (preflight + `docker compose up -d`; the ocr sidecar is included via `COMPOSE_PROFILES=ocr` in `.env`) → `admin-signup` (creates `admin@<KB_DOMAIN>`) → `api-keys` (admin + read-scoped agent keys; auto-configures OWUI → `markitdown-ocr` when `OCR_ENABLED=true`) → `rag-config` (strict-grounding RAG template + `rag.ollama.base_url` sync) → `kb-bootstrap KB=gdrive` (creates the gdrive KB + grants public read; name-based, no `GDRIVE_KB_ID`). The JWT key, API keys, and Neo4j auth are generated locally; `OCR_ENABLED` defaults to `true` (to skip OCR: `make clean-all && make provision OCR_ENABLED=false`). Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
+`make provision` chains the full first-time setup and leaves the stack running: `bootstrap` (creates `.env`/`.env.local` + the JWT key, `OCR_SERVICE_TOKEN`, first-user password, `./data` dirs; bakes `COMPOSE_PROFILES=ocr` into `.env` from `OCR_ENABLED`) → `pull-models` (BLOCKING: pulls the base LLM + ctx variant + embedder + `deepseek-ocr` from Ollama) → `start` (preflight + `docker compose up -d`; the ocr sidecar is included via `COMPOSE_PROFILES=ocr` in `.env`) → `admin-signup` (creates `admin@<KB_DOMAIN>`) → `api-keys` (admin + read-scoped agent keys; auto-configures OWUI → `markitdown-ocr` when `OCR_ENABLED=true`) → `config-rag` (strict-grounding RAG template + `rag.ollama.base_url` sync) → `kb-bootstrap KB=gdrive` (creates the gdrive KB + grants public read; name-based, no `GDRIVE_KB_ID`). The JWT key, API keys, and Neo4j auth are generated locally; `OCR_ENABLED` defaults to `true` (to skip OCR: `make clean-all && make provision OCR_ENABLED=false`). Test-only credentials for `make test` are described in [docs/testing.md](docs/testing.md).
 
 > **PROMPT for Agent**
 >
@@ -138,9 +138,9 @@ make kb-status KB=gdrive  # pretty JSON: completed/pending/processing/failed vs 
 
 See [Google Drive indexing (manual, via API Gateway)](#google-drive-indexing-manual-via-api-gateway). `make kb-sync` runs rclone; `make kb-index KB=gdrive` reconciles into the KB; indexing is manual/on-demand (no sidecar).
 
-**Add another KB** (any local folder tree): drop/symlink/bind-mount it at `./root/<name>/`, then `make kb-index KB=<name>` (creates the KB if missing, then indexes). Each top-level subdir of `./root/` is one KB, named after the subdir. Migrate an existing `./gdrive` deployment with `make kb-migrate-root` (one-time). A `source=root` KB whose `./root/<name>/` dir is later removed shows as class 11 `stale_root_kb` in `make kb-check`; `PRUNE_KB=1 make kb-check` deletes it (timestamped backup first).
+**Add another KB** (any local folder tree): drop/symlink/bind-mount it at `./root/<name>/`, then `make kb-index KB=<name>` (creates the KB if missing, then indexes). Each top-level subdir of `./root/` is one KB, named after the subdir. A `source=root` KB whose `./root/<name>/` dir is later removed shows as class 11 `stale_root_kb` in `make kb-check`; `PRUNE_KB=1 make kb-check` deletes it (timestamped backup first).
 
-**Everyday restart** (provision is done once): `make start`. Re-assert after a DB reset: `make rag-config` (+ `make ocr-config`). Rotate keys: `make api-keys FORCE=1`.
+**Everyday restart** (provision is done once): `make start`. Re-assert after a DB reset: `make config-rag` (+ `make config-ocr`). Rotate keys: `make api-keys FORCE=1`.
 
 (Optional) Close signup after the admin + agent accounts exist: set `ENABLE_SIGNUP=false` in `.env` and `make restart`.
 
@@ -206,7 +206,7 @@ An admin runs **`make users-create EMAIL=alice@example.com NAME=Alice`** — an 
 - A user's uploaded files and knowledge bases are private to that user by default. The KB owner (with `sharing.knowledge`) or an admin grants a KB to user groups: Workspace -> Knowledge.
 - An agent using a user's API key inherits that user's permissions: the user's own files + KBs shared with the user's groups. It cannot see other users' private docs. An admin key bypasses access control — give agents a non-admin user's key, not an admin key.
 - To RAG a curated doc set: create a KB -> add docs -> grant it to a group -> put the agent's user in that group -> pass the KB in the `files` field as `{"type":"collection","id":"<kb-id>"}`. A top-level `knowledge` field is ignored, and `metadata.knowledge` is discarded server-side — only `files` grounds. The `/kb` skill retrieves raw chunks via the gateway `POST /retrieve` (pgvector backend; the agent synthesizes the answer itself); the gateway `POST /memory/rag` endpoint is retained for direct/operator one-shot RAG (the gateway inserts the chat model from `OPENWEBUI_MODEL`; send `messages` + `files`, no `model`); humans/admins RAG directly at `POST /api/chat/completions` with an explicit `model`.
-- `make rag-config` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes the local 14B chat model confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
+- `make config-rag` sets a **strict-grounding RAG template** (admin config, persisted in `webui.db`): answer only from the retrieved context; refuse when the answer is absent; do not use outside knowledge or invent names/artifacts. The default template lets the model fall back to its own knowledge, which makes the local 14B chat model confabulate. Re-run after any DB reset/rebuild. Grounding (chunk injection) is the caller's job (`files` field); this template governs what the model does with the chunks. It also syncs `rag.ollama.base_url` to `OLLAMA_HOST` (which OWUI otherwise leaves stale after a host change; `make preflight` warns on drift).
 
 ### Google Drive indexing (manual, via API Gateway)
 
@@ -261,7 +261,7 @@ Measured warm on the GPU host (one 14B ctx-baked model loaded). The first call a
 | RAG chat (retrieval + grounded LLM) | `POST /api/chat/completions` (`files`) | ~1.5 s |
 
 - Raw retrieval (gateway `POST /retrieve` → OWUI `/api/v1/retrieval/query/collection`, pgvector backend) returns **chunks**: the gateway flattens the response into 8-key hits (`distance, file, file_id, page, start_index, source, mtime, text`), top-k by hybrid (vector + BM25) similarity. No LLM runs.
-- RAG chat (`/api/chat/completions` with `files:[{"type":"collection","id":<kb-id>}]`) runs retrieval, injects the chunks as context, and returns a grounded LLM answer. The `make rag-config` strict template makes the model answer only from the retrieved chunks and refuse when the answer is absent.
+- RAG chat (`/api/chat/completions` with `files:[{"type":"collection","id":<kb-id>}]`) runs retrieval, injects the chunks as context, and returns a grounded LLM answer. The `make config-rag` strict template makes the model answer only from the retrieved chunks and refuse when the answer is absent.
 
 ## Security
 
@@ -292,7 +292,7 @@ For lockdown defaults, phone-home hardening, container caps, secrets handling, N
 | `graphiti/bootstrap.py` | mounted into the `graphiti` container and run as the command; injects `OpenAIGenericClient` + `nomic` embedder (768) so Ollama extraction works, runs a robust `/messages` worker, owns the app lifespan |
 | `graphiti/config.yaml` | UNUSED — config for the retired MCP image; kept for reference (not mounted) |
 | `Modelfile_qwen2_5` | reference Modelfile for the custom ctx-baked `GRAPHITI_MODEL` (`FROM qwen2.5:14b` + `PARAMETER num_ctx 8192`); see [docs/operations.md](docs/operations.md#custom-model-ctx-baked-variant) |
-| `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `rag-config.sh`, `gdrive-sync`, `kb-bootstrap.sh`, `kb-index.sh`, `kb-finalize.sh`, `kb-desc-backfill.sh`, `kb-migrate-root.sh` |
+| `scripts/` | `bootstrap.sh`, `api-keys.sh`, `preflight.sh`, `config-rag.sh`, `gdrive-sync`, `kb-bootstrap.sh`, `kb-index.sh`, `kb-finalize.sh`, `kb-desc-backfill.sh` |
 | `skills/` | per-tool `kb` agent skill (`claude/` primary; `codex/`, `opencode/`, `pi/` symlink `scripts/` to it) — see [docs/agents.md](docs/agents.md) |
 | `tests/` | `test_01`..`test_12` bash tests + `test_runner.py` (pytest driver) + 4 native UTs + `conftest.py` + `lib.sh` (see [docs/testing.md](docs/testing.md)) |
 | `docs/` | `operations.md`, `ocr.md`, `gdrive.md`, `memory.md`, `testing.md`, `agents.md`, favicon assets |

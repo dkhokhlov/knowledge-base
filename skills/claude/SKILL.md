@@ -23,9 +23,8 @@ One URL, one key.
 - **KB_API_KEY** — your Open WebUI non-admin user key, with read grants on the
   KBs you query (write scope on your own project KBs). The wrapper exits if it
   is unset.
-- For retrieval, the OWUI embedding URL must be configured server-side (synced
-  to `OLLAMA_BASE_URL` via `make rag-config`) — without it embeddings fail. That
-  server-side setup is operator work, not part of this skill.
+- For retrieval, the OWUI embedding URL must be configured (not part of this
+  skill — see docs/operations.md in GH dkhokhlov/knowledge-base).
 - Set both in your shell env: `export KB_HOST=...` / `export KB_API_KEY=...`.
   The wrapper is a thin client: it reads ONLY those two env vars and no env files.
 

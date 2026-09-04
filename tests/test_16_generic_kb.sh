@@ -186,7 +186,7 @@ fi
 # --- make kb-finalize KB=gentest (global-terminal guard + flock + REINDEX) ------
 # Proves the B11 global-terminal guard (every ./root KB terminal) + the host lock
 # + the ivfflat/GIN REINDEX on a generic KB. pgvector-only; the iso stack runs
-# pgvector (rag-config). POSTGRES_CONTAINER is iso-injected; VECTOR_DB + PGVECTOR_*
+# pgvector (config-rag). POSTGRES_CONTAINER is iso-injected; VECTOR_DB + PGVECTOR_*
 # come from the clone .env (kb-finalize.sh sources it).
 section "make kb-finalize KB=${NAME} (REINDEX ivfflat + GIN FTS)"
 fin_out=$(make kb-finalize KB="$NAME" 2>&1) || true

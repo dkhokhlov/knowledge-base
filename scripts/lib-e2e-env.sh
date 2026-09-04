@@ -43,7 +43,7 @@
 #   e2e_isolate <NAME> [PORT] [OCR_ENABLED]   # stamped clone + isolation env + bootstrap
 #                                              # (PORT omitted -> auto-pick a free port)
 #   e2e_provision                 # make start + wait healthy + admin-signup + api-keys
-#                                 # + projects-bootstrap + rag-config (prod-exact) + ephemeral user
+#                                 # + projects-bootstrap + config-rag (prod-exact) + ephemeral user
 #   e2e_provision_at_scale        # at-scale: re-bootstrap + image
 #                                 # rebuild + preflight + gdrive (rclone) + make ci (test_09)
 #   e2e_stop_docker <NAME> <STAMP> # stop+remove docker, KEEP the clone (success path)
@@ -286,7 +286,7 @@ e2e_isolate() {
 # Non-destructive provision of the isolated stack: start, wait for /health, then
 # create the admin account + provision the admin API key + one ephemeral
 # throwaway user (its key written to the clone .env.local as KB_API_KEY by
-# e2e_ephemeral_user). Call AFTER e2e_isolate. Does NOT run rag-config,
+# e2e_ephemeral_user). Call AFTER e2e_isolate. Does NOT run config-rag,
 # projects-bootstrap, or gdrive (a test that needs those calls them itself). OCR
 # is honored per e2e_isolate's bootstrap.
 e2e_provision() {
@@ -304,7 +304,7 @@ e2e_provision() {
   # Match `make provision` steps 6-8 so the iso env is prod-exact (the ONLY diffs
   # from prod are KB_HOST + the ephemeral KB_API_KEY): projects-bootstrap enables
   # workspace.knowledge + sharing.public_knowledge (test_05 user-key KB create
-  # 401s without it), rag-config sets the strict-grounding RAG template + syncs
+  # 401s without it), config-rag sets the strict-grounding RAG template + syncs
   # rag.ollama.base_url, kb-bm25-init creates the ParadeDB pg_search extension +
   # BM25 index the patch-10 FTS arm queries (without it the ||| arm errors ->
   # langchain per-query full-collection fallback; document_chunk exists by the
@@ -313,7 +313,7 @@ e2e_provision() {
   # deliberately excluded here: the at-scale path runs it (needs the gdrive KB
   # before gdrive-sync); the deterministic path uses synthetic fixtures only.
   make projects-bootstrap || return 1
-  make rag-config || return 1
+  make config-rag || return 1
   make kb-bm25-init || return 1
   e2e_ephemeral_user || return 1
 }
@@ -321,7 +321,7 @@ e2e_provision() {
 # AT-SCALE provision of the isolated stack: the comprehensive path
 # (re-bootstrap + [OCR model pull] + preflight + image rebuild (api-gateway +
 # postgres + openwebui + [markitdown-ocr]) + start + wait healthy + admin-signup
-# + api-keys + ephemeral user + projects-bootstrap + rag-config + kb-bm25-init +
+# + api-keys + ephemeral user + projects-bootstrap + config-rag + kb-bm25-init +
 # kb-bootstrap KB=gdrive + gdrive-sync + make ci). This is the
 # at-scale variant of e2e_provision: it rebuilds the locally-built images and
 # syncs the REAL gdrive corpus (rclone). test_09_gdrive_index (the comprehensive
@@ -387,7 +387,7 @@ e2e_provision_at_scale() {
   make api-keys || return 1
   e2e_ephemeral_user || return 1
   make projects-bootstrap || return 1
-  make rag-config || return 1
+  make config-rag || return 1
   make kb-bm25-init || return 1
   make kb-bootstrap KB=gdrive || return 1
   make kb-sync || return 1
@@ -412,7 +412,7 @@ e2e_ephemeral_user() {
   domain="$(grep -E '^KB_DOMAIN=' .env | head -1 | cut -d= -f2- || true)"
   [ -n "$domain" ] || { echo "FAIL  KB_DOMAIN not set in the clone .env (ephemeral user email)" >&2; return 1; }
   email="temp-${E2E_STAMP}@${domain}"
-  # `make api-keys` recreates the api-gateway at its tail (ocr-config.sh when
+  # `make api-keys` recreates the api-gateway at its tail (config-ocr.sh when
   # OCR_ENABLED=true, then `docker compose up -d api-gateway` for the admin
   # key) and returns once the container Starts, before the gateway app binds
   # its port. Wait for /health before POSTing /admin/users, else the create

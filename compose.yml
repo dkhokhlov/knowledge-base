@@ -142,7 +142,7 @@ services:
     # bootstrap.py reads OPENAI_BASE_URL. The image ENTRYPOINT is null, so this
     # shim is safe to set; it execs "$@" = the command below. See the shim header
     # (scripts/ollama-host.sh). OWUI is NOT wrapped here: it persists
-    # rag.ollama.base_url to its DB on first boot, so `make rag-config` writes the
+    # rag.ollama.base_url to its DB on first boot, so `make config-rag` writes the
     # translated value to that DB instead.
     entrypoint: ["/app/ollama-host.sh"]
     command: ["python", "/app/bootstrap.py"]
@@ -377,7 +377,7 @@ services:
     # external-extraction contract) and returns per-page/per-slide/per-sheet
     # documents. OWUI routes EVERY ingest to it when
     # CONTENT_EXTRACTION_ENGINE=external + URL + a non-empty API key are set in
-    # the OWUI DB (`make ocr-config`). See docker/markitdown/oursvc.py + the plan.
+    # the OWUI DB (`make config-ocr`). See docker/markitdown/oursvc.py + the plan.
     image: ghcr.io/dkhokhlov/markitdown-ocr:${MARKITDOWN_OCR_IMAGE_TAG:?MARKITDOWN_OCR_IMAGE_TAG required in .env}
     build:
       context: ./docker/markitdown
@@ -390,7 +390,7 @@ services:
     # make provision OCR_ENABLED=false` (bakes OCR_ENABLED=false + an empty
     # COMPOSE_PROFILES). OWUI routing (CONTENT_EXTRACTION_ENGINE=external +
     # URL + API key) is set in the OWUI DB by `make api-keys` (re-assert:
-    # `make ocr-config`). No runtime marker; OCR_ENABLED is config, decided
+    # `make config-ocr`). No runtime marker; OCR_ENABLED is config, decided
     # at provision time.
     profiles: [ocr]
     restart: unless-stopped

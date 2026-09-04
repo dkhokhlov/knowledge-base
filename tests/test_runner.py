@@ -104,7 +104,7 @@ def test_13_chunk_quality(iso_env):
 @pytest.mark.iso
 @pytest.mark.shared
 def test_14_rag_config(iso_env):
-    """rag-config.sh re-asserts the hybrid retrieval keys over webui.db and OWUI runs the pgvector backend."""
+    """config-rag.sh re-asserts the hybrid retrieval keys over webui.db and OWUI runs the pgvector backend."""
     iso_env("tests/test_14_rag_config.sh")
 
 @pytest.mark.iso

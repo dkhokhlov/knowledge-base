@@ -37,11 +37,9 @@ __pycache__/
 
 .opencode/index/
 
-# Transitional (pre-migration): a live deployment that has not yet run
-# `make kb-migrate-root` still has the old ./gdrive corpus + gdrive-exclude.conf on
-# disk. Keep them ignored so the corpus (PII) is never accidentally committed.
-# After migration both move under ./root/ (ignored via /root/* above) and these
-# become no-ops. `make kb-migrate-root` is the one-time move.
+# Legacy ./gdrive layout (pre-./root): keep the old corpus + gdrive-exclude.conf
+# ignored so PII is never accidentally committed. No-ops once the corpus lives
+# under ./root/gdrive (ignored via /root/* above).
 /gdrive/
 /gdrive-exclude.conf
 

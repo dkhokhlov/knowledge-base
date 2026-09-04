@@ -22,8 +22,7 @@ CLI:  python3 exclude_to_kb_ignore.py --src <ini-file> --target-root <dir>
 
 Module:  translate(ini_text, target_root) -> list[str] of written .kb-ignore paths.
 
-Used by ``scripts/kb-migrate-root.sh`` (one-time layout migration) and
-``tests/conftest.py`` (the at-scale iso fixture copies the live deny-list into the
+Used by ``tests/conftest.py`` (the at-scale iso fixture copies the live deny-list into the
 throwaway clone). The live ``.exclude.conf`` is gitignored (Drive file paths are
 business-sensitive); this script never prints patterns."""
 import argparse

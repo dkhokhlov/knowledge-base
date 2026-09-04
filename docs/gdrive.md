@@ -13,9 +13,7 @@ named after the subdir. To add a non-gdrive KB, drop a folder at
 This doc covers the **one-time rclone setup** (the gdrive prerequisite). The
 sync / index mechanics, the exclude list, the backup-dir retention, and the
 make targets are in [docs/operations.md](operations.md) ("Populating the
-source") and the README gdrive section. For an existing deployment still on the
-old `./gdrive` layout, run `make kb-migrate-root` (one-time) to move to
-`./root/gdrive` (see [docs/operations.md](operations.md) "Migrating to ./root").
+source") and the README gdrive section.
 
 ## Prerequisite
 

@@ -130,7 +130,7 @@ ok "Ollama has embedder 'nomic-embed-text'"
 # later OLLAMA_HOST changes, so the embedder can drift to a stale host
 # while chat still works. Read the persisted value straight from the DB (no OWUI
 # up / admin key needed) and compare to .env. WARN, not a hard fail: a stale URL
-# does not block `make start` (only embedding), and the fix (make rag-config)
+# does not block `make start` (only embedding), and the fix (make config-rag)
 # needs OWUI up. First boot (no webui.db / row absent) -> nothing to check.
 emb_warn=0
 if emb_msg="$(python3 - 2>&1 <<'PY'
@@ -139,7 +139,7 @@ env_url = (os.environ.get("OLLAMA_HOST") or "http://host.docker.internal:11434")
 # OWUI persists the CONTAINER-reachable URL (host.docker.internal, not
 # localhost) in webui.db, so apply the same localhost->host.docker.internal
 # translation the container entrypoint shim (scripts/ollama-host.sh) and
-# rag-config apply before comparing. Without this, a DB holding
+# config-rag apply before comparing. Without this, a DB holding
 # host.docker.internal vs OLLAMA_HOST=localhost reads as a false STALE.
 env_url = re.sub(r'(https?://)(localhost|127\.0\.0\.1)([:/]|$)', r'\1host.docker.internal\3', env_url)
 db = "./data/openwebui/webui.db"
@@ -171,12 +171,12 @@ PY
   ok "$emb_msg"
 else
   warn "$emb_msg"
-  warn "       after 'make start', run: make rag-config  (syncs rag.ollama.base_url to OLLAMA_HOST)"
+  warn "       after 'make start', run: make config-rag  (syncs rag.ollama.base_url to OLLAMA_HOST)"
   emb_warn=1
 fi
 
 if [ "$emb_warn" -eq 1 ]; then
-  printf '\nPreflight OK (with the embedding-URL warning above). Next: make start && make rag-config && make health\n'
+  printf '\nPreflight OK (with the embedding-URL warning above). Next: make start && make config-rag && make health\n'
 else
   printf '\nPreflight OK. Next: make start && make health\n'
 fi
@@ -241,7 +241,7 @@ PY
     ok "$ocr_msg"
   else
     warn "$ocr_msg"
-    warn "       after 'make start', run: make ocr-config  (re-asserts CONTENT_EXTRACTION_ENGINE=external)"
+    warn "       after 'make start', run: make config-ocr  (re-asserts CONTENT_EXTRACTION_ENGINE=external)"
   fi
 else
   ok "OCR disabled (OCR_ENABLED=false) — skipping OCR checks"

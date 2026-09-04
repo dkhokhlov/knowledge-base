@@ -13,9 +13,9 @@
 #
 # Open WebUI does NOT use this shim: it persists rag.ollama.base_url to webui.db
 # on first boot and uses the DB thereafter (it ignores the env). `make
-# rag-config` (part of `make provision`, step 7) writes the translated value to
+# config-rag` (part of `make provision`, step 7) writes the translated value to
 # that DB, and preflight.sh compares the DB against the translated OLLAMA_HOST.
-# Both use the SAME regex as below, expressed in Python (scripts/rag-config.sh,
+# Both use the SAME regex as below, expressed in Python (scripts/config-rag.sh,
 # scripts/preflight.sh). One rule, two languages: keep them in sync.
 #
 # Idempotent + non-matching: a non-localhost OLLAMA_HOST (e.g. a remote GPU host

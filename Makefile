@@ -21,11 +21,11 @@ DATA_DIR := ./data
 PYTEST   ?= .venv/bin/python -m pytest
 
 .PHONY: help provision bootstrap preflight pull pull-models start stop restart logs ps config \
-        health ci test test-unit test-live-RO test-iso test-iso-shared test-iso-single test-iso-long test-long test-output api-keys admin-signup rag-config \
+        health ci test test-unit test-live-RO test-iso test-iso-shared test-iso-single test-iso-long test-long test-output api-keys admin-signup config-rag \
         users-create users-list users-search \
-        ocr-config \
+        config-ocr \
         gdrive-meta \
-        kb-index kb-index-finalize kb-bootstrap kb-status kb-sync kb-desc-backfill kb-migrate-root \
+        kb-index kb-index-finalize kb-bootstrap kb-status kb-sync kb-desc-backfill \
         kb-public-read kb-check kb-finalize kb-bm25-init kb-bm25-rollback kb-bm25-check \
         projects-bootstrap \
         clean clean-all clean-test clean-tests clean-backup backup
@@ -33,7 +33,7 @@ PYTEST   ?= .venv/bin/python -m pytest
 help: ## Show this help
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + admin-signup + api-keys (auto OCR) + projects-bootstrap + rag-config + kb-bm25-init (ParadeDB pg_search BM25 index) + gdrive KB. Leaves the stack running. Each top-level subdir of ./root/ is one KB (named after the subdir); ./root/gdrive/ is the gdrive KB.
+provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + admin-signup + api-keys (auto OCR) + projects-bootstrap + config-rag + kb-bm25-init (ParadeDB pg_search BM25 index) + gdrive KB. Leaves the stack running. Each top-level subdir of ./root/ is one KB (named after the subdir); ./root/gdrive/ is the gdrive KB.
 	@set -e; \
 	  echo "==> 1/9 bootstrap (creates .env/.env.local + secrets + ./data dirs)"; make bootstrap; \
 	  echo "==> 2/9 pull-models (BLOCKING: pulls base LLM + ctx variant + embedder + deepseek-ocr from Ollama)"; make pull-models; \
@@ -50,7 +50,7 @@ provision: ## ONE-TIME from-scratch setup: bootstrap + pull-models + start + adm
 	  echo "==> 4/9 admin-signup (creates the admin@<KB_DOMAIN> account)"; make admin-signup; \
 	  echo "==> 5/9 api-keys (admin key; auto-configures OWUI -> markitdown-ocr when OCR_ENABLED=true)"; make api-keys; \
 	  echo "==> 6/9 projects-bootstrap (one-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs)"; make projects-bootstrap; \
-	  echo "==> 7/9 rag-config (strict-grounding RAG template + rag.ollama.base_url sync)"; make rag-config; \
+	  echo "==> 7/9 config-rag (strict-grounding RAG template + rag.ollama.base_url sync)"; make config-rag; \
 	  echo "==> 8/9 kb-bm25-init (ParadeDB pg_search extension + BM25 index on document_chunk; drops the dead GIN FTS index; needs the kb-postgres image)"; make kb-bm25-init; \
 	  echo "==> 9/9 kb-bootstrap KB=gdrive (creates the gdrive KB + grants public read; name-based, no GDRIVE_KB_ID)"; make kb-bootstrap KB=gdrive; \
 	  echo; echo "==> provision complete — stack is running."; \
@@ -157,12 +157,12 @@ users-search: ## Search OWUI users by name/email substring (admin). Set QUERY=. 
 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
 	@./scripts/users.sh search
 
-rag-config: ## Set the strict-grounding RAG template in Open WebUI (run after `make api-keys`)
+config-rag: ## Set the strict-grounding RAG template in Open WebUI (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@grep -qE '^OPENWEBUI_ADMIN_API_KEY=.+$$' .env.local 	  || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }
-	@./scripts/rag-config.sh
+	@./scripts/config-rag.sh
 
-ocr-config: ## Re-assert OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-ocr (auto-set by make api-keys when OCR_ENABLED=true; re-run after a DB reset)
+config-ocr: ## Re-assert OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-ocr (auto-set by make api-keys when OCR_ENABLED=true; re-run after a DB reset)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@_OVR="$${OCR_ENABLED:-}"; set -a; . ./.env 2>/dev/null; set +a; \
 	  if [ -n "$$_OVR" ]; then export OCR_ENABLED="$$_OVR"; fi; \
@@ -171,7 +171,7 @@ ocr-config: ## Re-assert OWUI CONTENT_EXTRACTION_ENGINE=external -> markitdown-o
 	    || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (run: make api-keys)"; exit 1; }; \
 	  grep -qE '^OCR_SERVICE_TOKEN=.+$$' .env.local \
 	    || { echo "MISSING OCR_SERVICE_TOKEN in .env.local (run: make bootstrap with OCR_ENABLED=true)"; exit 1; }; \
-	  ./scripts/ocr-config.sh
+	  ./scripts/config-ocr.sh
 
 gdrive-meta: ## Generate per-file .meta YAML sidecars (Drive description, [labels], file attributes, approval) next to each synced gdrive file under ./root/gdrive (read-only; reuses rclone token; never prints credentials). Set FILE=<id> for one file, DRIVE=<name> for one drive, DRY_RUN=1 to preview. .meta sidecars are excluded from indexing and protected from sync deletion (./root/.kb-ignore globals *.meta + *.json).
 	@./scripts/gdrive-meta.py $${FILE:+--file "$$FILE"} $${DRIVE:+--drive "$$DRIVE"} $${DRY_RUN:+--dry-run}
@@ -320,9 +320,6 @@ kb-bm25-rollback: ## Roll back patch 10: DROP the BM25 index + the pg_search ext
 
 kb-sync: ## Sync external sources into ./root/ (SYNC-ONLY; does NOT index). Today this is gdrive: rclone sync all shared drives into ./root/gdrive/ (delta; deleted/overwritten retained in ./.gdrive-backup). After this, run `make kb-index KB=gdrive` to reconcile the synced tree into the OWUI gdrive KB (sync and index are split so each is independently retryable). INDEX_ALL / RETRY_PENDING apply to `make kb-index`, not this stage. Fails fast on any transfer error.
 	@./scripts/gdrive-sync
-
-kb-migrate-root: ## ONE-TIME migration to the ./root/ source root: moves ./gdrive -> ./root/gdrive + gdrive-exclude.conf -> ./root/.kb-ignore (translates the INI to per-directory gitignore-style .kb-ignore; [*] -> ./root/.kb-ignore globals, [X] -> ./root/gdrive/X/.kb-ignore), removes GDRIVE_KB_ID from .env.local, REBUILDS the api-gateway image (make start does not rebuild locally-built images) + recreates it with KB_SOURCE_ROOT=/kb-source, then runs a post-move dry_run=1 parity gate (asserts added=modified=deleted=0; aborts before the operator reconcile if key-shape drifted). Requires the gdrive drain terminal first (refuses if in flight). Idempotent. Run, then: make kb-bootstrap KB=gdrive && make kb-sync && make kb-index KB=gdrive.
-	@./scripts/kb-migrate-root.sh
 
 projects-bootstrap: ## One-time admin enable of workspace.knowledge + sharing.public_knowledge so user keys can create + publicly share project-memory KBs (run after `make api-keys`)
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }

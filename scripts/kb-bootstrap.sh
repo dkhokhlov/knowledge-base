@@ -138,7 +138,7 @@ else:
     if RESOLVE:
         sys.exit("FAIL  --resolve requires KB=<name>")
     if not _os.path.isdir(ROOT):
-        sys.exit("FAIL  ./root not found (run: make kb-migrate-root, or create ./root/<name>/)")
+        sys.exit("FAIL  ./root not found (create ./root/<name>/)")
     names = sorted(d for d in _os.listdir(ROOT)
                    if not d.startswith(".") and _os.path.isdir(_os.path.join(ROOT, d)))
     if not names:

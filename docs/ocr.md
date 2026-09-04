@@ -91,7 +91,7 @@ prereq provisioned by the standard chain — no separate step:
 
 `make preflight` HARD-FAILs when enabled if `deepseek-ocr` is not pulled (a
 half-provisioned engine would orphan every ingest), and WARNs on
-`rag.content_extraction_engine` drift. `make ocr-config` re-asserts the OWUI DB
+`rag.content_extraction_engine` drift. `make config-ocr` re-asserts the OWUI DB
 keys (re-run after a DB reset). Idempotent. **No fallback:** OWUI's external
 engine is global + all-or-nothing — an empty result orphans (no per-type
 fallback).
@@ -143,7 +143,7 @@ fallback).
 - `docker logs -f kb-markitdown-ocr` — per-request log + OCR errors.
 - `make preflight` — when enabled, hard-fails if `deepseek-ocr` is not pulled
   and warns if `rag.content_extraction_engine` has drifted from `external`
-  (fix: `make ocr-config`).
+  (fix: `make config-ocr`).
 - `GET /api/v1/retrieval/config` (admin key) — confirm the engine is set.
 
 ## Disabling (no runtime toggle; no KB reset)

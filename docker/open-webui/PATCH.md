@@ -770,7 +770,7 @@ offsets — expected; `/data/content` and chunks regenerate together.
   (span-level min-size merge at the caller). At `=0` (current live value) the
   chunker is header-strict and tiny chunks on header-heavy docs (TOC, changelog)
   remain — a pre-existing pathology, not a regression (legacy `=0` did not merge
-  either). Setting it > 0 activates coalescing and fixes it; that is a rag-config
+  either). Setting it > 0 activates coalescing and fixes it; that is a config-rag
   change (persisted in `webui.db`, not just `.env`) + a re-embed.
 - **`ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER` is a no-op**: the flag stays in the
   config API (plumbing + GET/POST expect it) but activates nothing. Setting it

@@ -23,11 +23,8 @@ key.
   `make users-create EMAIL=... NAME=...` (needs the admin key; prints the
   `kb_api_key` to relay). `make api-keys` enables non-admin API keys. Store your
   key in `~/.api_keys` as `KB_API_KEY` (the operator's single source).
-- The OWUI embedding URL is configured: `make rag-config` has been run. It syncs
-  `rag.ollama.base_url` to `.env` `OLLAMA_BASE_URL` (OWUI persists that URL on
-  first boot and ignores later `.env` changes; a stale value breaks retrieval
-  embeddings). `make preflight` warns if it drifts; re-run `make rag-config` to
-  fix, and after any DB reset/rebuild.
+- The OWUI embedding URL is configured — see docs/operations.md in GH
+  dkhokhlov/knowledge-base.
 - Set `KB_HOST` and `KB_API_KEY` in your shell env (`export KB_HOST=...`,
   `export KB_API_KEY=...`). The wrapper is a thin client: it reads ONLY those two
   env vars and does not read `.env` / `.env.local`. KB_API_KEY is your own
