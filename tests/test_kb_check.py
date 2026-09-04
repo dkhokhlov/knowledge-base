@@ -31,8 +31,8 @@ import kb_check as kc  # noqa: E402
 # --- FakeStores (in-memory; overrides every Stores read + mutate method) --
 
 class FakeStores(kc.Stores):
-    """In-memory Stores. `data_dir` is a real temp dir so export_collection can
-    write the JSONL + manifest there. Mutations record into lists (no real
+    """In-memory Stores. `data_dir` is a real temp dir so export_collection_strict
+    can write the JSONL + manifest there. Mutations record into lists (no real
     Postgres/SQLite/OWUI is touched)."""
 
     def __init__(self, data_dir, files, junction, kb_ids, dir_ids, colls,
@@ -103,6 +103,67 @@ class FakeStores(kc.Stores):
     def delete_junction_by_knowledge(self, kb_id):
         self.deleted_junction_kbs.append(kb_id)
         return True
+
+    # strict backups (mirror the real Stores contracts; no psycopg2/sqlite here)
+    def file_row_exists(self, file_id):
+        return file_id in self._files
+
+    def export_collection_strict(self, name, export_dir, include_vector=False):
+        """Fake strict export: writes the in-memory chunks to <name>.jsonl. Mirrors
+        the real contract -- asserts wrote == live collection_count (a mismatch
+        raises, so the strict-abort path is testable). Returns a manifest entry."""
+        ids, docs, mets = self._coll_docs.get(name, ([], [], []))
+        assert len(ids) == len(docs) == len(mets), (
+            "FakeStores coll_docs misaligned for %s" % name)
+        live = self.collection_count(name)
+        if len(ids) != live:
+            raise RuntimeError(
+                "strict export count mismatch for %s: wrote %d, live count %d"
+                % (name, len(ids), live))
+        safe_name = name.replace(os.sep, "_")
+        path = os.path.join(export_dir, safe_name + ".jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for i in range(len(ids)):
+                row = {"id": ids[i], "collection_name": name, "text": docs[i],
+                       "metadata": mets[i]}
+                if include_vector:
+                    row["vector"] = "[%d-dim-synthetic]" % i  # no real vector store
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return {"name": name, "chunk_count": len(ids), "path": path}
+
+    def export_kb_file_vectors(self, kb_id, file_id, export_dir):
+        """Fake 5b backup: writes one file's KB-vector chunks to
+        kb_vectors_<kb>_<fid>.jsonl. Filters the in-memory coll_docs by file_id."""
+        ids, docs, mets = self._coll_docs.get(kb_id, ([], [], []))
+        rows = [(ids[i], docs[i], mets[i]) for i in range(len(ids))
+                if (mets[i] or {}).get("file_id") == file_id]
+        safe = "%s_%s" % (kb_id, file_id.replace(os.sep, "_"))
+        path = os.path.join(export_dir, "kb_vectors_%s.jsonl" % safe)
+        with open(path, "w", encoding="utf-8") as f:
+            for cid, text, md in rows:
+                f.write(json.dumps({"id": cid, "vector": "[synthetic]",
+                                    "collection_name": kb_id, "text": text,
+                                    "metadata": md}, ensure_ascii=False) + "\n")
+        return {"kb_id": kb_id, "file_id": file_id, "chunk_count": len(rows),
+                "path": path}
+
+    def export_junction_rows(self, file_ids, kb_ids, export_dir):
+        """Fake junction backup: writes matching knowledge_file rows (7-col
+        shape) to junction.jsonl. JunctionRow carries 4 cols; the live table has
+        7 -- the extra cols (user_id, created_at, updated_at) are synthetic here
+        since JunctionRow lacks them."""
+        fids = set(file_ids)
+        kbids = set(kb_ids)
+        rows = [jr for jr in self._junction
+                if jr.file_id in fids or jr.knowledge_id in kbids]
+        path = os.path.join(export_dir, "junction.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for jr in rows:
+                f.write(json.dumps({
+                    "id": jr.id, "user_id": "u", "knowledge_id": jr.knowledge_id,
+                    "file_id": jr.file_id, "created_at": 0, "updated_at": 0,
+                    "directory_id": jr.directory_id}, ensure_ascii=False) + "\n")
+        return {"row_count": len(rows), "path": path}
 
     # repair-gate reads + the status flip (record, do not touch real stores)
     def file_content(self, file_id):
@@ -463,6 +524,39 @@ class TestPurgeSafe(unittest.TestCase):
         self.assertNotIn("f3", self.stores.owui_deletes)
         self.assertNotIn("p1", self.stores.owui_deletes)
 
+    def test_class3_purge_strict_export_aborts_on_mismatch(self):
+        """Strict export raises on a wrote/live count mismatch (DB error or
+        concurrent write). The 2nd orphan's export raises -> its
+        delete_collection is NOT called; the 1st (already exported+deleted) is
+        recorded in a PARTIAL manifest dumped before the re-raise (claude-cli
+        F3). Was: export_collection was fail-open -> an empty backup + an
+        unconditional delete."""
+        fix = _build_fixture()
+        # Two orphans: ORPHAN1 exports OK (coll_meta==coll_docs); ORPHAN2 has a
+        # coll_meta/coll_docs mismatch -> strict raises.
+        fix["coll_meta"]["file-ORPHAN1"] = [{"file_id": "o1a"}, {"file_id": "o1b"}]
+        fix["coll_meta"]["file-ORPHAN2"] = [{"file_id": "o2a"}, {"file_id": "o2b"},
+                                           {"file_id": "o2c"}]   # 3 live (count)
+        fix["coll_docs"]["file-ORPHAN1"] = (["c1", "c2"], ["d1", "d2"],
+                                            [{"file_id": "o1a"}, {"file_id": "o1b"}])
+        fix["coll_docs"]["file-ORPHAN2"] = (["c3"], ["d3"], [{"file_id": "o2a"}])  # 1 wrote
+        stores = _make_stores(fix, self.tmp)
+        classes = kc.classify(stores)
+        export_dir = kc._export_dir(stores.data_dir, self.opts.ts)
+        with self.assertRaises(RuntimeError) as cm:
+            kc.purge(stores, classes, self.opts, export_dir)
+        self.assertIn("strict export count mismatch", str(cm.exception))
+        # ORPHAN1 exported + deleted BEFORE ORPHAN2 raised -> 1 deleted, 1 in the
+        # partial manifest. ORPHAN2 NOT deleted (raise before its delete).
+        self.assertIn("file-ORPHAN1", stores.deleted_collections)
+        self.assertNotIn("file-ORPHAN2", stores.deleted_collections)
+        # partial manifest dumped (F3): the operator can tell what was purged.
+        self.assertTrue(os.path.isfile(os.path.join(export_dir, "manifest.json")))
+        with open(os.path.join(export_dir, "manifest.json")) as f:
+            partial = json.load(f)
+        self.assertEqual(len(partial["purged_collections"]), 1)
+        self.assertEqual(partial["purged_collections"][0]["name"], "file-ORPHAN1")
+
 
 class TestPurgeMaint(unittest.TestCase):
 
@@ -489,6 +583,166 @@ class TestPurgeMaint(unittest.TestCase):
         self.assertEqual(self.stores.owui_deletes, [])
         self.assertEqual(self.stores.deleted_collections, [])
         self.assertEqual(len(manifest["kb_vectors"]), 1)
+
+    def test_maint_purge_backs_up_before_delete(self):
+        """5b leaked vectors + class-7 orphan junction + class-8 dead-KB junction:
+        PURGE=1 MAINT=1 (backup on) writes kb_vectors_*.jsonl + junction.jsonl
+        BEFORE the deletes, and the manifest carries the backup paths (codex
+        P02/P03). The junction backup is 7-col (restorable), not the 4-col
+        JunctionRow shape."""
+        export_dir = kc._export_dir(self.stores.data_dir, self.opts.ts)
+        manifest = kc.purge(self.stores, self.classes, self.opts, export_dir)
+        # 5b backup: one per leaked pair (kb-1, LEAK1).
+        self.assertEqual(len(manifest["purged_kb_vector_backups"]), 1)
+        bkp = manifest["purged_kb_vector_backups"][0]
+        self.assertEqual(bkp["kb_id"], "kb-1")
+        self.assertEqual(bkp["file_id"], "LEAK1")
+        self.assertTrue(os.path.isfile(bkp["path"]))
+        # junction backup: 7-col, covers class-7 (fX) + class-8 (kb-dead) rows.
+        jb = manifest["purged_junction_backup"]
+        self.assertIsNotNone(jb)
+        self.assertTrue(os.path.isfile(jb["path"]))
+        with open(jb["path"]) as f:
+            jrows = [json.loads(line) for line in f]
+        # fX's junction row (jx) + kb-dead's (jd) -> 2 rows, all 7 columns.
+        self.assertEqual(jb["row_count"], 2)
+        for r in jrows:
+            self.assertEqual(set(r), {"id", "user_id", "knowledge_id", "file_id",
+                                     "created_at", "updated_at", "directory_id"})
+        self.assertEqual({r["file_id"] for r in jrows}, {"fX", "fd1"})
+        # deletes still happen (backup is before delete, not instead of).
+        self.assertEqual(self.stores.deleted_kb_vectors, [("kb-1", "LEAK1")])
+        self.assertEqual(self.stores.deleted_junction_files, ["fX"])
+        self.assertEqual(self.stores.deleted_junction_kbs, ["kb-dead"])
+
+    def test_maint_no_backup_still_deletes(self):
+        """--no-backup (export_dir None): 5b/7/8 stay unbacked by design, but the
+        deletes still run. No backup files written; manifest fields empty/None."""
+        manifest = kc.purge(self.stores, self.classes, self.opts, None)
+        self.assertEqual(manifest["purged_kb_vector_backups"], [])
+        self.assertIsNone(manifest["purged_junction_backup"])
+        self.assertEqual(manifest["skipped_toctou"], [])
+        # deletes ran.
+        self.assertEqual(self.stores.deleted_kb_vectors, [("kb-1", "LEAK1")])
+        self.assertEqual(self.stores.deleted_junction_files, ["fX"])
+        self.assertEqual(self.stores.deleted_junction_kbs, ["kb-dead"])
+
+    def test_maint_toctou_skips_live_file(self):
+        """TOCTOU re-check (claude-cli F4): all_file_ids is the classify()
+        snapshot. A direct `docker exec ... kb_check.py --purge --maint` with
+        OWUI LIVE can create a file row mid-run -> the snapshot still says 5b.
+        The fresh file_row_exists check skips the pair + records it; the vectors
+        are NOT deleted."""
+        fix = _build_fixture()
+        # LEAK1 read as 5b (no file row at classify time); simulate a row
+        # appearing mid-run by adding it to the file table AFTER classify.
+        stores = _make_stores(fix, self.tmp)
+        classes = kc.classify(stores)
+        self.assertIn(("kb-1", "LEAK1"),
+                      classes["orphan_kb_vectors"].detail["leaked_pairs"])
+        stores._files["LEAK1"] = _fr("LEAK1", status="completed")  # appeared mid-run
+        export_dir = kc._export_dir(stores.data_dir, self.opts.ts)
+        manifest = kc.purge(stores, classes, self.opts, export_dir)
+        self.assertEqual(stores.deleted_kb_vectors, [])   # NOT deleted
+        self.assertEqual(manifest["skipped_toctou"],
+                         [{"kb_id": "kb-1", "file_id": "LEAK1"}])
+        # 7/8 still purge (their TOCTOU risk is lower; junction re-links).
+        self.assertEqual(stores.deleted_junction_files, ["fX"])
+        self.assertEqual(stores.deleted_junction_kbs, ["kb-dead"])
+
+
+class TestBackupRestore(unittest.TestCase):
+    """A backup that cannot restore is a false safety net. Prove the strict
+    exports carry every column needed to reconstruct the row (codex P02/P03).
+    The collection export exercises the REAL Stores.export_collection_strict SQL
+    path via the fake psycopg2 cursor; the junction export exercises the real
+    Stores.export_junction_rows (in-memory FakeStores mirrors the 7-col shape)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.export_dir = os.path.join(self.tmp, "export")
+        os.makedirs(self.export_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_export_collection_strict_roundtrip(self):
+        """export_collection_strict(include_vector=True) -> JSONL carries all 5
+        fields (id, vector, collection_name, text, metadata); loading it back
+        reconstructs every chunk. Exercises the real SQL path (fake cursor)."""
+        chunks = {
+            "kb-1": [("c1", "t1", {"file_id": "f1"}),
+                     ("c2", "t2", {"file_id": "f2", "page": 3})],
+        }
+        files = {"f1": _fr("f1"), "f2": _fr("f2")}
+        junction = [kc.JunctionRow("j1", "kb-1", "f1", "d1"),
+                   kc.JunctionRow("j2", "kb-1", "f2", "d1")]
+        stores = FakePgStores(self.tmp, files=files, junction=junction,
+                              kb_ids={"kb-1": "KB One"}, dir_ids={"d1"},
+                              chunks=chunks)
+        entry = stores.export_collection_strict("kb-1", self.export_dir,
+                                                include_vector=True)
+        self.assertEqual(entry["chunk_count"], 2)
+        self.assertTrue(os.path.isfile(entry["path"]))
+        with open(entry["path"]) as f:
+            rows = [json.loads(line) for line in f]
+        self.assertEqual(len(rows), 2)
+        for r in rows:
+            # all 5 restorable fields present
+            self.assertEqual(set(r), {"id", "vector", "collection_name", "text",
+                                     "metadata"})
+            self.assertEqual(r["collection_name"], "kb-1")
+            self.assertTrue(r["vector"].startswith("[vec:"))  # text-encoded
+        # round-trip: the loaded rows reconstruct the original chunks exactly.
+        loaded = {r["id"]: r for r in rows}
+        for cid, text, vmeta in chunks["kb-1"]:
+            self.assertEqual(loaded[cid]["text"], text)
+            self.assertEqual(loaded[cid]["metadata"], vmeta)
+
+    def test_export_collection_strict_aborts_on_count_mismatch(self):
+        """A wrote/live count mismatch (concurrent write) raises -- the backup is
+        not trusted and the caller aborts. collection_count reads the fake cursor
+        (len of the chunk list); a stale export_dir copy would diverge."""
+        chunks = {"kb-1": [("c1", "t1", {"file_id": "f1"})]}  # live count = 1
+        stores = FakePgStores(self.tmp, files={}, junction=[],
+                              kb_ids={"kb-1": "KB One"}, dir_ids=set(),
+                              chunks=chunks)
+        # shrink the chunk list AFTER the SELECT but BEFORE the count check by
+        # patching collection_count to report a different live count.
+        stores.collection_count = lambda name: 99  # mismatch with wrote (1)
+        with self.assertRaises(RuntimeError) as cm:
+            stores.export_collection_strict("kb-1", self.export_dir,
+                                            include_vector=True)
+        self.assertIn("count mismatch", str(cm.exception))
+
+    def test_export_junction_rows_roundtrip(self):
+        """export_junction_rows -> junction.jsonl carries all 7 knowledge_file
+        columns; loading it back reconstructs the rows. JunctionRow has 4 cols;
+        the live table has 7 -- the backup must be 7-col (restorable), not 4."""
+        junction = [
+            kc.JunctionRow("j1", "kb-1", "f1", "d1"),
+            kc.JunctionRow("j7", "kb-1", "fX", "d1"),     # class 7 (by file_id)
+            kc.JunctionRow("j8", "kb-dead", "fd1", "d1"),  # class 8 (by kb_id)
+        ]
+        stores = FakeStores(self.tmp, files={"f1": _fr("f1")}, junction=junction,
+                            kb_ids={"kb-1": "KB One"}, dir_ids={"d1"},
+                            colls={}, coll_meta={}, coll_docs={})
+        entry = stores.export_junction_rows(["fX"], ["kb-dead"], self.export_dir)
+        self.assertEqual(entry["row_count"], 2)  # j7 (fX) + j8 (kb-dead)
+        self.assertTrue(os.path.isfile(entry["path"]))
+        with open(entry["path"]) as f:
+            rows = [json.loads(line) for line in f]
+        self.assertEqual(len(rows), 2)
+        for r in rows:
+            self.assertEqual(set(r), {"id", "user_id", "knowledge_id", "file_id",
+                                     "created_at", "updated_at", "directory_id"})
+        # round-trip: the 7 cols reconstruct which rows were backed up.
+        by_id = {r["id"]: r for r in rows}
+        self.assertEqual(by_id["j7"]["file_id"], "fX")
+        self.assertEqual(by_id["j8"]["knowledge_id"], "kb-dead")
+        # f1's row (j1) NOT in the backup (not in the file_ids/kb_ids predicates).
+        self.assertNotIn("j1", by_id)
 
 
 class TestReport(unittest.TestCase):
@@ -850,6 +1104,18 @@ class _FakePgCursor:
         elif s.startswith("SELECT vmetadata"):
             name = params[0]
             self._rows = [(c[2],) for c in chunks.get(name, [])]
+        elif s.startswith("SELECT id, vector::text, collection_name, text, vmetadata"):
+            # export_collection_strict(include_vector=True): return 5-tuples
+            # (id, vector_text, collection_name, text, vmetadata). Chunks hold no
+            # vector; synthesize a deterministic text-encoded vector per chunk id
+            # (the round-trip asserts it round-trips, not its content).
+            name = params[0]
+            self._rows = [(c[0], "[vec:%s]" % c[0], name, c[1], c[2])
+                          for c in chunks.get(name, [])]
+        elif s.startswith("SELECT id, collection_name, text, vmetadata"):
+            # export_collection_strict(include_vector=False): 4-tuple.
+            name = params[0]
+            self._rows = [(c[0], name, c[1], c[2]) for c in chunks.get(name, [])]
         elif s.startswith("SELECT id, text, vmetadata"):
             name = params[0]
             self._rows = list(chunks.get(name, []))

@@ -289,6 +289,20 @@ class Stores:
         finally:
             con.close()
 
+    def file_row_exists(self, file_id):
+        """TOCTOU re-check before a 5b vector delete: does the file row NOW exist?
+        all_file_ids is snapshotted at classify() entry; a direct
+        `docker exec ... kb_check.py --purge --maint` with OWUI live can create a
+        file row mid-run -> a fid that read as 5b (no file row) now has one. Reads
+        via a FRESH RO connection (like kb_in_flight) so a row created AFTER the
+        classify snapshot IS detected. Returns True/False."""
+        con = sqlite3.connect("file:%s?mode=ro" % self.webui_db_path, uri=True)
+        try:
+            cur = con.execute("SELECT 1 FROM file WHERE id=?", (file_id,))
+            return cur.fetchone() is not None
+        finally:
+            con.close()
+
     def directory_ids(self):
         """set of every knowledge_directory.id."""
         if "dir_ids" not in self._cache:
@@ -385,29 +399,61 @@ class Stores:
             "SELECT count(*) FROM document_chunk WHERE collection_name=%s", (name,))
         return cur.fetchone()[0]
 
-    def export_collection_strict(self, name, export_dir):
-        """Strict backup of a collection's chunks before a prune DELETE. Unlike
-        export_collection (which feeds the fail-open collection_documents that
-        swallows DB errors -> empty lists), this raises on any query error and
-        asserts the exported row count == the live count, so a pgvector read
-        failure can NEVER produce an empty-looking backup followed by a delete.
-        Returns a manifest entry {name, chunk_count, path}."""
+    def export_collection_strict(self, name, export_dir, include_vector=False):
+        """Strict backup of a collection's chunks before a delete. Raises on any
+        query error and asserts the exported row count == the live count, so a
+        Postgres read failure can NEVER produce an empty-looking backup followed
+        by a delete. The JSONL carries id, collection_name, text, vmetadata, and
+        the vector (as text) when include_vector -- a restorable backup. Class-3
+        purge (small file-{id} collections) passes include_vector=True; the prune
+        path keeps the default False (a whole-KB export with vectors is ~100 MB+
+        JSONL with no rotation; prune rollback is re-index, documented). Returns
+        a manifest entry {name, chunk_count, path}."""
+        cols = ("id, vector::text, collection_name, text, vmetadata"
+                if include_vector else "id, collection_name, text, vmetadata")
         cur = self._q(
-            "SELECT id, text, vmetadata FROM document_chunk WHERE collection_name=%s",
+            "SELECT %s FROM document_chunk WHERE collection_name=%%s" % cols,
             (name,))
         rows = list(cur)
         safe_name = name.replace(os.sep, "_")
         path = os.path.join(export_dir, safe_name + ".jsonl")
         with open(path, "w", encoding="utf-8") as f:
             for r in rows:
-                f.write(json.dumps({"id": r[0], "metadata": r[2],
-                                    "document": r[1]}, ensure_ascii=False) + "\n")
+                if include_vector:
+                    f.write(json.dumps({"id": r[0], "vector": r[1],
+                                        "collection_name": r[2], "text": r[3],
+                                        "metadata": r[4]}, ensure_ascii=False) + "\n")
+                else:
+                    f.write(json.dumps({"id": r[0], "collection_name": r[1],
+                                        "text": r[2], "metadata": r[3]},
+                                       ensure_ascii=False) + "\n")
         live = self.collection_count(name)
         if len(rows) != live:
             raise RuntimeError(
                 "strict export count mismatch for %s: wrote %d, live count %d "
                 "-- aborting (concurrent write or DB error)" % (name, len(rows), live))
         return {"name": name, "chunk_count": len(rows), "path": path}
+
+    def export_kb_file_vectors(self, kb_id, file_id, export_dir):
+        """Strict restorable backup of one file's leaked KB vectors before a 5b
+        delete. Selects id, vector::text, collection_name, text, vmetadata for the
+        (collection_name, vmetadata->>'file_id') slice and writes JSONL. Raises on
+        any query error (no fail-open). Returns a manifest entry
+        {kb_id, file_id, chunk_count, path}. Maintenance window (OWUI stopped)."""
+        cur = self._q(
+            "SELECT id, vector::text, collection_name, text, vmetadata "
+            "FROM document_chunk WHERE collection_name=%s AND "
+            "vmetadata->>'file_id'=%s", (kb_id, file_id))
+        rows = list(cur)
+        safe = "%s_%s" % (kb_id, file_id.replace(os.sep, "_"))
+        path = os.path.join(export_dir, "kb_vectors_%s.jsonl" % safe)
+        with open(path, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps({"id": r[0], "vector": r[1],
+                                    "collection_name": r[2], "text": r[3],
+                                    "metadata": r[4]}, ensure_ascii=False) + "\n")
+        return {"kb_id": kb_id, "file_id": file_id,
+                "chunk_count": len(rows), "path": path}
 
     def owui_delete_kb(self, kb_id):
         """OWUI REST DELETE /api/v1/knowledge/{id}/delete at the in-container OWUI
@@ -469,6 +515,44 @@ class Stores:
             "DELETE FROM knowledge_file WHERE knowledge_id=?", (kb_id,))
         self._webui_rw().commit()
         return True
+
+    def export_junction_rows(self, file_ids, kb_ids, export_dir):
+        """Strict restorable backup of the knowledge_file rows about to be deleted
+        by class 7 (by file_id) + class 8 (by knowledge_id). JunctionRow carries
+        only 4 columns; the live knowledge_file table has 7 (id, user_id,
+        knowledge_id, file_id, created_at, updated_at, directory_id), so a backup
+        from the cached objects could not restore. Writes the union of matching
+        rows (all 7 columns) to junction.jsonl. Maintenance window (OWUI stopped).
+        Returns a manifest entry {row_count, path}."""
+        con = sqlite3.connect("file:%s?mode=ro" % self.webui_db_path, uri=True)
+        con.row_factory = sqlite3.Row
+        try:
+            rows = []
+            if file_ids:
+                placeholders = ",".join("?" for _ in file_ids)
+                rows = list(con.execute(
+                    "SELECT id, user_id, knowledge_id, file_id, created_at, "
+                    "updated_at, directory_id FROM knowledge_file "
+                    "WHERE file_id IN (%s)" % placeholders, tuple(file_ids)))
+            if kb_ids:
+                placeholders = ",".join("?" for _ in kb_ids)
+                extra = list(con.execute(
+                    "SELECT id, user_id, knowledge_id, file_id, created_at, "
+                    "updated_at, directory_id FROM knowledge_file "
+                    "WHERE knowledge_id IN (%s)" % placeholders, tuple(kb_ids)))
+                seen = set(r["id"] for r in rows)
+                rows.extend(r for r in extra if r["id"] not in seen)
+        finally:
+            con.close()
+        path = os.path.join(export_dir, "junction.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps({
+                    "id": r["id"], "user_id": r["user_id"],
+                    "knowledge_id": r["knowledge_id"], "file_id": r["file_id"],
+                    "created_at": r["created_at"], "updated_at": r["updated_at"],
+                    "directory_id": r["directory_id"]}, ensure_ascii=False) + "\n")
+        return {"row_count": len(rows), "path": path}
 
     # --- repair (class 9 stuck-processing-while-linked) --------------------
 
@@ -884,21 +968,6 @@ def _export_dir(data_dir, ts):
     return d
 
 
-def export_collection(stores, name, export_dir):
-    """Write a collection's chunks to <name>.jsonl; return a manifest entry
-    (chunk count). Captured BEFORE delete_collection."""
-    ids, docs, mets = stores.collection_documents(name)
-    safe_name = name.replace(os.sep, "_")
-    path = os.path.join(export_dir, safe_name + ".jsonl")
-    with open(path, "w", encoding="utf-8") as f:
-        for i in range(len(ids)):
-            f.write(json.dumps({"id": ids[i],
-                                "metadata": mets[i] if i < len(mets) else None,
-                                "document": docs[i] if i < len(docs) else None},
-                               ensure_ascii=False) + "\n")
-    return {"name": name, "chunk_count": len(ids)}
-
-
 # --- purge ----------------------------------------------------------------
 
 def purge(stores, classes, opts, export_dir):
@@ -907,50 +976,94 @@ def purge(stores, classes, opts, export_dir):
     manifest = {"ts": opts.ts, "tier": TIER_MAINT if opts.maint else TIER_SAFE,
                 "purged_collections": [], "kb_vectors": []}
     if opts.maint:
-        _purge_maint(stores, classes, manifest)
+        _purge_maint(stores, classes, opts, export_dir, manifest)
     else:
         _purge_safe(stores, classes, opts, export_dir, manifest)
     return manifest
 
 
 def _purge_safe(stores, classes, opts, export_dir, manifest):
-    # class 3 orphan file-{id} collections: export + delete_collection. (Class 1
-    # ghosts are advisory -- not purged; see classify().)
+    # class 3 orphan file-{id} collections: strict export + delete_collection.
+    # (Class 1 ghosts are advisory -- not purged; see classify().)
     c3 = classes["orphan_file_collections"]
     if c3.count:
         log.info("purge orphan file-{id} collections: %d (%d chunks)",
                  c3.count, c3.detail.get("orphan_chunks", 0))
-    for name in c3.ids:
-        if opts.backup:
-            entry = export_collection(stores, name, export_dir)
-            manifest["purged_collections"].append(entry)
-        stores.delete_collection(name)
+    try:
+        for name in c3.ids:
+            if opts.backup:
+                entry = stores.export_collection_strict(
+                    name, export_dir, include_vector=True)
+                manifest["purged_collections"].append(entry)
+            stores.delete_collection(name)
+    except Exception:
+        # strict export raised (DB error / count mismatch). Collections already
+        # deleted earlier in the loop have .jsonl on disk, but manifest.json
+        # (written by main() only after purge() returns) would be lost on the
+        # uncaught re-raise -- the operator could not tell what was purged.
+        # Dump the partial manifest now, then re-raise.
+        if export_dir:
+            try:
+                with open(os.path.join(export_dir, "manifest.json"), "w",
+                          encoding="utf-8") as f:
+                    json.dump(manifest, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+        raise
 
 
-def _purge_maint(stores, classes, manifest):
-    # class 5b leaked KB vectors: direct delete on KB collections.
+def _purge_maint(stores, classes, opts, export_dir, manifest):
+    # class 5b leaked KB vectors: per-pair backup + TOCTOU re-check + direct
+    # delete on KB collections. OWUI stopped under the Makefile maint path.
+    manifest.setdefault("purged_kb_vector_backups", [])
+    manifest.setdefault("purged_junction_backup", None)
+    manifest.setdefault("skipped_toctou", [])
     c5 = classes["orphan_kb_vectors"]
     leaked_pairs = c5.detail.get("leaked_pairs", []) if c5.detail else []
     if leaked_pairs:
         log.info("purge leaked KB vectors: %d (direct delete; OWUI stopped)",
                  len(leaked_pairs))
     for kb_id, fid in leaked_pairs:
+        # TOCTOU re-check: all_file_ids is the classify() snapshot. A direct
+        # `docker exec ... kb_check.py --purge --maint` with OWUI LIVE can create
+        # a file row mid-run -> the snapshot still says 5b -> the delete would
+        # wipe a live file's vectors. The Makefile maint path stops OWUI first
+        # (safe), but defend the direct path: a fresh RO check skips a row that
+        # now exists.
+        if stores.file_row_exists(fid):
+            log.warning("SKIP 5b leak %s/%s: file row now exists (TOCTOU; "
+                        "direct invocation with OWUI live?)", kb_id, fid)
+            manifest["skipped_toctou"].append({"kb_id": kb_id, "file_id": fid})
+            continue
+        if opts.backup and export_dir:
+            bkp = stores.export_kb_file_vectors(kb_id, fid, export_dir)
+            manifest["purged_kb_vector_backups"].append(bkp)
         deleted = stores.delete_kb_vectors_by_file(kb_id, fid)
         manifest["kb_vectors"].append(
             {"kb_id": kb_id, "file_id": fid, "deleted": deleted})
 
-    # class 7 orphan junction rows: direct sqlite DELETE per orphan file_id.
+    # class 7 + 8 junction rows: restorable backup (7 cols) BEFORE the deletes.
+    # JunctionRow carries 4 cols; knowledge_file has 7 -- a 4-col backup could
+    # not restore. Write once for the union of both predicates. --no-backup
+    # (export_dir None) leaves 5b/7/8 unbacked by design.
     c7 = classes["orphan_junction_rows"]
+    c8 = classes["dead_kb_junction_rows"]
+    c7_ids = list(set(c7.ids))
+    c8_ids = list(set(c8.ids))
+    if opts.backup and export_dir and (c7_ids or c8_ids):
+        manifest["purged_junction_backup"] = stores.export_junction_rows(
+            c7_ids, c8_ids, export_dir)
+
+    # class 7 orphan junction rows: direct sqlite DELETE per orphan file_id.
     if c7.count:
         log.info("purge orphan junction rows: %d (sqlite DELETE; OWUI stopped)", c7.count)
-    for fid in set(c7.ids):
+    for fid in c7_ids:
         stores.delete_junction_by_file(fid)
 
     # class 8 dead-KB junction rows: direct sqlite DELETE per dead KB id.
-    c8 = classes["dead_kb_junction_rows"]
     if c8.count:
         log.info("purge dead-KB junction rows: %d (sqlite DELETE; OWUI stopped)", c8.count)
-    for kb_id in set(c8.ids):
+    for kb_id in c8_ids:
         stores.delete_junction_by_knowledge(kb_id)
 
 
@@ -1231,7 +1344,9 @@ def main(argv=None):
     ap.add_argument("--show-names", action="store_true",
                     help="include filenames in stdout/JSON (default: ids-only)")
     ap.add_argument("--purge", action="store_true",
-                    help="consent to purge (safe classes by default; --maint adds maint classes)")
+                    help="consent to purge (safe class 3 by default; with --maint, maint "
+                         "classes 5b,7,8 ONLY -- the safe (OWUI-live) and maint "
+                         "(OWUI-stopped) tiers are mutually exclusive; run separately)")
     ap.add_argument("--maint", action="store_true",
                     help="maintenance window: purge classes 5b,7,8 (OWUI must be stopped)")
     ap.add_argument("--repair", action="store_true",
@@ -1370,6 +1485,12 @@ def main(argv=None):
             print("\nPurge manifest:")
             print("  purged collections: %d" % len(purge_manifest["purged_collections"]))
             print("  kb vector deletes:  %d" % len(purge_manifest["kb_vectors"]))
+            skipped = purge_manifest.get("skipped_toctou", [])
+            if skipped:
+                print("  skipped (TOCTOU):    %d" % len(skipped))
+            jb = purge_manifest.get("purged_junction_backup")
+            if jb:
+                print("  junction backup:    %s (%d rows)" % (jb["path"], jb["row_count"]))
             if export_dir:
                 print("  export: %s/manifest.json" % export_dir)
         if repair_manifest is not None:
