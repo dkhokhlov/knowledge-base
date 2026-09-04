@@ -268,18 +268,39 @@ kb-bm25-check: ## Release gate for patch 10 + patch 11: probe the ParadeDB pg_se
 	  PG_ENV="-e PGVECTOR_USER -e PGVECTOR_PASSWORD -e PGVECTOR_DB -e PGVECTOR_DB_URL"; \
 	  docker exec -i -e VECTOR_DB $$PG_ENV $$OWUI python3 - < scripts/kb_check.py --bm25-gate
 
-kb-status: ## Show one KB's index status via api-gateway GET /status (completed/pending/processing/failed), pretty JSON. KB=<name> selects the KB (the top ./root/<name>/ subdir); file counts are KB-wide. The KB is resolved BY NAME; no GDRIVE_KB_ID.
+kb-status: ## Show index/sync status via api-gateway GET /status as a JSON ARRAY (one element per KB: dir, kb_id, source_count, indexed_count, pending/processing/failed, started_at, runtime) WITHOUT the per-file listings. KB=<name> selects one KB; no KB= shows EVERY top-level non-dot subdir of ./root/. FILES=1 keeps the indexed_files/pending_files/failed_files listings in each element. The KB is resolved BY NAME; no GDRIVE_KB_ID.
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:?KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}; \
 	  [ -n "$${KB_API_KEY:-}" ] || { echo "MISSING KB_API_KEY in the shell env (source ~/.api_keys, or run: make users-create EMAIL=...)"; exit 1; }; \
-	  KB="$${KB:-}"; [ -n "$$KB" ] || { echo "FAIL  KB not set — use: make kb-status KB=<name> (the top ./root/ subdir)"; exit 1; }; \
-	  KID=$$(KB="$$KB" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null) \
-	    || { echo "FAIL  could not resolve KB '$$KB' by name (run: make kb-bootstrap KB=$$KB)"; exit 1; }; \
-	  q="kb_id=$$KID&dir=$$KB"; \
-	  curl -sS "$$H/status?$$q&json=1" \
-	    -H "Authorization: Bearer $$KB_API_KEY" \
-	    | python3 -m json.tool --indent 2
+	  KB="$${KB:-}"; \
+	  if [ -n "$$KB" ]; then \
+	    _list=$$(mktemp); printf '%s\n' "$$KB" > "$$_list"; \
+	  else \
+	    _list=$$(mktemp); \
+	    find root -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort > "$$_list"; \
+	    if [ ! -s "$$_list" ]; then \
+	      rm -f "$$_list"; \
+	      echo "FAIL  no top-level non-dot subdirs under ./root/ (run: make kb-bootstrap)" >&2; exit 1; \
+	    fi; \
+	  fi; \
+	  _kid() { KB="$$1" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null \
+	    || { echo "FAIL  could not resolve KB '$$1' by name (run: make kb-bootstrap KB=$$1)" >&2; return 1; }; }; \
+	  _out=$$(mktemp); rc=0; \
+	  while IFS= read -r name; do \
+	    [ -n "$$name" ] || continue; \
+	    KID=$$(_kid "$$name") || { rc=1; continue; }; \
+	    body=$$(curl -sS "$$H/status?kb_id=$$KID&dir=$$name&json=1" -H "Authorization: Bearer $$KB_API_KEY"); \
+	    if [ -n "$${FILES:-}" ]; then \
+	      printf '%s\n' "$$body" >> "$$_out"; \
+	    else \
+	      printf '%s' "$$body" | python3 -c 'import sys,json; o=json.load(sys.stdin); [o.pop(k) for k in ("indexed_files","pending_files","failed_files") if k in o]; print(json.dumps(o,ensure_ascii=False))' >> "$$_out"; \
+	    fi; \
+	  done < "$$_list"; \
+	  rm -f "$$_list"; \
+	  if [ $$rc -ne 0 ]; then rm -f "$$_out"; exit 1; fi; \
+	  python3 -c 'import sys,json; print(json.dumps([json.loads(l) for l in sys.stdin if l.strip()], indent=2, ensure_ascii=False))' < "$$_out"; \
+	  rm -f "$$_out"
 
 kb-finalize: ## Finalize a drain: rebuild the pgvector ivfflat vector index so freshly-embedded vectors become queryable (pgvector is the only supported backend; fails loud on any other VECTOR_DB). KB=<name> selects the drain to wait on with --wait; no KB= waits on EVERY top-level non-dot subdir of ./root/. Run AFTER the drain is terminal (or use kb-index-finalize to dispatch + wait). REINDEX is INSTANCE-WIDE on the shared document_chunk table, so this first requires EVERY KB under ./root/ terminal + acquires a host lock (serializes concurrent finalizes). Logs the REINDEX duration. Named "finalize" not "reindex": on a fresh drain the vectors were never queryable (ivfflat folds post-build rows in only on REINDEX), and to avoid collision with the gateway reindex_all (POST /index?reindex_all=1 RE-PROCESSES files — a different op at a different layer).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
