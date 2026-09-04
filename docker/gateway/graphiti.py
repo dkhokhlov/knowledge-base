@@ -5,8 +5,9 @@ container-internal `graph_internal` network only. Replaces the MCP transport:
 MCP could not be safely exposed (security), and its bundled LLM factory
 hardcodes OpenAIClient (OpenAI Responses API), which is incompatible with
 Ollama (extraction silently stored nothing). The REST server is started by
-graphiti/bootstrap.py, which injects OpenAIGenericClient (Chat Completions) +
-OpenAIEmbedder(nomic-embed-text, 768) so Ollama extraction works.
+docker/graphiti/bootstrap.py (baked into the kb-graphiti overlay image), which
+injects OpenAIGenericClient (Chat Completions) + OpenAIEmbedder(nomic-embed-text,
+768) so Ollama extraction works.
 
 Endpoint map (zepai/graphiti:0.22.0):
   add_memory      POST   /messages                  (202, async extraction)

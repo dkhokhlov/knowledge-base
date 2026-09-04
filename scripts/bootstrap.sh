@@ -115,6 +115,14 @@ ensure_secret .env.local OPENWEBUI_FIRST_PASSWORD
 ensure_value .env HOST_UID "$(id -u)"
 ensure_value .env HOST_GID "$(id -g)"
 
+# Caddy public-edge image tag (the kb-proxy overlay, docker/caddy/). Backfill
+# for already-provisioned stacks: .env.template gains the key on a fresh
+# scaffold, but an existing .env predating the bake does not, and compose
+# interpolation (${CADDY_IMAGE_TAG:?...}) would fail. ensure_value appends it if
+# absent (kept if present -- an operator pin override survives). clean-all wipes
+# .env so a fresh bootstrap re-scaffolds from .env.template.
+ensure_value .env CADDY_IMAGE_TAG 2.11.4-alpine
+
 # markitdown-ocr service token (SECRET -> .env.local). Generated only when
 # OCR_ENABLED=true (default; read from the .env bootstrap just created, or a
 # `make bootstrap OCR_ENABLED=<val>` override which wins). Kept if already set;

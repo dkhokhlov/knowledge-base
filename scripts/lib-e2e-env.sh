@@ -291,6 +291,19 @@ e2e_isolate() {
 # is honored per e2e_isolate's bootstrap.
 e2e_provision() {
   echo "==> make start (isolated project $COMPOSE_PROJECT_NAME, port $E2E_PORT)"
+  # Rebuild the fixed-name locally-built images BEFORE make start so a fresh iso
+  # clone does not reuse a stale image from a prior run (docker images are
+  # daemon-global, not per-clone; pull_policy: never + a present image -> make
+  # start would NOT rebuild). graphiti (docker/graphiti/bootstrap.py overlay) +
+  # proxy (docker/caddy/Caddyfile overlay) are fixed-name built images;
+  # postgres/openwebui/markitdown-ocr are already fixed-name. api-gateway is
+  # NOT rebuilt here: it has no image: field -> per-project name -> make start
+  # always builds it fresh. Source .env for OCR_ENABLED (markitdown-ocr gate).
+  set -a; . ./.env 2>/dev/null; set +a
+  docker compose build postgres openwebui graphiti proxy || return 1
+  if [ "${OCR_ENABLED:-true}" = "true" ]; then
+    docker compose build markitdown-ocr || return 1
+  fi
   make start || return 1
   local h="$E2E_KB_HOST" i=0
   until curl -sf "$h/health" >/dev/null 2>&1; do
@@ -369,9 +382,11 @@ e2e_provision_at_scale() {
   # uses current OCR code. postgres (kb-postgres: pg_search baked in; tag encodes
   # PG_SEARCH_VERSION) + openwebui (patch-10 BM25 FTS arm; tag encodes the
   # patch-suffix) are rebuilt so the at-scale run uses current code, not a stale
-  # image from a prior run.
+  # image from a prior run. graphiti (docker/graphiti/bootstrap.py overlay) +
+  # proxy (docker/caddy/Caddyfile overlay) are rebuilt for the same reason
+  # (fixed-name images, daemon-global -> stale across iso runs without this).
   docker compose build api-gateway || return 1
-  docker compose build postgres openwebui || return 1
+  docker compose build postgres openwebui graphiti proxy || return 1
   if [ "${OCR_ENABLED:-true}" = "true" ]; then
     docker compose build markitdown-ocr || return 1
   fi

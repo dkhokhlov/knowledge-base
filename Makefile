@@ -64,7 +64,7 @@ bootstrap: ## Create .env.local (generate WEBUI_SECRET_KEY) + ./data dirs
 preflight: ## Read-only checks: docker, secrets, Ollama, required models
 	@./scripts/preflight.sh
 
-pull: ## Pull all images
+pull: ## Pull the prebuilt images (neo4j; locally-built overlays skip -- pull_policy: never)
 	@$(COMPOSE) pull
 
 pull-models: ## Pull base LLM, create the ctx-baked variant (GRAPHITI_MODEL), pull embedder
@@ -239,11 +239,11 @@ kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit 
 	    echo "==> maintenance window: stopping $$OWUI (direct vector/SQLite writes)"; \
 	    docker stop $$OWUI >/dev/null; \
 	    trap 'echo "==> restarting $$OWUI"; docker start $$OWUI >/dev/null' EXIT; \
-	    docker run --rm --entrypoint /usr/local/bin/python3 $$NET \
+	    docker run --pull=never --rm --entrypoint /usr/local/bin/python3 $$NET \
 	      -v "$$(readlink -f "$${DATA_ROOT:-./data}")/openwebui:/app/backend/data" \
 	      -v "$(CURDIR)/scripts/kb_check.py:/app/kb_check.py:ro" \
 	      $$VENV $$PG_ENV \
-	      ghcr.io/dkhokhlov/open-webui:"$${OPENWEBUI_IMAGE_TAG:?OPENWEBUI_IMAGE_TAG required in .env}" \
+	      kb-open-webui:"$${OPENWEBUI_IMAGE_TAG:?OPENWEBUI_IMAGE_TAG required in .env}" \
 	      /app/kb_check.py $${KB:+--kb $$KB} $${JSON:+--json} $${SHOW_NAMES:+--show-names} \
 	        $${PURGE:+--purge} $${MAINT:+--maint} $${REPAIR:+--repair} $$ROOT_DIRS_ARG \
 	        $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
@@ -330,7 +330,7 @@ projects-bootstrap: ## One-time admin enable of workspace.knowledge + sharing.pu
 clean: ## Teardown: stop + remove containers + network. KEEPS ./data and .env.local.
 	@$(COMPOSE) down --remove-orphans
 
-clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + backup-and-remove .env + .env.local. Keeps graphiti/config.yaml, caddy/Caddyfile, and the ./root source mirror (./root/gdrive corpus + ./root/.kb-ignore).
+clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + backup-and-remove .env + .env.local. Keeps docker/graphiti/config.yaml, docker/caddy/Caddyfile, and the ./root source mirror (./root/gdrive corpus + ./root/.kb-ignore).
 	@$(COMPOSE) down --remove-orphans --volumes
 	@# Remove ./data as root via a throwaway container: OWUI (root) and Neo4j
 	@# (neo4j uid) write bind-mount files the host user cannot delete, so a host
@@ -344,7 +344,7 @@ clean-all: ## Full wipe: clean + DELETE ./data + ./.gdrive-backup + backup-and-r
 	  cp -p .env.local ".config-backup/$$TS/.env.local" 2>/dev/null || true; \
 	  rm -f .env .env.local
 	@rm -rf ./.gdrive-backup
-	@echo "Wiped containers, ./data, ./.gdrive-backup, .env, .env.local (backed up to ./.config-backup/<TS>). graphiti/config.yaml, caddy/Caddyfile, ./root source mirror preserved."
+	@echo "Wiped containers, ./data, ./.gdrive-backup, .env, .env.local (backed up to ./.config-backup/<TS>). docker/graphiti/config.yaml, docker/caddy/Caddyfile, ./root source mirror preserved."
 	@echo "Next: make provision  (.env is gone; compose needs it for every command)."
 
 clean-backup: ## Remove the retention trees (./.gdrive-backup + ./.config-backup). Non-destructive: does not touch the stack, ./data, .env, or .env.local.

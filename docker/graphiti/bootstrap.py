@@ -1,9 +1,11 @@
 """Bootstrap entrypoint for the zepai/graphiti REST server.
 
-Mounted into the container at /app/bootstrap.py and run as the command
-(`python /app/bootstrap.py`). It builds a fresh FastAPI app (own lifespan +
-shutdown close) that re-uses the image's routers, but overrides the Graphiti
-client dependency so extraction uses clients compatible with Ollama.
+Baked into the kb-graphiti overlay image at /app/bootstrap.py (COPY'd by
+docker/graphiti/Dockerfile onto the ghcr.io/dkhokhlov/graphiti-rest base) and
+run as the command (`python /app/bootstrap.py`). It builds a fresh FastAPI app
+(own lifespan + shutdown close) that re-uses the image's routers, but overrides
+the Graphiti client dependency so extraction uses clients compatible with
+Ollama.
 
 Why this exists (the memory stack was non-functional with Ollama):
   - The image's default `get_graphiti()` builds `ZepGraphiti` with no

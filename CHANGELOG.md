@@ -61,6 +61,33 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`graphiti` bootstrap + `caddy` Caddyfile baked into overlay images.** The two
+  lone bind-mount-only services are now thin overlay images under `docker/`, the
+  same `FROM <base> + COPY` pattern as `docker/open-webui`/`docker/markitdown`.
+  `graphiti/bootstrap.py` → `docker/graphiti/bootstrap.py` (baked onto
+  `ghcr.io/dkhokhlov/graphiti-rest` as `kb-graphiti:${GRAPHITI_IMAGE_TAG}`);
+  `caddy/Caddyfile` → `docker/caddy/Caddyfile` (baked onto
+  `caddy:${CADDY_IMAGE_TAG}` as `kb-proxy:${CADDY_IMAGE_TAG}`). The bind-mounts
+  are removed; the orphan `graphiti/` and `caddy/` root dirs are gone, so
+  `docker/` now holds every build context. Both services use
+  `image: <local-name>:${TAG}` + `build:` + `pull_policy: never` (the
+  `postgres`/`open-webui` precedent): the tag rides the `image:` name, so a base
+  bump forces a rebuild (an ARG-only form would not). Editing a baked file now
+  requires `docker compose build <svc>` before `make start` (silent stale-image
+  risk otherwise — same rule as the other built images). `caddy` loses its
+  `make pull` auto-refresh, so `CADDY_IMAGE_TAG` is pinned to a specific patch
+  (`2.11.4-alpine`, the version `caddy:2-alpine` resolves to today); a base bump
+  is an explicit tag edit. `CADDY_IMAGE_TAG` is backfilled into an existing
+  `.env` by `make bootstrap` (`ensure_value`).
+- **`open-webui` + `markitdown-ocr` local tags renamed to `kb-*`.** Their
+  `image:` values were `ghcr.io/dkhokhlov/...` names that imply a registry pull
+  which never happens (`pull_policy: never`; the overlays `FROM` the official
+  `open-webui`/`python:3.13` bases, not the `dkhokhlov` refs). Renamed to the
+  honest `kb-open-webui`/`kb-markitdown-ocr` form `postgres` already uses. Tag
+  values unchanged. The kb-check MAINT-mode `docker run` gains `--pull=never`
+  (the unqualified local name must not fall back to a third-party `docker.io`
+  image with prod data/creds mounted). `ghcr.io/dkhokhlov/graphiti-rest` is
+  unchanged — it is the live base the `kb-graphiti` overlay `FROM`s.
 - **`make kb-sync` / `make kb-index` semantic split (BREAKING).** `make kb-sync`
   is now SYNC-ONLY: it runs rclone to sync external sources into `./root/`
   (gdrive today) and does NOT index. `make kb-index` is INDEX-ONLY: it POSTs

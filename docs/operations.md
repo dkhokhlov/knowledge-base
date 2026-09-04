@@ -55,9 +55,11 @@ Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on 
   - [Docker Compose][docker-compose] loads them via `env_file`.
 - `KB_HOST` — the single public URL agents/clients point at (Caddy fronts OWUI at the root and the api-gateway under `/memory/*`, `POST /admin/users`, `/health`). **Mandatory** (no `localhost` fallback): `export KB_HOST=http://<host>:3000` in your shell env; `make bootstrap` persists it into `.env`. `KB_HOST_PORT` (the Caddy `:3000` host bind) is **derived from `KB_HOST`** by `make bootstrap` (compose cannot parse a URL, so it reads the port from `.env`); override `KB_HOST_PORT` only for the tunnel case (client URL port ≠ bind port, e.g. `KB_HOST=http://tunnel:443 KB_HOST_PORT=3000`). HTTPS or VPN for a remote host (the key is a bearer).
   - **Breaking change (clean-shell contexts):** `make health` and the helper scripts no longer fall back to `localhost:3000`. A shell without the exported `KB_HOST` (cron, recovery, a different user) fails loud. The operator already exports `KB_HOST` in `~/.bash_env` for the `/kb` skill; it is now required for every repo script too. This is intentional and documented, not a silent regression. Bootstrap's `.env`-fallback read softens clean-shell *re-bootstrap* (reuses the last persisted `KB_HOST`).
-- `graphiti/bootstrap.py` — mounted into the `graphiti` container and run as the command. The image's default `get_graphiti()` builds `Graphiti` with no `llm_client`, so the base default `OpenAIClient` (OpenAI Responses API) is used, which [Ollama][ollama] cannot satisfy — extraction silently stores nothing. The bootstrap overrides the FastAPI `get_graphiti` dependency to inject the stock **`OpenAIGenericClient`** (Chat Completions; `graphiti_core` >= 0.29 defaults to `json_schema` structured outputs, which Ollama enforces server-side) at `temperature=0` for deterministic extraction + `OpenAIEmbedder`([`nomic-embed-text`][nomic-embed-text], 768-dim), builds the vector index at 768 once at startup, and runs a robust `/messages` worker that logs + isolates per-episode failures. There is no env switch for the client; this injection is required. See `graphiti/bootstrap.py`.
-- `graphiti/config.yaml` — **unused.** Config for the retired `zepai/knowledge-graph-mcp` image; kept for reference, not mounted. The REST server reads its LLM/embedder config from env (set in `compose.yml`) + the bootstrap injection above.
-- `caddy/Caddyfile` — public edge; `reverse_proxy api-gateway:8010` (no token block). Safe to commit.
+- `docker/graphiti/bootstrap.py` — baked into the `kb-graphiti` overlay image (`docker/graphiti/Dockerfile` `COPY`s it onto the `ghcr.io/dkhokhlov/graphiti-rest` base) and run as the command. The image's default `get_graphiti()` builds `Graphiti` with no `llm_client`, so the base default `OpenAIClient` (OpenAI Responses API) is used, which [Ollama][ollama] cannot satisfy — extraction silently stores nothing. The bootstrap overrides the FastAPI `get_graphiti` dependency to inject the stock **`OpenAIGenericClient`** (Chat Completions; `graphiti_core` >= 0.29 defaults to `json_schema` structured outputs, which Ollama enforces server-side) at `temperature=0` for deterministic extraction + `OpenAIEmbedder`([`nomic-embed-text`][nomic-embed-text], 768-dim), builds the vector index at 768 once at startup, and runs a robust `/messages` worker that logs + isolates per-episode failures. There is no env switch for the client; this injection is required. See `docker/graphiti/bootstrap.py`.
+- `docker/graphiti/config.yaml` — **unused.** Config for the retired `zepai/knowledge-graph-mcp` image; kept for reference, not mounted and not `COPY`'d by the Dockerfile. The REST server reads its LLM/embedder config from env (set in `compose.yml`) + the bootstrap injection above.
+- `docker/caddy/Caddyfile` — public edge; `reverse_proxy api-gateway:8010` (no token block). Baked into the `kb-proxy` overlay image (`docker/caddy/Dockerfile` `COPY`s it onto the `caddy:${CADDY_IMAGE_TAG}` base). Safe to commit.
+
+  > **Editing a baked file requires a rebuild.** `bootstrap.py` and `Caddyfile` are now image contents, not bind-mounts. After editing either, run `docker compose build graphiti` (or `proxy`) before `make start` — `make start` alone does **not** rebuild a built image whose name is unchanged (silent stale-image risk; same rule already applies to `open-webui`/`markitdown`/`gateway`).
 
 ### Environment variables
 
@@ -67,7 +69,7 @@ Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on 
 |---|---|
 | `DATA_ROOT` | bind-mount source for state (`./data`) |
 | `OLLAMA_HOST` | Ollama URL (full; chat LLM + embeddings); shell env or `.env`. `localhost`/`127.0.0.1` allowed (translated to `host.docker.internal` in-container for graphiti/markitdown-ocr; `make config-rag` translates for the OWUI embedding DB) |
-| `OPENWEBUI_IMAGE_TAG` / `GRAPHITI_IMAGE_TAG` / `NEO4J_IMAGE_TAG` | pinned image tags (`GRAPHITI_IMAGE_TAG` = `ghcr.io/dkhokhlov/graphiti-rest` REST server; default `0.29.3`) |
+| `OPENWEBUI_IMAGE_TAG` / `GRAPHITI_IMAGE_TAG` / `NEO4J_IMAGE_TAG` / `CADDY_IMAGE_TAG` | pinned image tags. `GRAPHITI_IMAGE_TAG` = `ghcr.io/dkhokhlov/graphiti-rest` REST server (the base the `kb-graphiti` overlay `FROM`s; default `0.29.3`). `CADDY_IMAGE_TAG` = `caddy` base for the `kb-proxy` overlay (default `2.11.4-alpine`, pinned to a specific patch — `make pull` skips built images, so a floating tag would let the base drift without a rebuild; a base bump = edit this tag). |
 | `KB_HOST_PORT` | the Caddy `:3000` host bind — **derived from `KB_HOST`** by `make bootstrap` (persisted into `.env`; override only for the tunnel case — client URL port ≠ bind port) |
 | `KB_HOST` | the single public URL agents/clients point at — **mandatory** (shell-provided, persisted into `.env` by `make bootstrap`; commented in `.env.template`); HTTPS/VPN if non-local |
 | `NEO4J_USER` / `NEO4J_PASSWORD` / `NEO4J_DATABASE` | Neo4j auth + db (container-network only) |
@@ -189,8 +191,8 @@ The archive contains the full `./data` tree (OWUI `webui.db` + its `-wal`/`-shm`
 ### What the backup does NOT cover
 
 - [Ollama][ollama] and its pulled models (external; re-pull on the destination with `make pull-models`).
-- Docker images (re-pull with `make pull`, or rebuild built images).
-- `graphiti/config.yaml` and `caddy/Caddyfile` (tracked in git — they come with the repo clone).
+- Docker images (`make pull` re-pulls the prebuilt base `neo4j`; the locally-built overlays — `kb-graphiti`, `kb-proxy`, `kb-open-webui`, `kb-markitdown-ocr` — are rebuilt from their `docker/` contexts, not pulled).
+- `docker/graphiti/config.yaml` and `docker/caddy/Caddyfile` (tracked in git — they come with the repo clone).
 - The `./root/gdrive` mirror (re-derivable with `make kb-sync`; other `./root/<name>/` KB trees are operator-supplied — back them up off-host).
 
 ### Restore on another host
@@ -602,7 +604,7 @@ dependency is down.
 | `add --group G` returns `403` | only your own personal group is writable (no shared write groups) | omit `--group` to write to `user:<email>`; reads are how knowledge is shared |
 | `add` returns `200` but the fact never appears in `retrieve` | extraction failed or is still running — `add` is async (202) and each episode runs several LLM calls; a fact is searchable in ~9 s warm (~30 s cold, model load) | poll `/memory/retrieve` for the probe token for up to ~5 min; check `docker logs kb-graphiti` — the LLM must hit `OLLAMA_HOST/v1/chat/completions` (not `/v1/responses`, not `api.openai.com`); if it hits `api.openai.com` → `OPENAI_BASE_URL` is wrong; if `/v1/responses` → the bootstrap injection is missing/broken |
 | `add` returns `200`, episode is stored, but no fact ever appears; `docker logs kb-graphiti` shows `Expecting value: line 1 column 1 (char 0)` | `OLLAMA_MODEL_BASE` is a **reasoning model** (one with a thinking chain): its thinking exhausts the token budget, `content` is empty (`finish_reason=length`), and `json.loads('')` fails | set `OLLAMA_MODEL_BASE` to a **non-reasoning** model (`qwen2.5:14b`), `make pull-models && make restart`, re-add. Ollama `/v1/chat/completions` ignores `think=false`, so you cannot suppress reasoning that way |
-| `add` returns `200` but no fact; `docker logs kb-graphiti` shows `CypherTypeError ... Property values can only be of primitive types ... Map{summary -> Map{...}}` | the `OpenAIGenericClient` (`json_schema`) injection is not in effect (image bump / bootstrap edit), so the model runs without server-side schema enforcement and echoes the response schema as values; Neo4j rejects the nested MAP | confirm `graphiti/bootstrap.py` is mounted and `command: ["python","/app/bootstrap.py"]`; restart `graphiti`; the worker log should show extraction completing without the Cypher error |
+| `add` returns `200` but no fact; `docker logs kb-graphiti` shows `CypherTypeError ... Property values can only be of primitive types ... Map{summary -> Map{...}}` | the `OpenAIGenericClient` (`json_schema`) injection is not in effect (image bump / bootstrap edit), so the model runs without server-side schema enforcement and echoes the response schema as values; Neo4j rejects the nested MAP | confirm the image was rebuilt after the `bootstrap.py` edit — `docker exec kb-graphiti cat /app/bootstrap.py` should show the injection; `command: ["python","/app/bootstrap.py"]` is unchanged; restart `graphiti`; the worker log should show extraction completing without the Cypher error |
 | extraction is very slow (>5 min/episode); `ssh <ollama-host> nvidia-smi` shows the GPU idle and memory well under the model size | the model loads at the default 32k context (~53 GB for 14B) and spills to CPU; `num_ctx` is not baked into the model (or you are running the stock `qwen2.5:14b`, not the ctx variant) | run `make pull-models` (creates `GRAPHITI_MODEL` with `PARAMETER num_ctx` = `OLLAMA_MODEL_CONTEXT`), then `make restart`; `make preflight` verifies `num_ctx` |
 | `forget` / `delete-*` returns `403` | you do not own the target group and are not admin | use an admin `KB_API_KEY`, or operate on your own group |
 | `make users-create` returns `409` | the email already exists (deterministic; no second account) | use a different email, or delete the existing user first |
@@ -649,12 +651,12 @@ dependency is down.
 | `kb-index-finalize` | one-command pipeline: dispatch the KB async drain (`make kb-index` = POST `/index`), wait for it to terminate (poll GET `/status` to `pending+processing=0`, timeout `GDRIVE_TEST_WAIT` default 2400s per KB), then finalize (`REINDEX` ivfflat) — the "block until the KB is searchable" command. `KB=<name>` waits on one KB; no `KB=` waits on EVERY top-level non-dot subdir (matches `make kb-index`'s all-KB dispatch). Fails loud if the drain does not terminate (do not `REINDEX` while inserts are in flight — that races the live index). Same global-terminal + flock guard + pgvector-only caveat as `kb-finalize`. For gdrive run `make kb-sync` (rclone) first |
 | `shell-owui` / `shell-neo4j` / `shell-graphiti` / `shell-caddy` | exec a shell |
 | `clean` | `down --remove-orphans`; KEEPS `./data` and `.env.local` |
-| `clean-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + backup-and-delete `.env` + `.env.local` (dated backup under `./.config-backup/<TS>/`; preserves `graphiti/config.yaml`, `caddy/Caddyfile`, and the `./root` source mirror) |
+| `clean-all` | `down --volumes` + delete `./data` + delete `./.gdrive-backup/` + backup-and-delete `.env` + `.env.local` (dated backup under `./.config-backup/<TS>/`; preserves `docker/graphiti/config.yaml`, `docker/caddy/Caddyfile`, and the `./root` source mirror) |
 | `clean-backup` | remove the retention trees `./.gdrive-backup/` + `./.config-backup/` (non-destructive: does not touch the stack, `./data`, `.env`, or `.env.local`) |
 
 - `clean` preserves all state (clean recreate).
 - `clean-all` wipes data, the generated secret, the gdrive backup retention, and the live config (`.env` + `.env.local`, backed up first); a following bare `make provision` reprovisions from the `.env.template` default — pass `KB_DOMAIN=<d>` for a custom domain.
-- `clean-all` keeps `graphiti/config.yaml`, `caddy/Caddyfile`, and the `./root` source mirror.
+- `clean-all` keeps `docker/graphiti/config.yaml`, `docker/caddy/Caddyfile`, and the `./root` source mirror.
 - `clean-backup` removes `./.gdrive-backup/` + `./.config-backup/` (retention); it does not tear down the stack.
 
 ## Isolated end-to-end tests (the iso-fixture framework)
@@ -915,7 +917,7 @@ Notes:
   - Holds `webui.db` (user credential hashes), uploaded documents, and the [Neo4j][neo4j] graph.
   - Restrict file permissions.
   - When moving to RAID, ensure the RAID volume keeps restrictive permissions.
-- Keep image tags pinned (as in `.env`) and pull patches with `make pull`.
+- Keep image tags pinned (as in `.env`). `make pull` refreshes the prebuilt base `neo4j`; the locally-built overlays (`kb-graphiti`, `kb-proxy`, `kb-open-webui`, `kb-markitdown-ocr`) skip `make pull` (`pull_policy: never`). A base bump for a built image is an explicit operator action: edit the pinned tag in `.env` (e.g. `CADDY_IMAGE_TAG`) — the tag rides the `image:` name, so the change forces a rebuild on the next `make start` — then `docker compose build <svc> && make start`.
 
 [graphiti]: https://github.com/getzep/graphiti
 [open-webui]: https://github.com/open-webui/open-webui

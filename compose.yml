@@ -85,14 +85,20 @@ services:
       start_period: 30s
 
   graphiti:
-    # graphiti REST server (graph_service FastAPI app). The image's default
+    # graphiti REST server (graph_service FastAPI app). The base image's default
     # Graphiti client uses OpenAIClient (OpenAI Responses API), which Ollama
-    # cannot satisfy (extraction silently stores nothing). graphiti/bootstrap.py
-    # is mounted and run as the command; it rebuilds the app with a dependency
-    # override that injects OpenAIGenericClient (Chat Completions + json_schema
-    # structured outputs, the >= 0.29 default) + the nomic embedder @ 768, so
-    # Ollama extraction works. See graphiti/bootstrap.py.
-    image: ghcr.io/dkhokhlov/graphiti-rest:${GRAPHITI_IMAGE_TAG:?GRAPHITI_IMAGE_TAG required in .env}
+    # cannot satisfy (extraction silently stores nothing). docker/graphiti/bootstrap.py
+    # is baked into the overlay image (docker/graphiti/Dockerfile) and run as the
+    # command; it rebuilds the app with a dependency override that injects
+    # OpenAIGenericClient (Chat Completions + json_schema structured outputs, the
+    # >= 0.29 default) + the nomic embedder @ 768, so Ollama extraction works.
+    # See docker/graphiti/bootstrap.py.
+    image: kb-graphiti:${GRAPHITI_IMAGE_TAG:?GRAPHITI_IMAGE_TAG required in .env}
+    build:
+      context: docker/graphiti
+      args:
+        GRAPHITI_IMAGE_TAG: ${GRAPHITI_IMAGE_TAG:?GRAPHITI_IMAGE_TAG required in .env}
+    pull_policy: never
     container_name: kb-graphiti
     restart: unless-stopped
     networks: [graph_internal]
@@ -136,14 +142,14 @@ services:
       - GRAPHITI_TELEMETRY_ENABLED=false
       - LOG_LEVEL=${LOG_LEVEL:?LOG_LEVEL required in .env}
     volumes:
-      - ./graphiti/bootstrap.py:/app/bootstrap.py:ro
       - ./scripts/ollama-host.sh:/app/ollama-host.sh:ro
     # Translate OLLAMA_HOST localhost/127.0.0.1 -> host.docker.internal before
     # bootstrap.py reads OPENAI_BASE_URL. The image ENTRYPOINT is null, so this
     # shim is safe to set; it execs "$@" = the command below. See the shim header
-    # (scripts/ollama-host.sh). OWUI is NOT wrapped here: it persists
-    # rag.ollama.base_url to its DB on first boot, so `make config-rag` writes the
-    # translated value to that DB instead.
+    # (scripts/ollama-host.sh). bootstrap.py itself is baked into the image
+    # (docker/graphiti/Dockerfile), not mounted. OWUI is NOT wrapped here: it
+    # persists rag.ollama.base_url to its DB on first boot, so `make config-rag`
+    # writes the translated value to that DB instead.
     entrypoint: ["/app/ollama-host.sh"]
     command: ["python", "/app/bootstrap.py"]
     healthcheck:
@@ -156,7 +162,12 @@ services:
       start_period: 40s
 
   proxy:
-    image: caddy:2-alpine
+    image: kb-proxy:${CADDY_IMAGE_TAG:?CADDY_IMAGE_TAG required in .env}
+    build:
+      context: docker/caddy
+      args:
+        CADDY_IMAGE_TAG: ${CADDY_IMAGE_TAG:?CADDY_IMAGE_TAG required in .env}
+    pull_policy: never
     container_name: kb-proxy
     restart: unless-stopped
     networks: [edge, owui_net]
@@ -164,10 +175,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # caddy:2-alpine ships /usr/bin/caddy with the cap_net_bind_service file
-    # capability. cap_drop:ALL clears the bounding set, so the kernel refuses
-    # to exec the binary ("operation not permitted"). Add NET_BIND_SERVICE back
-    # so exec succeeds; it is unused (we bind :3000, an unprivileged port).
+    # The caddy:2.11.4-alpine base ships /usr/bin/caddy with the
+    # cap_net_bind_service file capability. cap_drop:ALL clears the bounding
+    # set, so the kernel refuses to exec the binary ("operation not permitted").
+    # Add NET_BIND_SERVICE back so exec succeeds; it is unused (we bind :3000,
+    # an unprivileged port).
     cap_add:
       - NET_BIND_SERVICE
     # service_started (not service_healthy) so the OWUI root stays reachable
@@ -183,9 +195,8 @@ services:
     # Caddy is the public edge (single URL = KB_HOST). /memory/*, POST
     # /admin/users, and /health -> api-gateway (edge net); everything else ->
     # openwebui:8080 (owui_net). The gateway authorizes via KB_API_KEY
-    # (validated against Open WebUI). See caddy/Caddyfile.
-    volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    # (validated against Open WebUI). The Caddyfile is baked into the image
+    # (docker/caddy/Dockerfile), not bind-mounted; see docker/caddy/Caddyfile.
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/health || exit 1"]
       interval: 15s
@@ -273,10 +284,10 @@ services:
     # Custom overlay image: the official Open WebUI image + build-time patches
     # (KB-sync re-upload churn, retrieval ranking, reranker gating). Built
     # locally from docker/open-webui/; see docker/open-webui/PATCH.md for the
-    # full patch list. The GHCR ref is a local tag (not pushed), so pull_policy:
-    # never — `make pull` skips this service; `docker compose build openwebui`
-    # (or `make start` on first run) builds it.
-    image: ghcr.io/dkhokhlov/open-webui:${OPENWEBUI_IMAGE_TAG:?OPENWEBUI_IMAGE_TAG required in .env}
+    # full patch list. Local overlay tag (kb-open-webui); not pushed, so
+    # pull_policy: never — `make pull` skips this service; `docker compose build
+    # openwebui` (or `make start` on first run) builds it.
+    image: kb-open-webui:${OPENWEBUI_IMAGE_TAG:?OPENWEBUI_IMAGE_TAG required in .env}
     build:
       context: docker/open-webui
     pull_policy: never
@@ -378,7 +389,7 @@ services:
     # documents. OWUI routes EVERY ingest to it when
     # CONTENT_EXTRACTION_ENGINE=external + URL + a non-empty API key are set in
     # the OWUI DB (`make config-ocr`). See docker/markitdown/oursvc.py + the plan.
-    image: ghcr.io/dkhokhlov/markitdown-ocr:${MARKITDOWN_OCR_IMAGE_TAG:?MARKITDOWN_OCR_IMAGE_TAG required in .env}
+    image: kb-markitdown-ocr:${MARKITDOWN_OCR_IMAGE_TAG:?MARKITDOWN_OCR_IMAGE_TAG required in .env}
     build:
       context: ./docker/markitdown
     pull_policy: never
