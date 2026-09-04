@@ -543,6 +543,12 @@ def classify(stores, kb=None, root_dirs=None):
 
     all_file_ids = set(all_files)
     all_junction_file_ids = set(j.file_id for j in all_junction)
+    # Per-KB junction membership, built from the GLOBAL junction (all_junction,
+    # not the scoped kb_junction) so a cross-KB leak is detected regardless of
+    # a --kb scope (a file linked to K2 but leaked into K1 is flagged in K1).
+    kb_junction_file_ids_by_kb = {}
+    for j in all_junction:
+        kb_junction_file_ids_by_kb.setdefault(j.knowledge_id, set()).add(j.file_id)
     live_kb_ids = set(kb_ids)
 
     # scope: KB-tagged classes use kb_files/kb_junction; classes 3/12 stay global
@@ -596,26 +602,38 @@ def classify(stores, kb=None, root_dirs=None):
     classes["missing_file_collections"] = ClassResult(c4_ids, TIER_ADVISORY)
 
     # 5. orphan KB-collection vectors: KB collections enumerated strictly from
-    #    the knowledge table (excludes knowledge-bases). A vector is flagged only
-    #    if its metadata has a file_id key AND that file_id is not in the (global)
-    #    junction. 5a = file_id has a DB row (ghost; class 1 handles the purge),
-    #    5b = file_id has no DB row (leaked KB vectors; maint purge).
+    #    the knowledge table (excludes knowledge-bases). A vector is flagged when
+    #    its metadata has a file_id key. 5a = file_id has a DB row but is not
+    #    linked to THIS kb (ghost link; per-KB membership, not the global junction,
+    #    so a cross-KB leak -- a file linked to K2 but leaked into K1 -- is caught;
+    #    5a is report-only, never purged). 5b = file_id has no DB row (leaked KB
+    #    vectors; maint purge), flagged regardless of any junction row (a junction
+    #    row for a gone file is a class-7 orphan, not a mask -- was: the global
+    #    `fid in all_junction_file_ids` test masked same-KB 5b when the fid also
+    #    had a class-7 orphan junction row, so a 2nd MAINT pass was needed). Per-
+    #    file dedup via `seen` (was: one c5_ids entry per chunk -- a 312-chunk file
+    #    yielded 312 entries + 311 self-inflicted zero-deletes, corrupting the
+    #    zero-delete manifest guard).
     c5_ids = []
     c5a = c5b = 0
-    leaked_pairs = []  # (kb_id, file_id) for maint purge
+    leaked_pairs = []  # (kb_id, file_id) for maint purge, deduped per file
     for kb_id in scan_kb_ids:
         if kb_id not in colls:
             continue  # live KB but no vector collection
+        seen = set()  # per-file dedup within this kb collection
         for md in stores.collection_metadatas(kb_id):
             fid = md.get("file_id") if isinstance(md, dict) else None
-            if not fid or fid in all_junction_file_ids:
+            if not fid or fid in seen:
                 continue  # require the file_id key (excludes knowledge-bases rows)
-            c5_ids.append(fid)
+            seen.add(fid)
             if fid in all_file_ids:
+                if fid in kb_junction_file_ids_by_kb.get(kb_id, ()):
+                    continue  # linked to this kb
                 c5a += 1
             else:
                 c5b += 1
                 leaked_pairs.append((kb_id, fid))
+            c5_ids.append(fid)
     classes["orphan_kb_vectors"] = ClassResult(
         c5_ids, TIER_MAINT, {"ghost_link": c5a, "leaked": c5b,
                               "leaked_pairs": leaked_pairs})
@@ -684,15 +702,24 @@ def classify(stores, kb=None, root_dirs=None):
     classes["non_completed_leftovers"] = ClassResult(
         c9_ids, TIER_ADVISORY, {"stuck_processing_linked": c9_stuck})
 
-    # 10. idempotency-key duplicates: (knowledge_id, directory_id, filename, hash) >1.
+    # 10. idempotency-key duplicates: groups on the idempotency IDENTITY
+    #    (knowledge_id, directory_id, filename) -- the match key in
+    #    apply_upload_idempotency.py. file_hash only chooses reuse-vs-reclaim, so
+    #    a 4-tuple key (with any hash) MISSES the residue of a failed reclaim (two
+    #    rows, same name/KB/dir, different file_hash). The 3-tuple catches it; the
+    #    differing file_hash values are recorded in detail.
     groups = {}
     for fid, fr in kb_files.items():
         if not fr.knowledge_id:
             continue
-        key = (fr.knowledge_id, fr.directory_id or "", fr.filename, fr.hash or "")
+        key = (fr.knowledge_id, fr.directory_id or "", fr.filename)
         groups.setdefault(key, []).append(fid)
     c10_ids = [fid for fids in groups.values() if len(fids) > 1 for fid in fids]
-    classes["idempotency_duplicates"] = ClassResult(c10_ids, TIER_ADVISORY)
+    c10_detail = [{"key": list(k), "file_ids": fids,
+                   "file_hashes": [kb_files[f].file_hash for f in fids]}
+                  for k, fids in groups.items() if len(fids) > 1]
+    classes["idempotency_duplicates"] = ClassResult(
+        c10_ids, TIER_ADVISORY, {"dup_groups": c10_detail})
 
     # 11. stale root KBs: a source=root KB whose ./root/<path>/ dir is gone. The
     # source + path attributes live in the KB description kv (parsed by
@@ -1001,8 +1028,12 @@ def repair(stores, classes):
             manifest["skipped"].append({"id": fid, "reason": "no content (extraction not done)"})
             continue
         updated_at = stores.file_updated_at(fid)
-        age = (now - updated_at) if updated_at is not None else None
-        if age is not None and age < REPAIR_STALE_SECS:
+        if updated_at is None:
+            manifest["skipped"].append(
+                {"id": fid, "reason": "updated_at missing (cannot prove stale)"})
+            continue
+        age = now - updated_at
+        if age < REPAIR_STALE_SECS:
             manifest["skipped"].append(
                 {"id": fid, "reason": "not stale (age %ds < %ds)" % (age, REPAIR_STALE_SECS)})
             continue
@@ -1010,7 +1041,7 @@ def repair(stores, classes):
             log.info(
                 "repair: set status=completed for %s (was processing; linked, "
                 "%d vectors, content %d chars, age %ss)",
-                fid, item["vectors"], len(content), age if age is not None else -1)
+                fid, item["vectors"], len(content), age)
             manifest["repaired"].append({"id": fid, "filename": fr.filename})
         else:
             manifest["skipped"].append({"id": fid, "reason": "row vanished"})

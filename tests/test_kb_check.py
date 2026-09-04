@@ -245,6 +245,78 @@ class TestClassify(unittest.TestCase):
         # g1 (in file table) + LEAK1 (not in file table) = 2 flagged.
         self.assertEqual(c["orphan_kb_vectors"].count, 2)
 
+    def test_class5_dedups_per_file(self):
+        """A leaked file with N chunk metadatas counts ONCE (per-file, not
+        per-chunk). Was: N c5_ids entries + N leaked_pairs -> N delete calls
+        (no dedup), corrupting the zero-delete manifest guard."""
+        fix = _build_fixture()
+        fix["coll_meta"]["kb-1"] = [{"file_id": "LEAK1"}] * 3  # 3 chunks, no file row
+        stores = _make_stores(fix, self.tmp)
+        c = kc.classify(stores)
+        self.assertEqual(c["orphan_kb_vectors"].count, 1)        # was 3
+        self.assertEqual(c["orphan_kb_vectors"].detail["leaked"], 1)
+        self.assertEqual(c["orphan_kb_vectors"].detail["leaked_pairs"],
+                         [("kb-1", "LEAK1")])
+
+    def test_class5_per_kb_membership(self):
+        """5a is per-KB: a file linked to kb-2 but with a stray vector in kb-1 is
+        flagged in kb-1 (cross-KB leak). The old GLOBAL junction test missed it
+        (the file was linked somewhere -> skipped)."""
+        files = {"f-cross": _fr("f-cross", kb="kb-1", status="completed")}
+        junction = [kc.JunctionRow("jc", "kb-2", "f-cross", "d1")]  # linked to kb-2
+        kb_ids = {"kb-1": "KB One", "kb-2": "KB Two"}
+        stores = FakeStores(
+            self.tmp, files=files, junction=junction, kb_ids=kb_ids,
+            dir_ids={"d1"},
+            colls={"file-f-cross": "x", "kb-1": "z", "kb-2": "w"},
+            coll_meta={"kb-1": [{"file_id": "f-cross"}],   # stray vector in kb-1
+                       "kb-2": [{"file_id": "f-cross"}]},  # linked in kb-2
+            coll_docs={})
+        c = kc.classify(stores)
+        # f-cross has a file row, not linked to kb-1 -> 5a (ghost_link) in kb-1.
+        self.assertIn("f-cross", c["orphan_kb_vectors"].ids)
+        self.assertEqual(c["orphan_kb_vectors"].detail["ghost_link"], 1)
+        self.assertEqual(c["orphan_kb_vectors"].detail["leaked"], 0)
+
+    def test_class5b_unmasked_by_junction(self):
+        """5b (no file row) is flagged regardless of a junction row. A fid with no
+        file row, in kb-1's junction (class 7) AND kb-1's vectors -> 5b in ONE
+        pass. Was: `fid in all_junction_file_ids` masked same-KB 5b -> needed a
+        2nd MAINT pass after class 7 cleared the junction row."""
+        fix = _build_fixture()
+        # fX is in kb-1's junction (jx) but has no file row; add it to kb-1 vectors.
+        fix["coll_meta"]["kb-1"] = list(fix["coll_meta"]["kb-1"]) + [{"file_id": "fX"}]
+        stores = _make_stores(fix, self.tmp)
+        c = kc.classify(stores)
+        self.assertIn("fX", c["orphan_kb_vectors"].ids)
+        self.assertIn(("kb-1", "fX"),
+                      c["orphan_kb_vectors"].detail["leaked_pairs"])
+        self.assertIn("fX", c["orphan_junction_rows"].ids)  # also class 7
+
+    def test_class10_groups_on_identity_3tuple(self):
+        """Class 10 groups on the idempotency IDENTITY (kb, dir, filename), not a
+        4-tuple with a hash. Two rows same name/KB/dir, DIFFERENT file_hash (the
+        failed-reclaim residue) -> detected. A 4-tuple (with any hash) missed it."""
+        def _fh(fid, fhash, h):
+            return kc.FileRow(id=fid, filename="report.pdf", knowledge_id="kb-1",
+                              directory_id="d1", file_hash=fhash,
+                              status="completed", hash=h)
+        files = {"dup-a": _fh("dup-a", "hashA", "HA"),
+                 "dup-b": _fh("dup-b", "hashB", "HB")}
+        junction = [kc.JunctionRow("ja", "kb-1", "dup-a", "d1"),
+                    kc.JunctionRow("jb", "kb-1", "dup-b", "d1")]
+        stores = FakeStores(
+            self.tmp, files=files, junction=junction, kb_ids={"kb-1": "KB One"},
+            dir_ids={"d1"},
+            colls={"file-dup-a": "x", "file-dup-b": "y", "kb-1": "z"},
+            coll_meta={"kb-1": [{"file_id": "dup-a"}, {"file_id": "dup-b"}]},
+            coll_docs={})
+        c = kc.classify(stores)
+        self.assertEqual(c["idempotency_duplicates"].count, 2)
+        dup = c["idempotency_duplicates"].detail["dup_groups"]
+        self.assertEqual(len(dup), 1)
+        self.assertEqual(sorted(dup[0]["file_hashes"]), ["hashA", "hashB"])
+
     def test_class7_subtracted_before_class6(self):
         """Blocker 7: a junction row whose file_id is not in the file table is
         class 7, not class 6 (even though it also has 0 vectors)."""
@@ -648,6 +720,21 @@ class TestRepair(unittest.TestCase):
         manifest = kc.repair(s, c)
         self.assertEqual(manifest["repaired"], [])
         self.assertIn("not stale", manifest["skipped"][0]["reason"])
+
+    def test_gate_skips_missing_updated_at(self):
+        # updated_at missing (row vanished, or never set) -> cannot prove stale;
+        # skip rather than flip a file of unknown age. Was: age=None fell through
+        # the `if age is not None and age < STALE` guard -> repaired without the
+        # staleness gate.
+        s = self._stuck_stores(age=None)   # updated_at={} -> None for stuck1
+        c = kc.classify(s)
+        self.assertEqual(
+            [x["id"] for x in c["non_completed_leftovers"].detail["stuck_processing_linked"]],
+            ["stuck1"])
+        manifest = kc.repair(s, c)
+        self.assertEqual(manifest["repaired"], [])
+        self.assertEqual(manifest["skipped"][0]["id"], "stuck1")
+        self.assertIn("updated_at missing", manifest["skipped"][0]["reason"])
 
     def test_advised_repair_command(self):
         s = self._stuck_stores()
