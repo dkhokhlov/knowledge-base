@@ -4,8 +4,8 @@
 set -u
 
 # Repo root is one level above tests/.
-KB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$KB_ROOT"
+KB_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$KB_REPO_ROOT"
 
 # Color output only when stdout is a terminal.
 if [ -t 1 ]; then

@@ -5,8 +5,8 @@
 # sliceability (base[si:si+len]==chunk), span/page correctness, coalescing,
 # distinct offsets, and content fidelity.
 #
-# Fixtures: COMMITTED (tracked in git) under root/.tests/chunkq/, produced
-# by tests/fixtures_chunkq_gen.py (rerun it with --out root/.tests/chunkq
+# Fixtures: COMMITTED (tracked in git) under root_tests/chunkq/, produced
+# by tests/fixtures_chunkq_gen.py (rerun it with --out root_tests/chunkq
 # to regenerate). The test re-derives only the manifest oracle via
 # --manifest-only; it writes no file. Every section carries a
 # unique marker (chunkq-<type>-s<N>), so the audit can find its chunks
@@ -15,11 +15,12 @@
 # when ENABLE_RAG_HYBRID_SEARCH=false in the config, and dense ranking over
 # near-identical filler bodies is noise -- never a chunking oracle).
 #
-# Pipeline mirrors test_11: index root/.tests/ (a dot-dir the generic walk
-# skips) into a throwaway temp KB via POST /index?dir=.tests, poll the
-# real async drain via GET /status, then audit. The committed fixture files
-# (fixture-*, chunkq-*) and the Google-native trio (google_native.{docx,xlsx,
-# pptx}, when committed) ride along and get the universal checks too.
+# Pipeline mirrors test_11: index root_tests/chunkq/ (a separate tracked fixture
+# tree) into a throwaway KB named "chunkq" (name == subdir) via
+# POST /index?dir=chunkq, poll the real async drain via GET /status, then audit.
+# The committed fixture files (chunkq-*) and the Google-native trio
+# (google_native.{docx,xlsx,pptx}, when committed) ride along and get the
+# universal checks too.
 #
 # OCR gate: OCR_ENABLED=true (default) -> all 10 types audited. Off -> only
 # the text types (txt,md,json,log,tex) are audited (the binary types need the
@@ -36,7 +37,7 @@ require_stack_up
 O="$(kb_host)"
 ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
 GEN="tests/fixtures_chunkq_gen.py"
-OUTDIR="root/.tests/chunkq"
+OUTDIR="${KB_ROOT:-root}/chunkq"
 # The e2e-iso wrapper forwards only GDRIVE_TEST_WAIT (2400s) to the inner
 # `make test`; fall back to it so the cold-stack budget reaches this test.
 CHUNKQ_WAIT="${CHUNKQ_WAIT:-${GDRIVE_TEST_WAIT:-300}}"
@@ -56,7 +57,7 @@ fi
 # yet); 1-2/3 -> broken commit, hard fail; 3/3 -> smoke audit.
 gn_count=0
 for f in google_native.docx google_native.xlsx google_native.pptx; do
-  [ -f "root/.tests/$f" ] && gn_count=$((gn_count + 1))
+  [ -f "${KB_ROOT:-root}/chunkq/$f" ] && gn_count=$((gn_count + 1))
 done
 GOOGLE_ON=0
 if [ "$gn_count" -eq 3 ]; then
@@ -130,33 +131,26 @@ if [ ! -s "$MANIFEST" ] || [ "$(python3 -c 'import sys,json;print(len(json.load(
 fi
 pass "committed fixture set present: $(python3 -c 'import sys,json;print(",".join(sorted(json.load(open(sys.argv[1]))["files"])))' "$MANIFEST")"
 
-# --- source count (all allowlisted files under .tests) -----------------------
+# --- source count (all allowlisted files under root_tests/chunkq) -------------
 # Exclude .meta/.meta.json sidecars: the gateway's _entry_for skips them by
 # name (app.py), so they are never indexed. src_count must match what the drain
 # can account, not what the allowlist regex alone matches (.meta.json ends in
 # .json, so the regex alone would over-count sidecars the gateway drops).
-src_count=$(find root/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" \
+src_count=$(find "${KB_ROOT:-root}/chunkq" -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" \
   ! -name '*.meta' ! -name '*.meta.json' 2>/dev/null | wc -l)
 
-# --- create temp KB + grant '*' read ------------------------------------------
-section "create temp chunk-quality KB"
-KB_ID=$(curl -s -X POST "$O/api/v1/knowledge/create" "${ADM[@]}" -H 'Content-Type: application/json' \
-  -d '{"name":"chunkq-quality-test","description":"integration test: chunk-quality fixture audit"}' \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
-[ -n "$KB_ID" ] && pass "KB id: $KB_ID" || { fail "KB create failed"; finish; exit 1; }
+# --- bootstrap KB chunkq (find-or-create + grant '*' read) --------------------
+# Regular flow: KB name == subdir (root_tests/chunkq/). kb-bootstrap.sh is
+# find-or-create (idempotent on a re-run) + grants user:* read so the agent
+# (user) key can search it. Prints the kb_id on stdout (final line).
+section "bootstrap KB chunkq (find-or-create + grant)"
+KB_ID=$(KB=chunkq ./scripts/kb-bootstrap.sh 2>/dev/null | tail -1)
+[ -n "$KB_ID" ] && pass "KB id: $KB_ID" || { fail "kb-bootstrap KB=chunkq failed"; finish; exit 1; }
 
-grant=$(curl -s -X POST "$O/api/v1/knowledge/${KB_ID}/access/update" "${ADM[@]}" -H 'Content-Type: application/json' \
-  -d "{\"access_grants\":[{\"resource_type\":\"knowledge\",\"resource_id\":\"${KB_ID}\",\"principal_type\":\"user\",\"principal_id\":\"*\",\"permission\":\"read\"}]}")
-if printf '%s' "$grant" | python3 -c 'import sys,json;d=json.load(sys.stdin);gs=d.get("access_grants") or [];sys.exit(0 if any(g.get("principal_id")=="*" and g.get("permission")=="read" for g in gs) else 1)' 2>/dev/null; then
-  pass "granted '*' read on temp KB"
-else
-  fail "grant '*' read failed: $(printf '%s' "$grant" | head -c 160)"; finish; exit 1
-fi
-
-# --- POST /index (admin): reconcile root/.tests into the temp KB (dir=.tests) -
-section "POST /index (api-gateway, dir=.tests)"
+# --- POST /index (admin): reconcile root_tests/chunkq into the KB (dir=chunkq) -
+section "POST /index (api-gateway, dir=chunkq)"
 idx_resp=$(curl -sS --max-time 1200 -X POST \
-  "$O/index?dir=.tests&kb_id=${KB_ID}" \
+  "$O/index?dir=chunkq&kb_id=${KB_ID}" \
   "${ADM[@]}" -H 'Content-Type: application/json' -d '{}' 2>&1)
 read -r added modified deleted unmodified retried errn < <(printf '%s' "$idx_resp" | python3 -c '
 import sys, json
@@ -187,11 +181,11 @@ for e in (d.get("errors") or [])[:20]:
 fi
 
 # --- poll GET /status until the drain reaches a terminal state ---------------
-section "poll GET /status (real drain, kb=<KB_ID>)"
+section "poll GET /status (real drain, kb=chunkq)"
 deadline=$(( $(date +%s) + CHUNKQ_WAIT ))
 completed=0; pending=0; processing=0; failed=0; status_json=""
 while :; do
-  status_json=$(curl -sS "$O/status?kb=${KB_ID}&json=1" "${ADM[@]}" 2>/dev/null || true)
+  status_json=$(curl -sS "$O/status?kb=chunkq&json=1" "${ADM[@]}" 2>/dev/null || true)
   read -r completed pending processing failed < <(printf '%s' "$status_json" | python3 -c '
 import sys, json
 try:

@@ -131,7 +131,7 @@ PY
 # (_e2e_free_port, skip 3000 + 3010) when the caller passes none; an explicit port
 # (TEST08_PORT / KBCHECK_PORT / E2E_PORT) overrides and owns its collision risk.
 e2e_isolate() {
-  local name="${1:-e2e}" port="${2:-}" ocr="${3:-}"
+  local name="${1:-e2e}" port="${2:-}" ocr="${3:-}" src_root="${4:-root}"
   [ -n "$port" ] || port="$(_e2e_free_port)" || return 1
   local kb_host="http://localhost:$port"
   local parent="$E2E_SRC/.test-env"
@@ -184,7 +184,12 @@ e2e_isolate() {
   # unset KB_HOST_PORT drops the live .env value (3000) an operator shell-sources;
   # a leak makes bootstrap's explicit-tunable-wins bind the live port, clashing
   # with the live kb-proxy -- the clone must re-derive KB_HOST_PORT from KB_HOST.
-  unset BASH_ENV KB_HOST KB_API_KEY KB_HOST_PORT
+  unset BASH_ENV KB_HOST KB_API_KEY KB_HOST_PORT KB_ROOT
+  # KB_ROOT: the host-side source root the enumerators read (Makefile kb-check/
+  # kb-status, kb-finalize, kb-index, kb-bootstrap). Mirrors the container volume
+  # override below (api-gateway binds ./$src_root at /kb-source). Default root =
+  # live stack + at-scale; root_tests = the iso fixture tree (at-scale=False).
+  export KB_ROOT="$src_root"
 
   # The stamped clone is unique per run (above), so a leftover clone from a
   # prior run does NOT block this one -- it lives at a different stamp. A prior
@@ -233,6 +238,14 @@ e2e_isolate() {
     echo "services:"
     for s in $svcs; do
       printf '  %s:\n    container_name: kb-%s-%s-%s\n' "$s" "$name" "$stamp" "$s"
+      # api-gateway: override the base ./root:/kb-source:ro bind with the iso
+      # source root (./root_tests for at-scale=False; ./root for at-scale=True).
+      # Compose dedupes by container target, so the override source wins (exactly
+      # one /kb-source bind, no duplicate). The miss safety-net grep below matches
+      # service-decl lines only (2-space indent), not this 4-space volumes block.
+      if [ "$s" = "api-gateway" ]; then
+        printf '    volumes:\n      - ./%s:/kb-source:ro\n' "$src_root"
+      fi
     done
   } > "$override"
 

@@ -64,7 +64,8 @@ AK = os.environ["OPENWEBUI_ADMIN_API_KEY"]
 RESOLVE = os.environ.get("RESOLVE") == "1"
 NAME = os.environ.get("KB", "").strip()
 import os as _os
-ROOT = _os.path.join(_os.getcwd(), "root")
+_SRC_ROOT = _os.environ.get("KB_ROOT", "root")
+ROOT = _os.path.join(_os.getcwd(), _SRC_ROOT)
 # Short host (matches _short_host() in kb.py: platform.node().split(".")[0]).
 # Used in the KB description kv so `kb kbs` can surface where a root KB lives.
 HOST = socket.gethostname().split(".")[0]
@@ -138,7 +139,7 @@ else:
     if RESOLVE:
         sys.exit("FAIL  --resolve requires KB=<name>")
     if not _os.path.isdir(ROOT):
-        sys.exit("FAIL  ./root not found (create ./root/<name>/)")
+        sys.exit("FAIL  %s not found (create %s/<name>/)" % (_SRC_ROOT, _SRC_ROOT))
     names = sorted(d for d in _os.listdir(ROOT)
                    if not d.startswith(".") and _os.path.isdir(_os.path.join(ROOT, d)))
     if not names:

@@ -70,7 +70,7 @@ def run_sh():
 _ISO_VARS = (
     "E2E_NAME", "E2E_PORT", "E2E_CLONE", "E2E_KB_HOST", "E2E_STAMP",
     "COMPOSE_PROJECT_NAME", "COMPOSE_FILE", "OWUI_CONTAINER",
-    "MARKITDOWN_CONTAINER", "POSTGRES_CONTAINER", "KB_HOST", "OLLAMA_HOST",
+    "MARKITDOWN_CONTAINER", "POSTGRES_CONTAINER", "KB_HOST", "KB_ROOT", "OLLAMA_HOST",
 )
 
 # Bash for the isolate step (call A). Progress streams to stderr (live); stdout
@@ -80,11 +80,11 @@ _ISO_VARS = (
 # internally, so the operator's profile does not reach the clone bootstrap.
 _ISO_SETUP_BASH = r'''
 _envf="$(mktemp)"
-{ . scripts/lib-e2e-env.sh; e2e_resolve_ollama && e2e_isolate "$E2E_NAME" "" "$E2E_OCR"; } >&2
+{ . scripts/lib-e2e-env.sh; e2e_resolve_ollama && e2e_isolate "$E2E_NAME" "" "$E2E_OCR" "$E2E_SRC_ROOT"; } >&2
 rc=$?
 for k in E2E_NAME E2E_PORT E2E_CLONE E2E_KB_HOST E2E_STAMP \
          COMPOSE_PROJECT_NAME COMPOSE_FILE OWUI_CONTAINER MARKITDOWN_CONTAINER \
-         POSTGRES_CONTAINER KB_HOST OLLAMA_HOST; do
+         POSTGRES_CONTAINER KB_HOST KB_ROOT OLLAMA_HOST; do
   printf '%s=%s\n' "$k" "${!k:-}"
 done > "$_envf"
 printf '%s\n' "$_envf"
@@ -174,7 +174,8 @@ def _setup_iso_env(name, ocr, request, at_scale=False):
     ``_run(relpath)`` callable."""
     setup = subprocess.run(
         ["bash", "-c", _ISO_SETUP_BASH], cwd=str(REPO),
-        env={**os.environ, "E2E_NAME": name, "E2E_OCR": ocr or ""},
+        env={**os.environ, "E2E_NAME": name, "E2E_OCR": ocr or "",
+             "E2E_SRC_ROOT": "root" if at_scale else "root_tests"},
         stdout=subprocess.PIPE, text=True)
     captured = _parse_iso_env(setup.stdout)
     if setup.returncode != 0 or not captured.get("E2E_STAMP"):

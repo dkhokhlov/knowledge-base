@@ -172,14 +172,14 @@ if [ "$WAIT" = "1" ]; then
   if [ -n "${KB:-}" ]; then
     wait_kb "$KB" "$wait_s" || exit 1
   else
-    # No KB= -> wait on EVERY top-level non-dot subdir of ./root/ (matches make
-    # kb-index's all-KB dispatch). A dispatched-but-not-waited KB would hit the
-    # 300s global guard below unprepared; waiting here (2400s/KB) makes the global
-    # guard a quick final safety net, not the primary wait.
+    # No KB= -> wait on EVERY top-level non-dot subdir of ${KB_ROOT:-root}/
+    # (matches make kb-index's all-KB dispatch). A dispatched-but-not-waited KB
+    # would hit the 300s global guard below unprepared; waiting here (2400s/KB)
+    # makes the global guard a quick final safety net, not the primary wait.
     while IFS= read -r d; do
       [ -n "$d" ] || continue
       wait_kb "$d" "$wait_s" || exit 1
-    done < <(find root -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort)
+    done < <(find "${KB_ROOT:-root}" -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort)
   fi
 fi
 
@@ -203,10 +203,63 @@ else
   echo "WARN  flock not found -- cannot serialize concurrent finalizes (B11); proceeding without a lock" >&2
 fi
 
-# Poll every KB under ./root/ until all are terminal (pending+processing == 0).
-# Fail loud if any KB is still in flight after KB_FINALIZE_WAIT (default 300s) -- do
-# NOT REINDEX while inserts are running. A KB that cannot be resolved or whose
-# /status is unreadable counts as non-terminal (fail-closed: never REINDEX blind).
+# Poll every KB under ${KB_ROOT:-root}/ until all are terminal (pending+processing
+# == 0). Fail loud if any KB is still in flight after KB_FINALIZE_WAIT (default
+# 300s) -- do NOT REINDEX while inserts are running. A KB that cannot be resolved
+# or whose /status is unreadable counts as non-terminal (fail-closed: never
+# REINDEX blind).
+#
+# KB-name set (upfront): a source-root dir that has NO OWUI KB is skipped (no KB
+# = no inflight = no race). Membership is decided by a paginated
+# GET /api/v1/knowledge/ (admin key, via Caddy -> OWUI) ONCE up front -- NOT by
+# the per-dir /status 404, which is ambiguous: the gateway 404s for both "KB not
+# found" (owui.py) AND an /api/v1/knowledge/ regression (resolve_kb_id list-page
+# passthrough). A list-endpoint regression would make every /status 404 look like
+# "no KB" -> vacuous all_terminal -> REINDEX mid-drain (the exact race this guard
+# prevents). So the upfront list call FAILS-CLOSED (exit 1) on any error; only
+# dirs whose name is in the resolved KB set are polled, and a polled KB's /status
+# error stays fail-closed (ERR -> nonterminal).
+kb_names_file="$(mktemp)"
+python3 -c '
+import os, sys, json, urllib.request
+host = os.environ["KB_HOST"].rstrip("/")
+ak = os.environ["OPENWEBUI_ADMIN_API_KEY"]
+names = []
+seen_count = 0
+page = 1
+while True:
+    req = urllib.request.Request("%s/api/v1/knowledge/?page=%d" % (host, page),
+                                 headers={"Authorization": "Bearer %s" % ak})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            d = json.load(r)
+    except Exception as e:
+        sys.stderr.write("FAIL  KB list fetch page %d failed: %s\n" % (page, e))
+        sys.exit(2)
+    if not isinstance(d, dict):
+        sys.stderr.write("FAIL  KB list page %d: not a dict\n" % page)
+        sys.exit(2)
+    items = d.get("items") or []
+    for k in items:
+        n = k.get("name")
+        if n:
+            names.append(n)
+    seen_count += len(items)
+    total = d.get("total")
+    if not items or (total is not None and seen_count >= total):
+        break
+    page += 1
+    if page > 1000:
+        break
+print("\n".join(names))
+' > "$kb_names_file"
+kb_list_rc=$?
+if [ "$kb_list_rc" != "0" ]; then
+  rm -f "$kb_names_file"
+  echo "FAIL  could not resolve the KB-name set (OWUI /api/v1/knowledge/ unreachable) -- refusing to REINDEX blind (an upstream list regression must not skip the guard vacuously)" >&2
+  exit 1
+fi
+trap 'rm -f "$kb_names_file"' EXIT
 gwait_s="${KB_FINALIZE_WAIT:-300}"
 gdeadline=$(( $(date +%s) + gwait_s ))
 all_terminal=0; nonterminal=""
@@ -214,6 +267,8 @@ while :; do
   all_terminal=1; nonterminal=""
   while IFS= read -r d; do
     [ -n "$d" ] || continue
+    # dir with no OWUI KB -> no inflight -> skip (membership, not /status 404)
+    grep -qxF "$d" "$kb_names_file" || continue
     inflight=$(curl -sS --max-time 120 "${KB_HOST}/status?kb=${d}&json=1" "${adm[@]}" 2>/dev/null \
       | python3 -c '
 import sys, json
@@ -229,16 +284,17 @@ except Exception:
     if [ "$inflight" != "0" ] 2>/dev/null; then
       nonterminal="$nonterminal $d(pending+processing=${inflight})"; all_terminal=0
     fi
-  done < <(find root -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort)
+  done < <(find "${KB_ROOT:-root}" -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort)
   if [ "$all_terminal" = "1" ]; then break; fi
   if [ "$(date +%s)" -ge "$gdeadline" ]; then break; fi
   sleep 10
 done
+rm -f "$kb_names_file"
 if [ "$all_terminal" != "1" ]; then
   echo "FAIL  not all KBs terminal after ${gwait_s}s (still in flight:${nonterminal}) -- refusing to REINDEX (instance-wide lock would block in-flight inserts). Check: make kb-status" >&2
   exit 1
 fi
-echo "==> all KBs under ./root/ terminal -- safe to REINDEX"
+echo "==> all KBs under ${KB_ROOT:-root}/ terminal -- safe to REINDEX"
 
 # --- REINDEX ivfflat vector (the finalize step) -------------------------------
 # Fixed index name (the schema owns it). A future HNSW migration renames

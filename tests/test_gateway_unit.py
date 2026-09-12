@@ -140,7 +140,7 @@ class EntryMtimeTests(unittest.TestCase):
 
 class TestKbIgnore(unittest.TestCase):
     """apply_kb_ignores: the additive .kb-ignore ancestor-chain deny-list.
-    Each test builds a temp KB_SOURCE_ROOT with per-directory .kb-ignore files
+    Each test builds a temp KB_ROOT with per-directory .kb-ignore files
     and runs the filter on synthetic walk entries ({path, filename}); no stack.
     Semantics: gitignore-style -- no-slash matches a basename at any depth; a
     slash pattern is anchored at the .kb-ignore's own dir; `*` does not cross
@@ -742,16 +742,16 @@ class TestKeepAliveBodyDrain(unittest.TestCase):
 
 
 class TestValidateDir(unittest.TestCase):
-    """_validate_dir: the KB name is one top-level subdir under KB_SOURCE_ROOT.
+    """_validate_dir: the KB name is one top-level subdir under KB_ROOT.
     Reject empty, `.`, `..`, multi-segment, wildcard, non-existent; accept a
-    single segment incl. a dot-prefixed name (`.tests`). Real temp source root
+    single segment incl. a dot-prefixed name (`.hidden`). Real temp source root
     so isdir + realpath checks exercise. No stack needed."""
 
     def setUp(self):
         self._root = tempfile.mkdtemp()
-        for d in ("gdrive", ".tests"):
+        for d in ("gdrive", ".hidden"):
             os.mkdir(os.path.join(self._root, d))
-        self._env = mock.patch.dict(os.environ, {"KB_SOURCE_ROOT": self._root})
+        self._env = mock.patch.dict(os.environ, {"KB_ROOT": self._root})
         self._env.start()
         self.addCleanup(self._env.stop)
         import shutil
@@ -780,7 +780,7 @@ class TestValidateDir(unittest.TestCase):
         self.assertEqual(self._call("gdrive"), "gdrive")
 
     def test_dot_prefixed_segment_accepted(self):
-        self.assertEqual(self._call(".tests"), ".tests")
+        self.assertEqual(self._call(".hidden"), ".hidden")
 
     def test_empty_rejected(self):
         self.assertEqual(self._err(""), 400)
@@ -812,9 +812,9 @@ class TestStatusRoute(unittest.TestCase):
     """GET /status?kb=<name|uuid>&json=1: the folded single-param form. A UUID
     is used as kb_id + resolved to the name via owui.get_kb; a name is resolved
     to kb_id via owui.resolve_kb_id. The source walk is OPTIONAL (runs only when
-    KB_SOURCE_ROOT/<name> exists). Mocks owui.get_kb / owui.resolve_kb_id /
+    KB_ROOT/<name> exists). Mocks owui.get_kb / owui.resolve_kb_id /
     owui.list_file_status / walk_source / owui._admin_key / app.time.time. Uses
-    a real temp KB_SOURCE_ROOT/gdrive so the walk's isdir gate passes for
+    a real temp KB_ROOT/gdrive so the walk's isdir gate passes for
     `gdrive` (walk_source itself is mocked). No stack needed."""
 
     KB = "550e8400-e29b-41d4-a716-446655440000"
@@ -823,7 +823,7 @@ class TestStatusRoute(unittest.TestCase):
     def setUp(self):
         self._src_root = tempfile.mkdtemp()
         os.mkdir(os.path.join(self._src_root, "gdrive"))
-        self._env = mock.patch.dict(os.environ, {"KB_SOURCE_ROOT": self._src_root})
+        self._env = mock.patch.dict(os.environ, {"KB_ROOT": self._src_root})
         self._env.start()
         self.addCleanup(self._env.stop)
         import shutil
@@ -939,7 +939,7 @@ class TestStatusRoute(unittest.TestCase):
 
     def test_uuid_resolves_name_and_walks(self):
         # kb=<uuid>: kb_id is the uuid; get_kb yields the name; the source walk
-        # runs (KB_SOURCE_ROOT/gdrive exists) -> source_count from the walk.
+        # runs (KB_ROOT/gdrive exists) -> source_count from the walk.
         d = self._run([], kb=self.KB, kb_name="gdrive")
         self.assertEqual(d["name"], "gdrive")
         self.assertEqual(d["kb_id"], self.KB)
@@ -956,7 +956,7 @@ class TestStatusRoute(unittest.TestCase):
     def test_sourceless_kb_skips_walk_no_400(self):
         # A KB whose name has NO source dir (project-memory KBs) skips the walk
         # (source_count 0) and is NOT rejected -- the fold's key fix. Use a name
-        # with no subdir under KB_SOURCE_ROOT.
+        # with no subdir under KB_ROOT.
         d = self._run([], kb="projects-mem", kb_name="projects-mem",
                       expect_walk=False)
         self.assertEqual(d["source_count"], 0)

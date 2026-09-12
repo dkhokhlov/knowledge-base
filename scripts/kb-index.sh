@@ -68,7 +68,7 @@ adm=(-H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}")
 if [ -n "$KB" ]; then
   kbs=("$KB")
 else
-  mapfile -t kbs < <(find root -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort)
+  mapfile -t kbs < <(find "${KB_ROOT:-root}" -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort)
   if [ "${#kbs[@]}" -eq 0 ]; then
     echo "FAIL  no top-level subdirs under ./root (drop a folder at ./root/<name>/, then: make kb-bootstrap KB=<name>)" >&2
     exit 1

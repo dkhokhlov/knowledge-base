@@ -223,7 +223,7 @@ kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit 
 	    fi; \
 	  fi; \
 	  ROOT_DIRS_ARG=; \
-	  if ROOT_DIRS=$$(python3 -c 'import os,sys,json; r="root"; sys.exit(1) if not os.path.isdir(r) else None; print(json.dumps(sorted(d for d in os.listdir(r) if not d.startswith(".") and os.path.isdir(os.path.join(r,d))), separators=(",",":")))' 2>/dev/null); then \
+	  if ROOT_DIRS=$$(python3 -c 'import os,sys,json; r=os.environ.get("KB_ROOT","root"); sys.exit(1) if not os.path.isdir(r) else None; print(json.dumps(sorted(d for d in os.listdir(r) if not d.startswith(".") and os.path.isdir(os.path.join(r,d))), separators=(",",":")))' 2>/dev/null); then \
 	    ROOT_DIRS_ARG="--root-dirs $$ROOT_DIRS"; \
 	  else \
 	    if [ "$${PRUNE_KB:-0}" = "1" ]; then echo "FAIL  ./root not found / unreadable — refusing to prune without a root set (would prune ALL root KBs)"; exit 1; fi; \
@@ -278,7 +278,7 @@ kb-status: ## Show index/sync status via api-gateway GET /status as a JSON ARRAY
 	    _list=$$(mktemp); printf '%s\n' "$$KB" > "$$_list"; \
 	  else \
 	    _list=$$(mktemp); \
-	    find root -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort > "$$_list"; \
+	    find "$${KB_ROOT:-root}" -maxdepth 1 -mindepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort > "$$_list"; \
 	    if [ ! -s "$$_list" ]; then \
 	      rm -f "$$_list"; \
 	      echo "FAIL  no top-level non-dot subdirs under ./root/ (run: make kb-bootstrap)" >&2; exit 1; \

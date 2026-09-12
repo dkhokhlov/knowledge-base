@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# System integration test: GENERIC (non-gdrive) KB under ./root/<name>/.
+# System integration test: GENERIC (non-gdrive) KB under ./${KB_ROOT:-root}/<name>/.
 #
-# Proves the parts of the ./root/ multi-KB design that the gdrive + .tests iso
+# Proves the parts of the ./root/ multi-KB design that the gdrive + root_tests iso
 # tests do NOT cover:
 #   1. The additive .kb-ignore ancestor-chain deny-list on a NON-gdrive KB:
 #      root/.kb-ignore (globals) denies a type for EVERY KB, and a per-KB
@@ -17,8 +17,9 @@
 #        poll GET /status?kb=<name>   (drain terminal)
 #        make kb-finalize KB=<name>   (global-terminal guard + flock + REINDEX)
 #
-# Drops a synthetic ./root/gentest/ tree + root/.kb-ignore + root/gentest/.kb-ignore
-# in the throwaway iso clone, then runs the pipeline. Asserts:
+# Drops a synthetic ./${KB_ROOT:-root}/gentest/ tree + a root .kb-ignore + a
+# per-KB gentest/.kb-ignore in the throwaway iso clone, then runs the pipeline.
+# Asserts:
 #   - source_count == 2 (post-ignore): .md (re-included by !) + .txt counted;
 #     .json + .log dropped at walk time (the ignore is upstream of the manifest).
 #   - indexed_files == {gentest.md, gentest.txt}; .json + .log absent.
@@ -26,7 +27,7 @@
 #     REINDEX published them; ivfflat folds post-build rows in only on REINDEX).
 #
 # Self-contained: deletes the gentest KB + its files on EXIT. The synthetic
-# ./root/gentest/ + .kb-ignore files live only in the throwaway clone (destroyed
+# ./${KB_ROOT:-root}/gentest/ + .kb-ignore files live only in the throwaway clone (destroyed
 # on teardown). No gdrive, no real corpus, no PII. Uses a unique marker so a
 # re-run in a kept (failed) clone does not collide with stale vectors.
 set -u
@@ -37,8 +38,8 @@ require_stack_up
 O="$(kb_host)"
 NAME="gentest"
 MARKER="gentest-marker-3c5e1"
-ROOT_DIR="root/${NAME}"
-KBIGNORE="root/.kb-ignore"
+ROOT_DIR="${KB_ROOT:-root}/${NAME}"
+KBIGNORE="${KB_ROOT:-root}/.kb-ignore"
 
 require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }
 AK="$OPENWEBUI_ADMIN_API_KEY"
@@ -73,7 +74,7 @@ for it in (d.get("items") or []):
 trap cleanup EXIT
 
 # --- drop a synthetic ./root/gentest/ tree + .kb-ignore files ------------------
-section "synthetic ./root/gentest/ + .kb-ignore"
+section "synthetic ./${KB_ROOT:-root}/gentest/ + .kb-ignore"
 mkdir -p "$ROOT_DIR"
 printf '# gentest doc\n\n%s alpha content for semantic search over the generic KB.\n' "$MARKER" > "$ROOT_DIR/gentest.md"
 printf '%s beta plain-text content for semantic search.\n' "$MARKER" > "$ROOT_DIR/gentest.txt"

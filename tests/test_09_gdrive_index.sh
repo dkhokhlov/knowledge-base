@@ -72,7 +72,7 @@ O="$(kb_host)"
 # Emacs regex treats (a|b) as LITERAL (matches 0 files), so every -iregex call
 # below MUST use -regextype posix-extended for the alternation to work.
 ALLOW_RE='[.](docx|pdf|pptx|xlsx|txt|md|html|json|log|tex)$'
-# Exclude dot-dirs (.tests, .sync-reports) from the source count: gateway.walk_source prunes them from a full walk (gateway/app.py "Prune dot-dirs"), so counting them leaves the drain `accounted < src_count` -> a false timeout. `path` opts into a dot-subtree (test_11); this full walk does not.
+# Exclude dot-dirs (.sync-reports) from the source count: gateway.walk_source prunes them from a full walk (gateway/app.py "Prune dot-dirs"), so counting them leaves the drain `accounted < src_count` -> a false timeout.
 src_count=$(find root/gdrive -type f -not -path '*/.*' -regextype posix-extended -iregex ".*${ALLOW_RE}" 2>/dev/null | wc -l)
 
 require_env OPENWEBUI_ADMIN_API_KEY KB_API_KEY || { finish; exit 1; }

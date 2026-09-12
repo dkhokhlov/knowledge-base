@@ -3,18 +3,18 @@
 # deterministic, committed fixture set (fast `make test` replacement for the
 # full real-gdrive drain in test_09).
 #
-# Indexes root/.tests/ (a dot-dir the generic walk skips, so it never
-# contaminates any real KB) into a throwaway temp KB via
-# POST /index?dir=.tests&kb_id=<temp>. The gateway uploads via
+# Indexes root_tests/gdrive/ (a separate tracked fixture tree, mirrored from
+# root/) into a throwaway KB named "gdrive" (name == subdir, the regular flow)
+# via POST /index?dir=gdrive&kb_id=<id>. The gateway uploads via
 # POST /files/ (process_in_background=True) and does NOT link files itself;
 # OWUI's per-upload background task is the sole linker (extract -> embed ->
-# link). That drain is async, so this test polls GET /status?kb=<KB_ID> for the
+# link). That drain is async, so this test polls GET /status?kb=gdrive for the
 # REAL drain terminal state, audits failures, and runs a deterministic semantic
 # search by a fixed marker token.
 #
 # Self-contained: the temp KB is created with the admin key, granted '*' read so
 # the agent (user) key can search it, and deleted on EXIT (its files too). The
-# committed fixture files under root/.tests/ are NOT deleted (they are tracked
+# committed fixture files under root_tests/gdrive/ are NOT deleted (they are tracked
 # in the repo). The fixture set is small text files (.txt/.md/.json) plus minimal
 # binary files (.pdf/.docx/.pptx) so the binary extraction path is exercised too.
 # The text fixtures extract without markitdown-ocr; the binary fixtures exercise
@@ -22,8 +22,8 @@
 # extraction and surface as a genuine-failure notice (not a hard fail) — the text
 # fixtures still complete and the marker search still carries the test.
 #
-# Tolerant: SKIPs (passes with a notice) when root/.tests has no allowlisted
-# files (fixtures not provisioned in this checkout) so `make test` runs clean.
+# Tolerant: SKIPs (passes with a notice) when root_tests/gdrive has no allowlisted
+# files (fixtures not provisioned in this checkout) so a sparse checkout runs clean.
 set -u
 . "$(dirname "$0")/lib.sh"
 load_env
@@ -41,7 +41,7 @@ MARKER="gdrive-fixture-marker-7f3a2"
 # mode=lexical-dsl dispatch) to verify OWUI recognizes + strips it.
 SENTINEL="KB_LEXICAL_DSL_V1::"
 # Coined single-word DSL probe tokens (pdb.simple splits on _/-, so these are
-# single tokens). Unique across root/.tests/ (verified: no collisions).
+# single tokens). Unique across root_tests/gdrive/ (verified: no collisions).
 DSL_PHRASE='zenith rotating zephyr'        # exact phrase in dsl-phrase.md
 DSL_AND_A='dslwordalpha'                   # in dsl-and-a.md AND dsl-and-b.md
 DSL_AND_B='dslwordbeta'                    # in dsl-and-a.md only
@@ -51,11 +51,11 @@ DSL_AND_B='dslwordbeta'                    # in dsl-and-a.md only
 # name (app.py), so they are never indexed. src_count must match what the drain
 # can account, not what the allowlist regex alone matches (.meta.json ends in
 # .json, so the regex alone would over-count sidecars the gateway drops).
-src_count=$(find root/.tests -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" \
+src_count=$(find "${KB_ROOT:-root}/gdrive" -type f -regextype posix-extended -iregex ".*${ALLOW_RE}" \
   ! -name '*.meta' ! -name '*.meta.json' 2>/dev/null | wc -l)
 if [ "${src_count:-0}" -eq 0 ]; then
   section "gdrive index (fixture)"
-  pass "SKIP: root/.tests has no allowlisted fixture files (committed fixtures missing)"
+  pass "SKIP: ${KB_ROOT:-root}/gdrive has no allowlisted fixture files (committed fixtures missing)"
   finish
   exit 0
 fi
@@ -95,25 +95,19 @@ for it in (d.get("items") or []):
 }
 trap cleanup EXIT
 
-# --- create a temp KB + grant '*' read so the user key can search it ---------
-section "create temp fixture KB"
-KB_ID=$(curl -s -X POST "$O/api/v1/knowledge/create" "${ADM[@]}" -H 'Content-Type: application/json' \
-  -d '{"name":"gdrive-fixture-test","description":"integration test: /index path fixture set"}' \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
-[ -n "$KB_ID" ] && pass "KB id: $KB_ID" || { fail "KB create failed"; finish; exit 1; }
+# --- bootstrap KB gdrive (find-or-create + grant '*' read) --------------------
+# Regular flow: KB name == subdir (root_tests/gdrive/). kb-bootstrap.sh is
+# find-or-create (idempotent on a re-run in a kept clone) + grants user:* read so
+# the agent (user) key can search it. Prints the kb_id on stdout (final line);
+# progress goes to stderr.
+section "bootstrap KB gdrive (find-or-create + grant)"
+KB_ID=$(KB=gdrive ./scripts/kb-bootstrap.sh 2>/dev/null | tail -1)
+[ -n "$KB_ID" ] && pass "KB id: $KB_ID" || { fail "kb-bootstrap KB=gdrive failed"; finish; exit 1; }
 
-grant=$(curl -s -X POST "$O/api/v1/knowledge/${KB_ID}/access/update" "${ADM[@]}" -H 'Content-Type: application/json' \
-  -d "{\"access_grants\":[{\"resource_type\":\"knowledge\",\"resource_id\":\"${KB_ID}\",\"principal_type\":\"user\",\"principal_id\":\"*\",\"permission\":\"read\"}]}")
-if printf '%s' "$grant" | python3 -c 'import sys,json;d=json.load(sys.stdin);gs=d.get("access_grants") or [];sys.exit(0 if any(g.get("principal_id")=="*" and g.get("permission")=="read" for g in gs) else 1)' 2>/dev/null; then
-  pass "granted '*' read on temp KB"
-else
-  fail "grant '*' read failed: $(printf '%s' "$grant" | head -c 160)"; finish; exit 1
-fi
-
-# --- POST /index (admin): reconcile root/.tests into the temp KB (dir=.tests) -
-section "POST /index (api-gateway, dir=.tests)"
+# --- POST /index (admin): reconcile root_tests/gdrive into the KB (dir=gdrive) -
+section "POST /index (api-gateway, dir=gdrive)"
 idx_resp=$(curl -sS --max-time 1200 -X POST \
-  "$O/index?dir=.tests&kb_id=${KB_ID}" \
+  "$O/index?dir=gdrive&kb_id=${KB_ID}" \
   "${ADM[@]}" -H 'Content-Type: application/json' -d '{}' 2>&1)
 read -r added modified deleted unmodified retried errn < <(printf '%s' "$idx_resp" | python3 -c '
 import sys, json
@@ -144,12 +138,12 @@ for e in (d.get("errors") or [])[:20]:
 fi
 
 # --- poll GET /status until the drain reaches a terminal state ---------------
-section "poll GET /status (real drain, kb=<KB_ID>)"
+section "poll GET /status (real drain, kb=gdrive)"
 wait_s="${GDRIVE_FIXTURE_WAIT:-180}"
 deadline=$(( $(date +%s) + wait_s ))
 completed=0; pending=0; processing=0; failed=0; status_json=""
 while :; do
-  status_json=$(curl -sS "$O/status?kb=${KB_ID}&json=1" "${ADM[@]}" 2>/dev/null || true)
+  status_json=$(curl -sS "$O/status?kb=gdrive&json=1" "${ADM[@]}" 2>/dev/null || true)
   read -r completed pending processing failed < <(printf '%s' "$status_json" | python3 -c '
 import sys, json
 try:

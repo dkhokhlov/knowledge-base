@@ -475,8 +475,8 @@ class Handler(BaseHTTPRequestHandler):
     def _index(self, identity, qs):
         """POST /index?kb_id=<id>&dir=<name>[&force=1][&dry_run=1]
         [&reindex_all=1][&retry_pending=1]. Admin-only. `dir` is the KB's
-        top-level subdir under the source root (KB_SOURCE_ROOT): the walk root is
-        KB_SOURCE_ROOT/dir, so manifest keys stay subdir-relative (the shape OWUI
+        top-level subdir under the source root (KB_ROOT): the walk root is
+        KB_ROOT/dir, so manifest keys stay subdir-relative (the shape OWUI
         sync/diff keys on) and each KB's source is isolated. `dir` is a single
         segment (the KB name): no `/`, no backslash, no wildcard, and `.`/`..` are
         rejected. Drives OWUI's sync/diff protocol with the gateway's held admin
@@ -504,7 +504,7 @@ class Handler(BaseHTTPRequestHandler):
         dry_run = _qs_bool(qs, "dry_run", False)
         reindex_all = _qs_bool(qs, "reindex_all", False)
         retry_pending = _qs_bool(qs, "retry_pending", False)
-        kb_source_root = os.environ.get("KB_SOURCE_ROOT", "/kb-source")
+        kb_source_root = os.environ.get("KB_ROOT", "/kb-source")
         dir = _validate_dir(qs, kb_source_root)
         root = os.path.join(kb_source_root, dir)  # per-KB walk root; keys stay subdir-relative
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
@@ -754,8 +754,8 @@ class Handler(BaseHTTPRequestHandler):
         (pending/processing/completed/failed + the file listings) is kb_id-keyed
         via OWUI file.data.status (GET /files/?content=false, paged) and is
         independent of any source directory. The source walk
-        (walk_source(KB_SOURCE_ROOT/<name>)) is OPTIONAL — it runs only when
-        <name> has a real source dir under KB_SOURCE_ROOT, yielding source_count
+        (walk_source(KB_ROOT/<name>)) is OPTIONAL — it runs only when
+        <name> has a real source dir under KB_ROOT, yielding source_count
         (kb-finalize's terminal `accounted >= source_count` check); a KB with no
         source dir (e.g. project-memory KBs created by agents) gets source_count
         0 and NO 400. OWUI's status vocabulary:
@@ -788,7 +788,7 @@ class Handler(BaseHTTPRequestHandler):
                 kb_id = owui.resolve_kb_id(admin_key, name)
         except owui.OwuiError as e:
             raise GatewayError(e.code or 503, str(e))
-        kb_source_root = os.environ.get("KB_SOURCE_ROOT", "/kb-source")
+        kb_source_root = os.environ.get("KB_ROOT", "/kb-source")
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
         # Optional source walk: only when a real source dir exists for the name.
@@ -1205,7 +1205,7 @@ OPENAPI_SPEC = {
             "parameters": [
                 {"name": "kb_id", "in": "query", "required": True, "schema": {"type": "string", "format": "uuid"}},
                 {"name": "dir", "in": "query", "required": True, "schema": {"type": "string"},
-                 "description": "KB top-level subdir under the source root (KB_SOURCE_ROOT); single segment, no slash or wildcard"},
+                 "description": "KB top-level subdir under the source root (KB_ROOT); single segment, no slash or wildcard"},
                 {"name": "force", "in": "query", "schema": {"type": "boolean", "default": False}},
                 {"name": "dry_run", "in": "query", "schema": {"type": "boolean", "default": False}},
                 {"name": "reindex_all", "in": "query", "schema": {"type": "boolean", "default": False}},
@@ -1218,7 +1218,7 @@ OPENAPI_SPEC = {
             "security": [{"bearerAuth": []}],
             "parameters": [
                 {"name": "kb", "in": "query", "required": True, "schema": {"type": "string"},
-                 "description": "KB identifier: a KB name or a UUID. The gateway resolves name<->id; per-file progress is kb_id-keyed (independent of any source dir). The source walk runs only when KB_SOURCE_ROOT/<name> exists (source_count 0 otherwise; no 400 for KBs with no source dir)."},
+                 "description": "KB identifier: a KB name or a UUID. The gateway resolves name<->id; per-file progress is kb_id-keyed (independent of any source dir). The source walk runs only when KB_ROOT/<name> exists (source_count 0 otherwise; no 400 for KBs with no source dir)."},
                 {"name": "file", "in": "query", "required": False, "schema": {"type": "string"}},
                 {"name": "json", "in": "query", "schema": {"type": "boolean", "default": False}}],
             "responses": {"200": {"description": "status (text or json)"},

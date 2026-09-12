@@ -24,7 +24,7 @@
 set -u
 
 # Source the test helpers (pass/fail/section/finish) for consistent output.
-# lib.sh does `cd "$KB_ROOT"` at SOURCE time, where KB_ROOT resolves from
+# lib.sh does `cd "$KB_REPO_ROOT"` at SOURCE time, where KB_REPO_ROOT resolves from
 # BASH_SOURCE to the CLONE root (this script runs with cwd=clone). load_env
 # (called below) reads ./.env + ./.env.local relative to cwd=$E2E_CLONE.
 . "$(dirname "$0")/lib.sh"
@@ -42,15 +42,15 @@ require_env KB_API_KEY || { finish; exit 1; }
 # Non-destructive: operates only on the agent's own group; forgets the agent
 # group at the end.
 G="$(kb_host)"
-KB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+KB_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The wrapper is a thin client: it reads ONLY KB_HOST + KB_API_KEY from the
 # shell env (no --env-file / --key / --base-url flags). load_env exports both
 # from the clone .env.local; inline `env` overrides only KB_HOST per invocation
-# (KB_API_KEY is inherited). KB = user key. KB_ROOT resolves to the CLONE root
+# (KB_API_KEY is inherited). KB = user key. KB_REPO_ROOT resolves to the CLONE root
 # here (cwd is the clone), so the clone's kb.py is the code under test -- NOT
 # the live repo's copy (clean-tree guard guarantees they are at the same
 # commit, but the clone is the code being verified).
-KB="env KB_HOST=${G} python3 ${KB_ROOT}/skills/claude/scripts/kb.py"
+KB="env KB_HOST=${G} python3 ${KB_REPO_ROOT}/skills/claude/scripts/kb.py"
 
 # kbrun <cmd...>: print stdout; record a failure (and return 1) if the cmd
 # exits non-zero. Does not exit the script (lib.sh uses pass/fail/finish).

@@ -35,8 +35,8 @@
 # Synthetic fixtures only (no gdrive, no PII).
 set -u
 
-# Source the test helpers (pass/fail/section/finish). lib.sh does `cd "$KB_ROOT"`
-# at SOURCE time, where KB_ROOT resolves from BASH_SOURCE to the CLONE root
+# Source the test helpers (pass/fail/section/finish). lib.sh does `cd "$KB_REPO_ROOT"`
+# at SOURCE time, where KB_REPO_ROOT resolves from BASH_SOURCE to the CLONE root
 # (this script runs with cwd=clone). load_env reads ./.env + ./.env.local
 # relative to cwd=$E2E_CLONE.
 . "$(dirname "$0")/lib.sh"
@@ -295,10 +295,11 @@ except Exception:
 # class-11 detector parses the source= kv from the description (created by hand
 # here to match what kb-bootstrap.sh writes; the gateway is NOT needed -- the
 # e2e child env has no live KB_HOST). Synthetic name + description (no PII).
-# NOTE: in the e2e CLONE, ./root/* is gitignored (only .tests/ is tracked), so
-# ROOT_DIRS=[] -> every source=root KB is stale (legitimate per the design: an
-# empty scan means no backing dirs). This named throwaway stack is the only
-# place prune runs, so pruning root KBs here is safe.
+# NOTE: in the e2e CLONE, KB_ROOT=root_tests (iso) -> the kb-check --root-dirs
+# builder reads root_tests/, so ROOT_DIRS=[gdrive,chunkq,meta-sidecar] (the
+# tracked fixture tree, non-empty). The stale KB's path ($STALE_NAME) is NOT in
+# that set -> class 11 flags it by path-non-membership (NOT by an empty scan).
+# This named throwaway stack is the only place prune runs, so pruning is safe.
 section "make kb-check (class 11: stale root KB)"
 STALE_NAME="stale-iso-kbcheck"
 STALE_DESC="Indexed from local root/$STALE_NAME/ via api-gateway | source=root | host=testhost | path=$STALE_NAME"

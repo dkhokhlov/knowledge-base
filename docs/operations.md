@@ -98,7 +98,7 @@ Why: the stock 14B at the default 32k context loads ~53 GB and spills to CPU on 
 
 `GDRIVE_KB_ID` is removed: the gateway is stateless and takes `kb_id` per call;
 name→id resolution is runtime, in the shell (`scripts/kb-bootstrap.sh --resolve`).
-`KB_SOURCE_ROOT` (`/kb-source` in the container) is set in `compose.yml`, not `.env`.
+`KB_ROOT` (`/kb-source` in the container) is set in `compose.yml`, not `.env`.
 
 Notes:
 - `KB_API_KEY` is an Open Web UI per-account API key, carried as an **env var**. It is set on the agent host (in that host's env file or shell); on the stack host it may also live in `.env.local`. Its value is one of:
@@ -342,7 +342,7 @@ drive into `./root/gdrive` (downloads only the `.kb-ignore`-allowed files; the
 wrapper reconciles deletions — files removed from Drive that are not protected
 are moved to the backup dir). It is SYNC-ONLY: it does NOT index — run
 `make kb-index KB=gdrive` after to reconcile the synced tree into the KB
-(manual; `./root/*` is gitignored except tracked `root/.tests/` fixtures). It is
+(manual; `./root/*` is gitignored except the `root/.gitkeep` anchor; iso fixtures live under `root_tests/`). It is
 delta: files removed from Drive are moved out of `./root/gdrive` (and the next
 `make kb-index` drops them from the KB via `sync/cleanup`). Deleted/overwritten
 files are NOT lost — the wrapper / rclone moves them (in their original
@@ -614,7 +614,7 @@ dependency is down.
 | RAG chat is slow; `ollama ps` shows a CPU/GPU split | `OPENWEBUI_MODEL` too large for VRAM, spills to CPU | pick a smaller chat model that fits VRAM with the 12-slot KV cache; `GRAPHITI_MODEL` (extraction) and `OPENWEBUI_MODEL` (chat) are independent — two different 14B tags cannot both be resident at once on this GPU |
 | `make health` says `degraded` but the UI works | OWUI `/health` returned non-2xx | inspect the `openwebui` logs; the gateway reports degraded whenever the identity dependency is not healthy |
 | `make kb-status KB=gdrive` shows `completed` below `source_count` with `pending+processing=0` | a file failed to upload or extract; `/status` `failed_files` + the per-file `errors` from the last `POST /index` hold the WHY | re-run `make kb-index KB=gdrive` to re-trigger failed; `docker logs kb-openwebui` / `docker logs kb-markitdown-ocr` for the upstream cause |
-| `POST /index` returns 422 "source walk yielded 0 files" | the `./root/<name>` mount is empty/unreadable, or `KB_SOURCE_ROOT`/`dir`/`KB_MAX_SIZE`/`DEFAULT_ALLOW` exclude everything | check `make kb-sync` populated `./root/gdrive`; check `HOST_UID` matches the `./root` owner uid; `?force=1` proceeds with an empty manifest (drives full `cleanup` — use only to drain the KB) |
+| `POST /index` returns 422 "source walk yielded 0 files" | the `./root/<name>` mount is empty/unreadable, or `KB_ROOT`/`dir`/`KB_MAX_SIZE`/`DEFAULT_ALLOW` exclude everything | check `make kb-sync` populated `./root/gdrive`; check `HOST_UID` matches the `./root` owner uid; `?force=1` proceeds with an empty manifest (drives full `cleanup` — use only to drain the KB) |
 
 ## Make targets
 
@@ -793,7 +793,7 @@ startup source of `~/.bash_env` left in its env.)
   (`allowed − excluded − dups`). `./root/.kb-ignore` globals exclude `*.json`,
   so a mirror synced before that rule holds stale `*.json` on disk and counts
   higher than a fresh sync — a re-sync reconciles it. `test_09` counts the fresh
-  source, excluding dot-dirs (`.tests`, `.sync-reports`), matching
+  source, excluding dot-dirs (`.sync-reports`), matching
   `gateway.walk_source` which prunes them from a full walk.
 
 On a passing run the iso stack is torn down and the clone removed (`e2e_down`); on

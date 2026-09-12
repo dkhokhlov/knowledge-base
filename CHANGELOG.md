@@ -61,6 +61,35 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`KB_SOURCE_ROOT` → `KB_ROOT` (unified source-root var).** One env var now
+  names the source root on BOTH sides: the container sees `KB_ROOT=/kb-source`
+  (compose literal in `environment:`; no `${KB_ROOT}` interpolation, so a host
+  `KB_ROOT` does not leak in), and host scripts read `${KB_ROOT:-root}` (shell)
+  / `os.environ.get("KB_ROOT","root")` (Python). Live: `KB_ROOT` unset → `root`
+  default (unchanged). The `/kb-source` container path is unchanged. The test
+  repo-root var (was `KB_ROOT` in `tests/lib.sh` + test_08/12/17/18, found
+  `skills/claude/scripts/kb.py`) is renamed `KB_REPO_ROOT` to free the name.
+  Host-side `./root` enumerators now read `KB_ROOT`: `Makefile` kb-check
+  `--root-dirs` builder + kb-status sweep, `kb-index.sh`, `kb-bootstrap.sh`,
+  `kb-finalize.sh`. `kb-finalize.sh` global-terminal guard resolves the KB-name
+  set ONCE up front via a paginated `GET /api/v1/knowledge/` (fail-closed on its
+  failure) and skips source-root dirs with no KB (membership, not the ambiguous
+  per-dir `/status` 404 — the gateway 404s for both "KB not found" AND an
+  upstream list regression; a naive 404-skip would vacuously pass + REINDEX
+  mid-drain).
+- **iso e2e fixtures moved to `root_tests/` (regular flow, no dot-dir trickery).**
+  The deterministic iso tests (test_11/13/17) ran against `root/.tests*` dot-dirs
+  via `dir=.tests` + a throwaway temp-UUID KB + `/status?kb=<UUID>`. They now run
+  against a separate tracked `root_tests/` tree (mirrored from `root/`) using the
+  REGULAR production flow: KB name == subdir, `kb-bootstrap.sh` find-or-create,
+  `POST /index?dir=<name>`, `GET /status?kb=<name>`. `root_tests/{gdrive,chunkq,
+  meta-sidecar}/` hold the committed fixtures; test_16's `gentest` tree +
+  `.kb-ignore` are created in its own iso clone under `root_tests/`. The iso
+  container bind override (`./root_tests:/kb-source:ro`) REPLACES the base
+  `./root` bind (compose dedupes by target; verified). `root/.gitkeep` anchors
+  `./root` in a fresh clone (replaces the anchoring role `.tests` played) for the
+  live bind mount + `KB_ROOT`-unset enumerators. test_09 (at-scale, real rclone
+  corpus) keeps `root/`. The `f699916` UUID-in-`/status` workaround is reverted.
 - **`graphiti` bootstrap + `caddy` Caddyfile baked into overlay images.** The two
   lone bind-mount-only services are now thin overlay images under `docker/`, the
   same `FROM <base> + COPY` pattern as `docker/open-webui`/`docker/markitdown`.

@@ -31,8 +31,8 @@ ADM=(-H "Authorization: Bearer $AK")
 RD=(-H "Authorization: Bearer $UK")
 CT="Content-Type: application/json"
 HOSTSEG="test18h"
-KB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KB="env KB_HOST=${G} KB_API_KEY=${UK} python3 ${KB_ROOT}/skills/claude/scripts/kb.py"
+KB_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+KB="env KB_HOST=${G} KB_API_KEY=${UK} python3 ${KB_REPO_ROOT}/skills/claude/scripts/kb.py"
 
 # Created KB ids + the temp fixture root -> cleaned on EXIT.
 KB_IDS=""
@@ -148,7 +148,7 @@ section "retrieve-projects: allowA marker retrievable (drain landed vectors)"
 verdict=""
 for _attempt in 1 2 3; do
   verdict=$(env KB_HOST="$G" KB_API_KEY="$UK" \
-    python3 "${KB_ROOT}/skills/claude/scripts/kb.py" retrieve-projects \
+    python3 "${KB_REPO_ROOT}/skills/claude/scripts/kb.py" retrieve-projects \
     "test18-allowA-marker-4f2c7" --host "$HOSTSEG" --project allowA --k 5 2>/tmp/t18_rerr \
     | python3 -c '
 import sys, json
