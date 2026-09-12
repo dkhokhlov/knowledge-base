@@ -8,7 +8,7 @@
 # POST /index?dir=.tests&kb_id=<temp>. The gateway uploads via
 # POST /files/ (process_in_background=True) and does NOT link files itself;
 # OWUI's per-upload background task is the sole linker (extract -> embed ->
-# link). That drain is async, so this test polls GET /status?kb=.tests for the
+# link). That drain is async, so this test polls GET /status?kb=<KB_ID> for the
 # REAL drain terminal state, audits failures, and runs a deterministic semantic
 # search by a fixed marker token.
 #
@@ -144,12 +144,12 @@ for e in (d.get("errors") or [])[:20]:
 fi
 
 # --- poll GET /status until the drain reaches a terminal state ---------------
-section "poll GET /status (real drain, kb=.tests)"
+section "poll GET /status (real drain, kb=<KB_ID>)"
 wait_s="${GDRIVE_FIXTURE_WAIT:-180}"
 deadline=$(( $(date +%s) + wait_s ))
 completed=0; pending=0; processing=0; failed=0; status_json=""
 while :; do
-  status_json=$(curl -sS "$O/status?kb=.tests&json=1" "${ADM[@]}" 2>/dev/null || true)
+  status_json=$(curl -sS "$O/status?kb=${KB_ID}&json=1" "${ADM[@]}" 2>/dev/null || true)
   read -r completed pending processing failed < <(printf '%s' "$status_json" | python3 -c '
 import sys, json
 try:
