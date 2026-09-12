@@ -181,7 +181,10 @@ e2e_isolate() {
   # the operator's live key -- a leaked key would satisfy the clone's
   # ${KB_API_KEY:?} with the WRONG identity (401 against the clone DB); the clone
   # gets its own ephemeral user key via e2e_ephemeral_user (written to .env.local).
-  unset BASH_ENV KB_HOST KB_API_KEY
+  # unset KB_HOST_PORT drops the live .env value (3000) an operator shell-sources;
+  # a leak makes bootstrap's explicit-tunable-wins bind the live port, clashing
+  # with the live kb-proxy -- the clone must re-derive KB_HOST_PORT from KB_HOST.
+  unset BASH_ENV KB_HOST KB_API_KEY KB_HOST_PORT
 
   # The stamped clone is unique per run (above), so a leftover clone from a
   # prior run does NOT block this one -- it lives at a different stamp. A prior
