@@ -187,11 +187,11 @@ for e in (d.get("errors") or [])[:20]:
 fi
 
 # --- poll GET /status until the drain reaches a terminal state ---------------
-section "poll GET /status (real drain, dir=.tests)"
+section "poll GET /status (real drain, kb=.tests)"
 deadline=$(( $(date +%s) + CHUNKQ_WAIT ))
 completed=0; pending=0; processing=0; failed=0; status_json=""
 while :; do
-  status_json=$(curl -sS "$O/status?dir=.tests&kb_id=${KB_ID}&json=1" "${ADM[@]}" 2>/dev/null || true)
+  status_json=$(curl -sS "$O/status?kb=.tests&json=1" "${ADM[@]}" 2>/dev/null || true)
   read -r completed pending processing failed < <(printf '%s' "$status_json" | python3 -c '
 import sys, json
 try:

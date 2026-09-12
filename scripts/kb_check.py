@@ -13,14 +13,15 @@ files.py `delete()` no-op leak), orphan KB vectors, dead-KB junction rows, and
 more (12 classes). See the class table in the report.
 
 `psycopg2` lives only in the kb-openwebui image, so this tool runs INSIDE that
-container via `docker exec -i kb-openwebui python3 - < scripts/kb_check.py`
-(host script piped to container python on stdin; opts after `-`). For the
-maintenance window (`--maint`) the Makefile stops kb-openwebui and runs a
-throwaway container from the same image with the data dir mounted, so direct
-vector/SQLite writes are safe (no OWUI process contention); that throwaway
-container also joins the owui_net network to reach `postgres`. `psycopg2` is
-lazy-imported so the argparse/classify/report logic imports cleanly on the host
-for unit tests.
+container via `docker exec kb-openwebui python3 /app/scripts/kb_check.py <opts>`
+(repo `scripts/` is bind-mounted read-only at `/app/scripts`, so the script's
+own dir is on sys.path[0] and `import kb_utils` resolves; edits are live, no
+image rebuild). For the maintenance window (`--maint`) the Makefile stops
+kb-openwebui and runs a throwaway container from the same image with the data
+dir mounted, so direct vector/SQLite writes are safe (no OWUI process
+contention); that throwaway container also joins the owui_net network to reach
+`postgres`. `psycopg2` is lazy-imported so the argparse/classify/report logic
+imports cleanly on the host for unit tests.
 
 Default = audit + report + advise (zero mutation). `--purge` consents to purge
 the safe class (3); `--purge --maint` purges the maintenance-window
@@ -40,6 +41,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+import kb_utils  # shared OWUI REST primitives (delete_kb); sibling of this script
 
 DEFAULT_DATA_DIR = "/app/backend/data"
 DEFAULT_OWUI_BASE = "http://127.0.0.1:8080"
@@ -463,20 +466,11 @@ class Stores:
         in try/except: pass, so a vector-cleanup failure is silently swallowed
         by OWUI; the KB-row delete (body `true`) is what we require, and any
         residual vectors surface as class 5b on the next kb-check. Raises on
-        non-200, body != true, or missing admin key."""
+        non-200, body != true, or missing admin key. Delegates to
+        kb_utils.delete_kb (single source of truth for the /delete route)."""
         if not self.admin_key:
             raise RuntimeError("OPENWEBUI_ADMIN_API_KEY unset (prune needs it)")
-        url = "%s/api/v1/knowledge/%s/delete" % (self.owui_base, kb_id)
-        req = urllib.request.Request(url, method="DELETE",
-                                     headers={"Authorization": "Bearer " + self.admin_key})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            if resp.status >= 300:
-                raise RuntimeError("OWUI DELETE KB %s -> HTTP %d" % (kb_id, resp.status))
-            body = resp.read().decode().strip()
-        if body != "true":
-            raise RuntimeError("OWUI DELETE KB %s -> body %r (row not deleted)"
-                               % (kb_id, body[:64]))
-        return True
+        return kb_utils.delete_kb(self.owui_base, self.admin_key, kb_id)
 
     # --- mutating: maintenance tier (OWUI stopped) ------------------------
 

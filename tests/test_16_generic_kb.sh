@@ -14,7 +14,7 @@
 #   2. The generic shell pipeline BY NAME (no gdrive, no GDRIVE_KB_ID):
 #        make kb-bootstrap KB=<name>  (find-or-create + grant user:* read)
 #        make kb-index KB=<name>      (POST /index?dir=<name>&kb_id=<id>)
-#        poll GET /status?dir=<name>  (drain terminal)
+#        poll GET /status?kb=<name>   (drain terminal)
 #        make kb-finalize KB=<name>   (global-terminal guard + flock + REINDEX)
 #
 # Drops a synthetic ./root/gentest/ tree + root/.kb-ignore + root/gentest/.kb-ignore
@@ -119,12 +119,12 @@ else
 fi
 
 # --- poll GET /status until the drain is terminal ------------------------------
-section "poll GET /status (dir=${NAME})"
+section "poll GET /status (kb=${NAME})"
 wait_s="${GENERIC_KB_WAIT:-240}"
 deadline=$(( $(date +%s) + wait_s ))
 completed=0; pending=0; processing=0; failed=0; src_count=0; status_json=""
 while :; do
-  status_json=$(curl -sS "$O/status?dir=${NAME}&kb_id=${KB_ID}&json=1" "${ADM[@]}" 2>/dev/null || true)
+  status_json=$(curl -sS "$O/status?kb=${NAME}&json=1" "${ADM[@]}" 2>/dev/null || true)
   read -r completed pending processing failed src_count < <(printf '%s' "$status_json" | python3 -c '
 import sys, json
 try:

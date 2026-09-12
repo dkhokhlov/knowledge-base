@@ -76,13 +76,17 @@ else
 fi
 
 # in_flight <kb_id> <name>: print pending+processing, or "ERR" on any failure
-# (fail-closed: the caller treats ERR as in-flight -> refuse to dispatch).
+# (fail-closed: the caller treats ERR as in-flight -> refuse to dispatch). The
+# /status fold takes kb=<name> (the gateway resolves name->kb_id server-side);
+# <kb_id> is retained for the /index call only.
 in_flight() {
-  curl -sS --max-time 1200 "${O}/status?kb_id=${1}&dir=${2}&json=1" "${adm[@]}" 2>/dev/null \
+  curl -sS --max-time 1200 "${O}/status?kb=${2}&json=1" "${adm[@]}" 2>/dev/null \
     | python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
+    if "error" in d:
+        raise ValueError
     p, q = d["pending"], d["processing"]   # KeyError if absent -> fail-closed
     if not (isinstance(p, int) and isinstance(q, int) and p >= 0 and q >= 0):
         raise ValueError

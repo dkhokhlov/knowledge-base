@@ -366,6 +366,12 @@ services:
       - WEBUI_FAVICON_URL=${WEBUI_FAVICON_URL:?WEBUI_FAVICON_URL required in .env}
     volumes:
       - ${DATA_ROOT:?DATA_ROOT required in .env}/openwebui:/app/backend/data
+      # Operator tooling (kb_check.py, kb_utils.py) for in-container exec: the
+      # scripts run inside kb-openwebui (they need the image's psycopg2 + the
+      # in-container webui.db + pgvector on owui_net) but are NOT baked into the
+      # image (the build context is docker/open-webui/, outside repo-root
+      # scripts/). :ro + bind-mount = live edits, single source, no rebuild.
+      - ./scripts:/app/scripts:ro
       # Mount the custom favicon over the build SOURCE (not the served path): the
       # Open WebUI startup sync copies FRONTEND_BUILD_DIR/static/* into STATIC_DIR
       # on every start, so mounting the source lets the sync copy our icon in

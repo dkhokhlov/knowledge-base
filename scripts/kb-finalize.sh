@@ -120,12 +120,8 @@ adm=(-H "Authorization: Bearer ${OPENWEBUI_ADMIN_API_KEY}")
 # and REINDEX while the drain is still in flight. src_count is read from /status
 # (the gateway's authoritative source walk), so this stays allowlist-agnostic.
 wait_kb() {
-  local kb="$1" wait_s="$2" kid status_url src_count deadline completed pending processing failed
-  if ! kid=$(KB="$kb" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null); then
-    echo "FAIL  could not resolve KB '$kb' by name (run: make kb-bootstrap KB=$kb ; then retry)" >&2
-    return 1
-  fi
-  status_url="${KB_HOST}/status?kb_id=${kid}&dir=${kb}&json=1"
+  local kb="$1" wait_s="$2" status_url src_count deadline completed pending processing failed
+  status_url="${KB_HOST}/status?kb=${kb}&json=1"
   src_count=$(curl -sS "$status_url" "${adm[@]}" 2>/dev/null | python3 -c '
 import sys, json
 try:
@@ -218,12 +214,15 @@ while :; do
   all_terminal=1; nonterminal=""
   while IFS= read -r d; do
     [ -n "$d" ] || continue
-    kid=$(KB="$d" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null) || { nonterminal="$nonterminal $d(unresolved)"; all_terminal=0; continue; }
-    inflight=$(curl -sS --max-time 120 "${KB_HOST}/status?kb_id=${kid}&dir=${d}&json=1" "${adm[@]}" 2>/dev/null \
+    inflight=$(curl -sS --max-time 120 "${KB_HOST}/status?kb=${d}&json=1" "${adm[@]}" 2>/dev/null \
       | python3 -c '
 import sys, json
 try:
-    d = json.load(sys.stdin); print(int(d.get("pending",0)) + int(d.get("processing",0)))
+    d = json.load(sys.stdin)
+    if "error" in d:
+        print("ERR")
+    else:
+        print(int(d.get("pending",0)) + int(d.get("processing",0)))
 except Exception:
     print("ERR")
 ' 2>/dev/null || echo "ERR")

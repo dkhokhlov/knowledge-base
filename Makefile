@@ -26,7 +26,7 @@ PYTEST   ?= .venv/bin/python -m pytest
         config-ocr \
         gdrive-meta \
         kb-index kb-index-finalize kb-bootstrap kb-status kb-sync kb-desc-backfill \
-        kb-public-read kb-check kb-finalize kb-bm25-init kb-bm25-rollback kb-bm25-check \
+        kb-public-read kb-check kb-finalize kb-delete kb-bm25-init kb-bm25-rollback kb-bm25-check \
         projects-bootstrap \
         clean clean-all clean-test clean-tests clean-backup backup
 
@@ -233,7 +233,7 @@ kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit 
 	  PG_ENV=; NET=; \
 	  if [ "$${VECTOR_DB:-}" = "pgvector" ]; then \
 	    PG_ENV="-e PGVECTOR_USER -e PGVECTOR_PASSWORD -e PGVECTOR_DB -e PGVECTOR_DB_URL"; \
-	    NET="--network $${COMPOSE_PROJECT_NAME:-knowledgebase}_owui_net"; \
+	    NET="--network $${COMPOSE_PROJECT_NAME:-knowledge-base}_owui_net"; \
 	  fi; \
 	  if [ "$${MAINT:-0}" = "1" ] || [ "$${REPAIR:-0}" = "1" ]; then \
 	    echo "==> maintenance window: stopping $$OWUI (direct vector/SQLite writes)"; \
@@ -241,17 +241,17 @@ kb-check: ## Cross-DB health check (OWUI SQLite + pgvector vector store). Audit 
 	    trap 'echo "==> restarting $$OWUI"; docker start $$OWUI >/dev/null' EXIT; \
 	    docker run --pull=never --rm --entrypoint /usr/local/bin/python3 $$NET \
 	      -v "$$(readlink -f "$${DATA_ROOT:-./data}")/openwebui:/app/backend/data" \
-	      -v "$(CURDIR)/scripts/kb_check.py:/app/kb_check.py:ro" \
+	      -v "$(CURDIR)/scripts:/app/scripts:ro" \
 	      $$VENV $$PG_ENV \
 	      kb-open-webui:"$${OPENWEBUI_IMAGE_TAG:?OPENWEBUI_IMAGE_TAG required in .env}" \
-	      /app/kb_check.py $${KB:+--kb $$KB} $${JSON:+--json} $${SHOW_NAMES:+--show-names} \
+	      /app/scripts/kb_check.py $${KB:+--kb $$KB} $${JSON:+--json} $${SHOW_NAMES:+--show-names} \
 	        $${PURGE:+--purge} $${MAINT:+--maint} $${REPAIR:+--repair} $$ROOT_DIRS_ARG \
 	        $$( [ "$${BACKUP:-1}" = "0" ] && echo --no-backup ); \
 	  else \
 	    KEY_ENV=; if [ "$${PURGE:-0}" = "1" ] || [ "$${PRUNE_KB:-0}" = "1" ]; then \
 	      [ -n "$${OPENWEBUI_ADMIN_API_KEY:-}" ] || { echo "MISSING OPENWEBUI_ADMIN_API_KEY in .env.local (PURGE=1 / PRUNE_KB=1 needs it)"; exit 1; }; \
 	      KEY_ENV="-e OPENWEBUI_ADMIN_API_KEY"; fi; \
-	    docker exec -i $$KEY_ENV $$VENV $$PG_ENV $$OWUI python3 - < scripts/kb_check.py \
+	    docker exec $$KEY_ENV $$VENV $$PG_ENV $$OWUI python3 /app/scripts/kb_check.py \
 	      $${KB:+--kb $$KB} $${JSON:+--json} $${SHOW_NAMES:+--show-names} \
 	      $${PURGE:+--purge} $$ROOT_DIRS_ARG \
 	      $$( [ "$${PRUNE_KB:-0}" = "1" ] && echo --prune-kb ) \
@@ -266,9 +266,9 @@ kb-bm25-check: ## Release gate for patch 10 + patch 11: probe the ParadeDB pg_se
 	    echo "FAIL  VECTOR_DB=$${VECTOR_DB:-<unset>}: kb-bm25-check needs VECTOR_DB=pgvector." >&2; exit 1; \
 	  fi; \
 	  PG_ENV="-e PGVECTOR_USER -e PGVECTOR_PASSWORD -e PGVECTOR_DB -e PGVECTOR_DB_URL"; \
-	  docker exec -i -e VECTOR_DB $$PG_ENV $$OWUI python3 - < scripts/kb_check.py --bm25-gate
+	  docker exec -e VECTOR_DB $$PG_ENV $$OWUI python3 /app/scripts/kb_check.py --bm25-gate
 
-kb-status: ## Show index/sync status via api-gateway GET /status as a JSON ARRAY (one element per KB: dir, kb_id, source_count, indexed_count, pending/processing/failed, started_at, runtime) WITHOUT the per-file listings. KB=<name> selects one KB; no KB= shows EVERY top-level non-dot subdir of ./root/. FILES=1 keeps the indexed_files/pending_files/failed_files listings in each element. The KB is resolved BY NAME; no GDRIVE_KB_ID.
+kb-status: ## Show index/sync status via api-gateway GET /status as a JSON ARRAY (one element per KB: name, kb_id, source_count, indexed_count, pending/processing/failed, started_at, runtime) WITHOUT the per-file listings. KB=<name> selects one KB (the gateway resolves the name to the kb_id); no KB= shows EVERY top-level non-dot subdir of ./root/. FILES=1 keeps the indexed_files/pending_files/failed_files listings in each element. The KB is resolved BY NAME server-side; no GDRIVE_KB_ID, no client-side kb-bootstrap --resolve.
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
 	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
 	  H=$${KB_HOST:?KB_HOST not set -- export KB_HOST=http://host:port (see .env.template)}; \
@@ -284,13 +284,10 @@ kb-status: ## Show index/sync status via api-gateway GET /status as a JSON ARRAY
 	      echo "FAIL  no top-level non-dot subdirs under ./root/ (run: make kb-bootstrap)" >&2; exit 1; \
 	    fi; \
 	  fi; \
-	  _kid() { KB="$$1" ./scripts/kb-bootstrap.sh --resolve 2>/dev/null \
-	    || { echo "FAIL  could not resolve KB '$$1' by name (run: make kb-bootstrap KB=$$1)" >&2; return 1; }; }; \
 	  _out=$$(mktemp); rc=0; \
 	  while IFS= read -r name; do \
 	    [ -n "$$name" ] || continue; \
-	    KID=$$(_kid "$$name") || { rc=1; continue; }; \
-	    body=$$(curl -sS "$$H/status?kb_id=$$KID&dir=$$name&json=1" -H "Authorization: Bearer $$KB_API_KEY"); \
+	    body=$$(curl -sS "$$H/status?kb=$$name&json=1" -H "Authorization: Bearer $$KB_API_KEY" 2>/dev/null) || { echo "FAIL  could not reach /status for KB '$$name' (is OWUI + the gateway running?)" >&2; rc=1; continue; }; \
 	    if [ -n "$${FILES:-}" ]; then \
 	      printf '%s\n' "$$body" >> "$$_out"; \
 	    else \
@@ -301,6 +298,12 @@ kb-status: ## Show index/sync status via api-gateway GET /status as a JSON ARRAY
 	  if [ $$rc -ne 0 ]; then rm -f "$$_out"; exit 1; fi; \
 	  python3 -c 'import sys,json; print(json.dumps([json.loads(l) for l in sys.stdin if l.strip()], indent=2, ensure_ascii=False))' < "$$_out"; \
 	  rm -f "$$_out"
+
+kb-delete: ## Delete ONE OWUI KB by id (admin; irreversible; no backup). KB=<id> required (get it from: make kb-status, or /kb kbs). ABORTS with a message if the target KB has an in-flight index drain (gateway /status pending+processing>0) -- complete the drain first (make kb-index-finalize KB=<name>). OWUI REST DELETE /api/v1/knowledge/{id}/delete (response body must be `true`); refuses if the id is not found (404). Residual vectors surface as class 5b on the next `make kb-check`. Emits pretty JSON in ALL cases (success/refused/not-found/error). Needs OWUI running (reachable at KB_HOST). For batch, loop in shell. Operator-only -- NOT in the /kb skill (agent-scoped, read-only).
+	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }
+	@set -a; . ./.env; . ./.env.local 2>/dev/null || true; set +a; \
+	  KB_HOST="$${KB_HOST:-}" OPENWEBUI_ADMIN_API_KEY="$${OPENWEBUI_ADMIN_API_KEY:-}" \
+	    python3 scripts/kb_delete.py --kb "$${KB:-}"
 
 kb-finalize: ## Finalize a drain: rebuild the pgvector ivfflat vector index so freshly-embedded vectors become queryable (pgvector is the only supported backend; fails loud on any other VECTOR_DB). KB=<name> selects the drain to wait on with --wait; no KB= waits on EVERY top-level non-dot subdir of ./root/. Run AFTER the drain is terminal (or use kb-index-finalize to dispatch + wait). REINDEX is INSTANCE-WIDE on the shared document_chunk table, so this first requires EVERY KB under ./root/ terminal + acquires a host lock (serializes concurrent finalizes). Logs the REINDEX duration. Named "finalize" not "reindex": on a fresh drain the vectors were never queryable (ivfflat folds post-build rows in only on REINDEX), and to avoid collision with the gateway reindex_all (POST /index?reindex_all=1 RE-PROCESSES files — a different op at a different layer).
 	@test -f .env.local || { echo "MISSING .env.local — run: make bootstrap"; exit 1; }

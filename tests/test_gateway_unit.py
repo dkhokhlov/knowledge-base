@@ -809,10 +809,13 @@ class TestValidateDir(unittest.TestCase):
 
 
 class TestStatusRoute(unittest.TestCase):
-    """GET /status?json=1: per-file size + top-level drain runtime/started_at.
-    Mocks owui.list_file_status + walk_source + owui._admin_key + app.time.time.
-    Uses a real temp KB_SOURCE_ROOT/gdrive so _validate_dir's isdir + realpath
-    checks pass (walk_source itself is mocked). No stack needed."""
+    """GET /status?kb=<name|uuid>&json=1: the folded single-param form. A UUID
+    is used as kb_id + resolved to the name via owui.get_kb; a name is resolved
+    to kb_id via owui.resolve_kb_id. The source walk is OPTIONAL (runs only when
+    KB_SOURCE_ROOT/<name> exists). Mocks owui.get_kb / owui.resolve_kb_id /
+    owui.list_file_status / walk_source / owui._admin_key / app.time.time. Uses
+    a real temp KB_SOURCE_ROOT/gdrive so the walk's isdir gate passes for
+    `gdrive` (walk_source itself is mocked). No stack needed."""
 
     KB = "550e8400-e29b-41d4-a716-446655440000"
     T0 = 1788069380  # a fixed created_at baseline (unix seconds)
@@ -829,25 +832,67 @@ class TestStatusRoute(unittest.TestCase):
             shutil.rmtree(self._src_root, ignore_errors=True)
         self.addCleanup(_rm)
 
-    def _run(self, file_status, now=None):
-        """Invoke Handler._status(json=1) with mocked dependencies. Returns the
-        summary dict captured by _FakeHandler._ok."""
+    def _run(self, file_status, kb=None, now=None, kb_name="gdrive",
+             get_kb_ret=None, resolve_ret=None, walk_entries=None,
+             expect_walk=True):
+        """Invoke Handler._status(json=1) with mocked dependencies. `kb` defaults
+        to the UUID (the get_kb path); pass a non-UUID to exercise resolve_kb_id.
+        get_kb_ret / resolve_ret override the resolution return (an Exception
+        instance makes the mock raise). Returns the summary dict captured by
+        _FakeHandler._ok. expect_walk=False asserts walk_source was NOT called
+        (the sourceless-KB path)."""
+        if kb is None:
+            kb = self.KB
         if now is None:
             now = self.T0 + 100
         h = _FakeHandler({}, auth="Bearer caller-key")
-        qs = "kb_id=%s&dir=gdrive&json=1" % self.KB
+        qs = "kb=%s&json=1" % kb
+        gkb = {"name": kb_name} if get_kb_ret is None else get_kb_ret
+        rid = self.KB if resolve_ret is None else resolve_ret
+        ws_ret = [{"path": "x"}] if walk_entries is None else walk_entries
         patches = [
             mock.patch.object(owui, "_admin_key", return_value="admin-key"),
-            mock.patch.object(app, "walk_source", return_value=[{"path": "x"}]),
             mock.patch.object(owui, "list_file_status", return_value=file_status),
             mock.patch.object(app.time, "time", return_value=now),
+            mock.patch.object(owui, "get_kb",
+                              **({"side_effect": gkb} if isinstance(gkb, Exception)
+                                 else {"return_value": gkb})),
+            mock.patch.object(owui, "resolve_kb_id",
+                              **({"side_effect": rid} if isinstance(rid, Exception)
+                                 else {"return_value": rid})),
         ]
-        for p in patches:
+        ws = mock.patch.object(app, "walk_source", return_value=ws_ret)
+        patches.append(ws)
+        ws_mock = ws.start()
+        for p in patches[:-1]:  # the rest (ws already started)
             p.start()
         self.addCleanup(lambda: [p.stop() for p in patches])
         app.Handler._status(h, None, qs)
         self.assertEqual(h.sent[0], "ok")
+        if not expect_walk:
+            ws_mock.assert_not_called()
         return h.sent[1]
+
+    def _run_raises(self, qs, get_kb_ret=None, resolve_ret=None):
+        """Invoke _status expecting a GatewayError; returns the exception."""
+        gkb = get_kb_ret if get_kb_ret is not None else {"name": "gdrive"}
+        rid = resolve_ret if resolve_ret is not None else self.KB
+        h = _FakeHandler({}, auth="Bearer caller-key")
+        patches = [
+            mock.patch.object(owui, "_admin_key", return_value="admin-key"),
+            mock.patch.object(owui, "get_kb",
+                              **({"side_effect": gkb} if isinstance(gkb, Exception)
+                                 else {"return_value": gkb})),
+            mock.patch.object(owui, "resolve_kb_id",
+                              **({"side_effect": rid} if isinstance(rid, Exception)
+                                 else {"return_value": rid})),
+        ]
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        with self.assertRaises(app.GatewayError) as cm:
+            app.Handler._status(h, None, qs)
+        return cm.exception
 
     def test_size_and_runtime_fields(self):
         fs = [
@@ -889,6 +934,55 @@ class TestStatusRoute(unittest.TestCase):
         d = self._run(fs, now=self.T0 + 50)
         self.assertEqual(d["started_at"], self.T0)
         self.assertEqual(d["runtime"], 50)
+
+    # --- fold: kb=<uuid> resolves the name via owui.get_kb -------------------
+
+    def test_uuid_resolves_name_and_walks(self):
+        # kb=<uuid>: kb_id is the uuid; get_kb yields the name; the source walk
+        # runs (KB_SOURCE_ROOT/gdrive exists) -> source_count from the walk.
+        d = self._run([], kb=self.KB, kb_name="gdrive")
+        self.assertEqual(d["name"], "gdrive")
+        self.assertEqual(d["kb_id"], self.KB)
+        self.assertEqual(d["source_count"], 1)  # default walk_entries = 1 file
+
+    # --- fold: kb=<name> resolves the id via owui.resolve_kb_id --------------
+
+    def test_name_resolves_id(self):
+        # kb=<name>: resolve_kb_id yields the kb_id; name is the query value.
+        d = self._run([], kb="gdrive", kb_name="gdrive")
+        self.assertEqual(d["name"], "gdrive")
+        self.assertEqual(d["kb_id"], self.KB)
+
+    def test_sourceless_kb_skips_walk_no_400(self):
+        # A KB whose name has NO source dir (project-memory KBs) skips the walk
+        # (source_count 0) and is NOT rejected -- the fold's key fix. Use a name
+        # with no subdir under KB_SOURCE_ROOT.
+        d = self._run([], kb="projects-mem", kb_name="projects-mem",
+                      expect_walk=False)
+        self.assertEqual(d["source_count"], 0)
+        self.assertEqual(d["name"], "projects-mem")
+        self.assertEqual(d["kb_id"], self.KB)
+
+    # --- fold: error mapping -------------------------------------------------
+
+    def test_missing_kb_param_400(self):
+        e = self._run_raises("json=1")  # no kb
+        self.assertEqual(e.status, 400)
+
+    def test_unknown_uuid_404(self):
+        e = self._run_raises("kb=%s&json=1" % self.KB,
+                             get_kb_ret=owui.OwuiError("KB not found", code=404))
+        self.assertEqual(e.status, 404)
+
+    def test_unknown_name_404(self):
+        e = self._run_raises("kb=no-such-name&json=1",
+                             resolve_ret=owui.OwuiError("KB not found", code=404))
+        self.assertEqual(e.status, 404)
+
+    def test_ambiguous_name_409(self):
+        e = self._run_raises("kb=dup&json=1",
+                             resolve_ret=owui.OwuiError("ambiguous", code=409))
+        self.assertEqual(e.status, 409)
 
     def test_human_size_helper(self):
         self.assertEqual(app._human_size(None), "-")

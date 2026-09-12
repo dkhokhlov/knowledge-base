@@ -365,6 +365,59 @@ def upload_file(admin_key, kb_id, file_hash, directory_id, filename, data_bytes,
     return data
 
 
+def get_kb(admin_key, kb_id):
+    """GET /api/v1/knowledge/{id} -> the KB dict (carries `name`). 404 ->
+    OwuiError(code=404); other non-200 -> OwuiError(code); transport (no code) ->
+    OwuiError(None -> 503). Used by /status to resolve a UUID `kb` param to the
+    KB name (for the optional source walk + the response label) without a
+    client-side name->id step."""
+    code, data, txt = _j("GET", "/api/v1/knowledge/%s" % kb_id, admin_key,
+                         timeout=_index_timeout())
+    if code == 200 and isinstance(data, dict):
+        return data
+    if code == 404:
+        raise OwuiError("KB %s not found" % kb_id, code=404)
+    raise OwuiError("get_kb %s -> HTTP %s: %s" % (kb_id, code, (txt or "")[:200]),
+                    code=code if code else None)
+
+
+def resolve_kb_id(admin_key, name):
+    """Resolve a KB name to its id via paginated GET /api/v1/knowledge/?page=N
+    (mirrors kb-bootstrap.sh's matches_for: page until items empty or `total`
+    covered, cap 1000 pages). 0 matches -> OwuiError(404); >1 -> OwuiError(409)
+    (ambiguous name); exactly 1 -> return the id. Used by /status for a non-UUID
+    `kb` param."""
+    seen = []
+    total_seen = 0
+    page = 1
+    while True:
+        code, data, txt = _j("GET", "/api/v1/knowledge/?page=%d" % page, admin_key,
+                             timeout=_index_timeout())
+        if code != 200 or not isinstance(data, dict):
+            raise OwuiError("resolve_kb_id list page %d -> HTTP %s: %s"
+                            % (page, code, (txt or "")[:200]),
+                            code=code if code else None)
+        items = data.get("items") or []
+        for k in items:
+            if k.get("name") == name:
+                seen.append(k.get("id"))
+        if len(seen) > 1:
+            break  # ambiguous; no need to keep paging
+        total_seen += len(items)
+        total = data.get("total")
+        if not items or (total is not None and total_seen >= total):
+            break
+        page += 1
+        if page > 1000:
+            break
+    if not seen:
+        raise OwuiError("KB %r not found" % name, code=404)
+    if len(seen) > 1:
+        raise OwuiError("ambiguous KB name %r: %s" % (name, ", ".join(seen)),
+                        code=409)
+    return seen[0]
+
+
 def list_file_status(admin_key, kb_id):
     """GET /api/v1/files/?content=false&page=N, paged until `total` is covered
     (OWUI hardcodes PAGE_SIZE=50). Filters items by

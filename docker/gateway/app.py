@@ -746,11 +746,19 @@ class Handler(BaseHTTPRequestHandler):
                   "errors": errors, "ok": len(errors) == 0})
 
     def _status(self, identity, qs):
-        """GET /status?kb_id=<id>&dir=<name>[&file=<relpath>][&json=1].
-        Read-only. `dir` is the KB's top-level subdir under the source root (the
-        walk root is KB_SOURCE_ROOT/dir). Reports real per-file progress from
-        OWUI file.data.status
-        (via GET /files/?content=false, paged). OWUI's status vocabulary:
+        """GET /status?kb=<name|uuid>[&file=<relpath>][&json=1].
+        Read-only. `kb` is the KB identifier — a UUID or a KB name. A UUID is
+        used as the kb_id directly and resolved to the name via
+        GET /api/v1/knowledge/{id}; a name is resolved to the kb_id via paged
+        GET /api/v1/knowledge/ (unique-or-fail). The per-file progress
+        (pending/processing/completed/failed + the file listings) is kb_id-keyed
+        via OWUI file.data.status (GET /files/?content=false, paged) and is
+        independent of any source directory. The source walk
+        (walk_source(KB_SOURCE_ROOT/<name>)) is OPTIONAL — it runs only when
+        <name> has a real source dir under KB_SOURCE_ROOT, yielding source_count
+        (kb-finalize's terminal `accounted >= source_count` check); a KB with no
+        source dir (e.g. project-memory KBs created by agents) gets source_count
+        0 and NO 400. OWUI's status vocabulary:
           pending    = extraction phase (the slow GPU/OCR work) or queued —
                        extraction does not update status until it finishes, so
                        a file mid-OCR reads pending (the GPU-busy signal);
@@ -759,30 +767,46 @@ class Handler(BaseHTTPRequestHandler):
           completed  = extracted + embedded in the KB collection + linked;
           failed     = error at any stage (error string in data.error).
         Re-derived live; no stored last-run state. Uses the gateway's held
-        admin key for the file scan (GET /files/ is user-scoped — a read-scoped
-        caller key sees only its own files, but the KB files were uploaded by
-        the admin); the caller's KB_API_KEY is authorization only."""
-        kb_id = _qs(qs, "kb_id", "")
-        if not kb_id:
-            raise GatewayError(400, "kb_id required (query kb_id)")
+        admin key for the file scan + the KB lookup (GET /files/ and
+        /api/v1/knowledge/ are user-scoped — a read-scoped caller key sees only
+        its own, but the KB files were uploaded by the admin); the caller's
+        KB_API_KEY is authorization only."""
+        kb = _qs(qs, "kb", "").strip()
+        if not kb:
+            raise GatewayError(400, "kb required (query kb: a KB name or UUID)")
         as_json = _qs_bool(qs, "json", False)
         relpath = _qs(qs, "file", "")
         admin_key = owui._admin_key()  # OwuiError -> 503 if unset
+        # Resolve kb -> (kb_id, name). _is_uuid: use the id as-is + look up the
+        # name; otherwise treat kb as the name + resolve the id (unique-or-fail).
+        try:
+            if _is_uuid(kb):
+                kb_id = kb
+                name = (owui.get_kb(admin_key, kb_id) or {}).get("name") or ""
+            else:
+                name = kb
+                kb_id = owui.resolve_kb_id(admin_key, name)
+        except owui.OwuiError as e:
+            raise GatewayError(e.code or 503, str(e))
         kb_source_root = os.environ.get("KB_SOURCE_ROOT", "/kb-source")
-        dir = _validate_dir(qs, kb_source_root)
-        root = os.path.join(kb_source_root, dir)
         allow = _parse_allow(os.environ.get("KB_ALLOW", ",".join(sorted(DEFAULT_ALLOW))))
         max_size = _parse_size(os.environ.get("KB_MAX_SIZE", "100mb"))
-        files = walk_source(root, allow, max_size)
-        files = apply_kb_ignores(files, dir, kb_source_root)  # additive .kb-ignore deny-list
-        source_count = len(files)
+        # Optional source walk: only when a real source dir exists for the name.
+        # Project-memory KBs (no source dir) skip this — source_count 0, no 400.
+        source_count = 0
+        if name:
+            root = os.path.join(kb_source_root, name)
+            if os.path.isdir(root):
+                files = walk_source(root, allow, max_size)
+                files = apply_kb_ignores(files, name, kb_source_root)  # .kb-ignore deny-list
+                source_count = len(files)
         file_status = owui.list_file_status(admin_key, kb_id)
         completed = sum(1 for s in file_status if s.get("status") == "completed")
         pending = sum(1 for s in file_status if s.get("status") == "pending")
         processing = sum(1 for s in file_status if s.get("status") == "processing")
         failed = [s for s in file_status if s.get("status") == "failed"]
-        log.info("/status kb=%s completed=%d pending=%d processing=%d failed=%d source=%d",
-                 kb_id, completed, pending, processing, len(failed), source_count)
+        log.info("/status kb=%s name=%s completed=%d pending=%d processing=%d failed=%d source=%d",
+                 kb_id, name, completed, pending, processing, len(failed), source_count)
         in_flight = pending + processing
         per_file = [{"filename": s.get("filename"), "status": s.get("status"),
                      "size": s.get("size"), "error": s.get("error")}
@@ -807,7 +831,7 @@ class Handler(BaseHTTPRequestHandler):
                    "failed_files": [{"filename": f.get("filename"),
                                      "size": f.get("size"),
                                      "error": f.get("error")} for f in failed],
-                   "dir": dir, "kb_id": kb_id,
+                   "name": name, "kb_id": kb_id,
                    "source_count": source_count,
                    "indexed_count": completed,
                    "pending": pending,
@@ -819,7 +843,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._ok(summary)
         # human-readable: glyphs (✓/✗/○), no emoji, no ETA (no daemon). pending
         # = GPU/OCR in flight (the busy signal); processing = embed + link.
-        lines = ["%-18s: %d allowlisted files" % ("dir (%s)" % dir, source_count),
+        lines = ["%-18s: %d allowlisted files" % ("name (%s)" % name, source_count),
                  "indexed (OWUI KB) : %d completed (searchable)" % completed,
                  "pending (OWUI)    : %d in extraction (OCR/GPU)" % pending,
                  "processing (OWUI) : %d embedding + linking" % processing,
@@ -1193,12 +1217,13 @@ OPENAPI_SPEC = {
             "summary": "KB index status (read; read-scoped key works)",
             "security": [{"bearerAuth": []}],
             "parameters": [
-                {"name": "kb_id", "in": "query", "required": True, "schema": {"type": "string", "format": "uuid"}},
-                {"name": "dir", "in": "query", "required": True, "schema": {"type": "string"},
-                 "description": "KB top-level subdir under the source root (KB_SOURCE_ROOT); single segment, no slash or wildcard"},
+                {"name": "kb", "in": "query", "required": True, "schema": {"type": "string"},
+                 "description": "KB identifier: a KB name or a UUID. The gateway resolves name<->id; per-file progress is kb_id-keyed (independent of any source dir). The source walk runs only when KB_SOURCE_ROOT/<name> exists (source_count 0 otherwise; no 400 for KBs with no source dir)."},
                 {"name": "file", "in": "query", "required": False, "schema": {"type": "string"}},
                 {"name": "json", "in": "query", "schema": {"type": "boolean", "default": False}}],
-            "responses": {"200": {"description": "status (text or json)"}}}},
+            "responses": {"200": {"description": "status (text or json)"},
+                          "404": {"description": "unknown KB name/id"},
+                          "409": {"description": "ambiguous KB name"}}}},
         "/admin/users": {"post": {"summary": "Admin user provisioning (admin only)", "security": [{"bearerAuth": []}]}},
         "/memory/whoami": {"get": {"summary": "Caller identity", "security": [{"bearerAuth": []}]}},
         "/memory/groups": {"get": {"summary": "List memory groups", "security": [{"bearerAuth": []}]}},

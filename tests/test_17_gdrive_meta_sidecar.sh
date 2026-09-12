@@ -142,12 +142,12 @@ for e in (d.get("errors") or [])[:20]:
 fi
 
 # --- poll GET /status until the drain reaches a terminal state ---------------
-section "poll GET /status (real drain, dir=.tests-meta-sidecar)"
+section "poll GET /status (real drain, kb=.tests-meta-sidecar)"
 wait_s="${META_SIDECAR_WAIT:-180}"
 deadline=$(( $(date +%s) + wait_s ))
 completed=0; pending=0; processing=0; failed=0
 while :; do
-  read -r completed pending processing failed < <(curl -sS "$G/status?dir=.tests-meta-sidecar&kb_id=${KB_ID}&json=1" "${ADM[@]}" 2>/dev/null | python3 -c '
+  read -r completed pending processing failed < <(curl -sS "$G/status?kb=.tests-meta-sidecar&json=1" "${ADM[@]}" 2>/dev/null | python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)

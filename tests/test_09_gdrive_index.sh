@@ -130,7 +130,7 @@ wait_s="${GDRIVE_TEST_WAIT:-2400}"
 deadline=$(( $(date +%s) + wait_s ))
 completed=0; pending=0; processing=0; failed=0; status_json=""
 while :; do
-  status_json=$(curl -sS "$O/status?kb_id=${GDRIVE_KB_ID}&dir=gdrive&json=1" "${ADM[@]}" 2>/dev/null || true)
+  status_json=$(curl -sS "$O/status?kb=gdrive&json=1" "${ADM[@]}" 2>/dev/null || true)
   read -r completed pending processing failed < <(printf '%s' "$status_json" | python3 -c '
 import sys, json
 try:

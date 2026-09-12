@@ -22,10 +22,12 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
 import kb_check as kc  # noqa: E402
+import kb_utils  # noqa: E402
 
 
 # --- FakeStores (in-memory; overrides every Stores read + mutate method) --
@@ -1801,6 +1803,32 @@ class TestPruneMainGates(unittest.TestCase):
             rc = kc.main(["--data-dir", self.tmp, "--prune-kb"])
         self.assertEqual(rc, 2)
         self.assertIn("OPENWEBUI_ADMIN_API_KEY", "\n".join(cm.output))
+
+
+class TestDeleteKbDelegation(unittest.TestCase):
+    """Stores.owui_delete_kb delegates to kb_utils.delete_kb (single source of
+    truth for the /delete route). The no-admin-key guard still fires before the
+    delegation (preserves the kb_check message). FakeStores + the prune stub
+    override owui_delete_kb, so they bypass this path (their tests stay green)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        import shutil
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def test_delegates_to_kb_utils_delete_kb(self):
+        s = kc.Stores(self.tmp, "http://owui.base", "ADM")
+        with mock.patch.object(kb_utils, "delete_kb", return_value=True) as m:
+            self.assertTrue(s.owui_delete_kb("kid-1"))
+        m.assert_called_once_with("http://owui.base", "ADM", "kid-1")
+
+    def test_no_admin_key_raises_before_delegate(self):
+        s = kc.Stores(self.tmp, "http://owui.base", "")
+        with mock.patch.object(kb_utils, "delete_kb", return_value=True) as m:
+            with self.assertRaises(RuntimeError) as cm:
+                s.owui_delete_kb("kid-1")
+        self.assertIn("OPENWEBUI_ADMIN_API_KEY", str(cm.exception))
+        m.assert_not_called()
 
 
 if __name__ == "__main__":
