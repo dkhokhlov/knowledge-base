@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v4.0.0] — 2026-09-12
+
 ### Added
 
 - **KB source attribute (in the `description`).** Each KB now carries a
@@ -143,9 +145,6 @@ project adheres to [Semantic Versioning](https://semver.org/).
   rule. KB identity is now enforced as the top dir name only. (The per-file
   `path` field — the OWUI sync/diff directory key — is unchanged; a different
   concept.) `_normalize_path` is removed; `_validate_dir` replaces it.
-- **test_17 fixture moved** to `root/.tests-meta-sidecar/` (a top-level dot-dir)
-  so it indexes via `dir=.tests-meta-sidecar` (single segment) instead of the
-  removed `dir=.tests&path=meta-sidecar`.
 
 ## [v3.0.0] — 2026-09-02
 
@@ -1286,7 +1285,8 @@ clean-state e2e harness.
 Initial tagged release. MCP-based Graphiti memory stack (memory extraction
 non-functional with Ollama — fixed in v1.1.0).
 
-[Unreleased]: https://github.com/dkhokhlov/knowledgebase/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/dkhokhlov/knowledge-base/compare/v4.0.0...HEAD
+[v4.0.0]: https://github.com/dkhokhlov/knowledge-base/releases/tag/v4.0.0
 [v1.5.0]: https://github.com/dkhokhlov/knowledgebase/releases/tag/v1.5.0
 [v1.4.0]: https://github.com/dkhokhlov/knowledgebase/releases/tag/v1.4.0
 [v1.1.0]: https://github.com/dkhokhlov/knowledgebase/releases/tag/v1.1.0
